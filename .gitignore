@@ -1,3 +1,39 @@
 .env
 .venv
 venv/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+gather_data.db
+
+# Log files
+*.log
+discord.log
+logs/
+
+# Environment files (additional)
+.env.local
+.env.production
+.env.development
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.temp

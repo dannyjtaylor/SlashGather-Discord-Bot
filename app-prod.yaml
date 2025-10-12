@@ -1,0 +1,15 @@
+runtime: python39
+
+env_variables:
+  DISCORD_TOKEN: "production_token"
+  DATABASE_URL: "cloud_sql_connection_string"
+  ENVIRONMENT: "production"
+
+automatic_scaling:
+  min_instances: 1
+  max_instances: 10 #?
+  target_cpu_utilization: 0.6
+
+handlers:
+- url: /.*
+  script: auto
