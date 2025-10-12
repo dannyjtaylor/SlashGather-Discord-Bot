@@ -747,7 +747,7 @@ async def gather(interaction: discord.Interaction):
     )
 
     embed.add_field(name="Value", value=f"**${final_value:.2f}**", inline=True)
-    embed.add_field(name="Ripeness", value=f"{ripeness["name"]}", inline=True)
+    embed.add_field(name="Ripeness", value=f"{ripeness['name']}", inline=True)
     embed.add_field(name="GMO?", value=f"{'Yes ✨' if is_gmo else 'No'}", inline=False)
     # add a line to show [username] in [month]
     embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
