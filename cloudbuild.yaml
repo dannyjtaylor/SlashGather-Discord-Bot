@@ -14,7 +14,11 @@ steps:
           --min-instances 1 \
           --max-instances 2
 
-# Substitution variables - set these in Cloud Build trigger test
+# Add these options to fix the logging issue
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+# Substitution variables - set these in Cloud Build trigger
 substitutions:
   _DISCORD_TOKEN: 'your_discord_token_here'
   _DATABASE_URL: 'your_database_url_here'
