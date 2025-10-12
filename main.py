@@ -902,4 +902,35 @@ async def russian(
 
 
 #END
-bot.run(token, log_handler=handler, log_level=logging.DEBUG)
+# Cloud Run compatibility - add simple HTTP server
+import threading
+import time
+import os
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def start_http_server():
+    """Start a simple HTTP server for Cloud Run health checks"""
+    port = int(os.environ.get('PORT', 8080))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    print(f"HTTP server listening on port {port}")
+    server.serve_forever()
+
+if __name__ == "__main__":
+    # Start HTTP server in a separate thread
+    http_thread = threading.Thread(target=start_http_server)
+    http_thread.daemon = True
+    http_thread.start()
+    
+    # Start the Discord bot
+    bot.run(token, log_handler=handler, log_level=logging.DEBUG)
