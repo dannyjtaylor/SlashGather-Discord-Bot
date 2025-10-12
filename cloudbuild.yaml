@@ -14,7 +14,7 @@ steps:
           --min-instances 1 \
           --max-instances 2
 
-# Substitution variables - set these in Cloud Build trigger
+# Substitution variables - set these in Cloud Build trigger test
 substitutions:
   _DISCORD_TOKEN: 'your_discord_token_here'
   _DATABASE_URL: 'your_database_url_here'
