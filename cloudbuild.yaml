@@ -1,0 +1,20 @@
+steps:
+  # Build and deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud run deploy slashgather-bot \
+          --source . \
+          --region us-central1 \
+          --platform managed \
+          --allow-unauthenticated \
+          --set-env-vars DISCORD_TOKEN=$$DISCORD_TOKEN,DATABASE_URL=$$DATABASE_URL,ENVIRONMENT=production \
+          --min-instances 1 \
+          --max-instances 2
+
+# Substitution variables - set these in Cloud Build trigger
+substitutions:
+  _DISCORD_TOKEN: 'your_discord_token_here'
+  _DATABASE_URL: 'your_database_url_here'
