@@ -766,6 +766,7 @@ async def balance(interaction: discord.Interaction):
 
 # gambling commands
 # russian roulette
+
 @bot.tree.command(name="russian", description="Play Russian Roulette!")
 async def russian(
     interaction: discord.Interaction,
