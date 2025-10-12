@@ -902,6 +902,7 @@ async def russian(
 
 
 #END
+
 # Cloud Run compatibility - add simple HTTP server
 import threading
 import time
@@ -921,16 +922,36 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
 def start_http_server():
     """Start a simple HTTP server for Cloud Run health checks"""
-    port = int(os.environ.get('PORT', 8080))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    print(f"HTTP server listening on port {port}")
-    server.serve_forever()
+    try:
+        port = int(os.environ.get('PORT', 8080))
+        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+        print(f"HTTP server listening on port {port}")
+        server.serve_forever()
+    except Exception as e:
+        print(f"HTTP server error: {e}")
+
+def start_discord_bot():
+    """Start the Discord bot with error handling"""
+    try:
+        print("Starting Discord bot...")
+        print(f"Environment: {os.environ.get('ENVIRONMENT', 'unknown')}")
+        print(f"Database URL set: {'Yes' if os.environ.get('DATABASE_URL') else 'No'}")
+        print(f"Discord Token set: {'Yes' if os.environ.get('DISCORD_TOKEN') else 'No'}")
+        
+        bot.run(token, log_handler=handler, log_level=logging.DEBUG)
+    except Exception as e:
+        print(f"Discord bot error: {e}")
+        # Keep the process alive even if bot fails
+        while True:
+            time.sleep(60)
 
 if __name__ == "__main__":
+    print("Starting SlashGather Discord Bot...")
+    
     # Start HTTP server in a separate thread
     http_thread = threading.Thread(target=start_http_server)
     http_thread.daemon = True
     http_thread.start()
     
     # Start the Discord bot
-    bot.run(token, log_handler=handler, log_level=logging.DEBUG)
+    start_discord_bot()

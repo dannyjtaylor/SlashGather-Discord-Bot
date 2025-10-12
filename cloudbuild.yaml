@@ -10,7 +10,7 @@ steps:
           --region us-central1 \
           --platform managed \
           --allow-unauthenticated \
-          --set-env-vars DISCORD_TOKEN=$$DISCORD_TOKEN,DATABASE_URL=$$DATABASE_URL,ENVIRONMENT=production \
+          --set-env-vars DISCORD_TOKEN=$$_DISCORD_TOKEN,DATABASE_URL=$$_DATABASE_URL,ENVIRONMENT=production \
           --min-instances 1 \
           --max-instances 2
 
