@@ -20,7 +20,13 @@ else:
 
 load_dotenv()
 init_database()
-token = os.getenv('DISCORD_DEV_TOKEN')
+
+# Load the correct token based on environment
+if environment == 'production':
+    token = os.getenv('DISCORD_TOKEN')
+else:
+    token = os.getenv('DISCORD_DEV_TOKEN')
+
 handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w')
 intents = discord.Intents.default()
 intents.message_content = True
