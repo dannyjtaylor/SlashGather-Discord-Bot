@@ -944,6 +944,8 @@ def start_discord_bot():
         print(f"Environment: {os.environ.get('ENVIRONMENT', 'unknown')}")
         print(f"Database URL set: {'Yes' if os.environ.get('DATABASE_URL') else 'No'}")
         print(f"Discord Token set: {'Yes' if os.environ.get('DISCORD_TOKEN') else 'No'}")
+        print(f"Token length: {len(token) if token else 'None'}")
+        print("About to call bot.run()...")
         
         bot.run(token, log_handler=handler, log_level=logging.DEBUG)
     except Exception as e:
