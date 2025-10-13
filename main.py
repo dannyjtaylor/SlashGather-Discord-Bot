@@ -10,15 +10,15 @@ import time
 import asyncio
 import uuid
 
+# Load environment variables FIRST
+load_dotenv()
 
-environment = os.getenv('ENVIRONMENT', 'dvelopment')
+environment = os.getenv('ENVIRONMENT', 'development')
 if environment == 'production':
     from databaseprod import init_database, get_user_balance, update_user_balance, get_user_last_gather_time, update_user_last_gather_time, increment_forage_count, add_user_item, add_ripeness_stat  # Add this line
 else:
     from databasedev import init_database, get_user_balance, update_user_balance, get_user_last_gather_time, update_user_last_gather_time, increment_forage_count, add_user_item, add_ripeness_stat  # Add this line
 
-
-load_dotenv()
 init_database()
 
 # Load the correct token based on environment
