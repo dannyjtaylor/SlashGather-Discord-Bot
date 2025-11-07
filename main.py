@@ -196,7 +196,7 @@ class RouletteGame:
         if player_id in self.players:
             self.players[player_id]["alive"] = False
             self.pot += self.players[player_id]["current_stake"]
-        # # print the player out
+        #print the player out
         # print(f"{self.players[player_id]['name']} has been eliminated!")
 
     #when playersl live, increase their number of rounds
