@@ -16,5 +16,6 @@ steps:
           --max-instances 5 \
           --memory 512Mi \
           --timeout 300
+          
 options:
   logging: CLOUD_LOGGING_ONLY
