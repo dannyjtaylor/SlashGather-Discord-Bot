@@ -13,13 +13,26 @@ import uuid
 # Load environment variables FIRST
 load_dotenv()
 
-environment = os.getenv('ENVIRONMENT', 'development')
-if environment == 'production':
-    from databaseprod import init_database, get_user_balance, update_user_balance, get_user_last_gather_time, update_user_last_gather_time, increment_forage_count, add_user_item, add_ripeness_stat  # Add this line
-else:
-    from databasedev import init_database, get_user_balance, update_user_balance, get_user_last_gather_time, update_user_last_gather_time, increment_forage_count, add_user_item, add_ripeness_stat  # Add this line
+# Database helpers (MongoDB only)
+from database import (
+    init_database,
+    get_user_balance,
+    update_user_balance,
+    get_user_last_gather_time,
+    update_user_last_gather_time,
+    increment_forage_count,
+    add_user_item,
+    add_ripeness_stat,
+)
 
-init_database()
+environment = os.getenv('ENVIRONMENT', 'development')
+
+try:
+    init_database()
+    print("Connected to MongoDB successfully")
+except Exception as error:
+    logging.exception("Failed to initialise MongoDB connection: %s", error)
+    raise
 
 # Load the correct token based on environment
 if environment == 'production':

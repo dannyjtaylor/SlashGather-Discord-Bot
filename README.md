@@ -27,22 +27,31 @@ A Discord bot built with discord.py.
    ```
 
 5. **Create a `.env` file:**
-   - Create a file named `.env` in the root directory
-   - Add your Discord bot token:
-     ```
-     DISCORD_TOKEN=your_bot_token_here
-     ```
-   - Get your token from the [Discord Developer Portal](https://discord.com/developers/applications)
+   Create a file named `.env` in the project root and add the required settings:
+   ```
+   # Discord
+   DISCORD_TOKEN=your_production_bot_token
+   DISCORD_DEV_TOKEN=your_development_bot_token
+   ENVIRONMENT=development  # or production
+
+   # MongoDB
+   MONGODB_URI=your_mongodb_connection_string
+   MONGODB_DB_NAME=slashgather
+   DEFAULT_BALANCE=100.0
+   ```
+   - Generate your Discord token(s) in the [Discord Developer Portal](https://discord.com/developers/applications)
+   - `MONGODB_URI` should point to the MongoDB deployment you want to use (Atlas or self-hosted)
 
 ### Running the Bot
 
 ```bash
-python slashgather.py
+python main.py
 ```
 
 ## Important Notes
 
 - Never commit your `.env` file or share your Discord token
 - The `venv/` directory is gitignored and should be recreated on each machine
-- Make sure to regenerate your Discord token if it was ever exposed
+- Rotate MongoDB credentials if the URI was ever exposed
+- Regenerate your Discord token if it was ever exposed
 

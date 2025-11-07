@@ -1,6 +1,7 @@
 .env
 .venv
 venv/
+gather_data.db
 
 # Database files
 *.db

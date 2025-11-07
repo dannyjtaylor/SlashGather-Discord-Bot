@@ -1,5 +1,4 @@
 steps:
-  # Build and deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
@@ -9,16 +8,16 @@ steps:
           --source . \
           --region us-central1 \
           --platform managed \
-          --allow-unauthenticated \
-          --set-env-vars DISCORD_TOKEN=$$_DISCORD_TOKEN,DATABASE_URL=$$_DATABASE_URL,ENVIRONMENT=production \
+          --no-allow-unauthenticated \
+          --set-env-vars ENVIRONMENT=production,MONGODB_DB_NAME=gatherdb,DEFAULT_BALANCE=100.0 \
+          --set-secrets DISCORD_TOKEN=DISCORD_TOKEN:latest \
+          --set-secrets MONGODB_URI=MONGODB_URI:latest \
+          --set-secrets MONGODB_DB_NAME=MONGODB_DB_NAME:latest \
+          --set-env-vars DEFAULT_BALANCE=100.0 \
           --min-instances 1 \
-          --max-instances 2
+          --max-instances 5 \
+          --memory 512Mi \
+          --timeout 300
 
-# Add these options to fix the logging issue
 options:
   logging: CLOUD_LOGGING_ONLY
-
-# Substitution variables - set these in Cloud Build trigger
-substitutions:
-  _DISCORD_TOKEN: 'your_discord_token_here'
-  _DATABASE_URL: 'your_database_url_here'
