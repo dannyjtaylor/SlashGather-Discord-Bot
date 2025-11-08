@@ -12,7 +12,16 @@ import threading
 # Load environment variables FIRST
 load_dotenv()
 
-environment = os.getenv('ENVIRONMENT', 'development')
+def _resolve_environment() -> str:
+    """Determine which environment the bot is running in."""
+    # Cloud Run / production deployments can set ENVIRONMENT_PROD
+    prod_value = os.getenv('ENVIRONMENT_PROD')
+    if prod_value:
+        return prod_value
+    return os.getenv('ENVIRONMENT', 'development')
+
+environment = _resolve_environment()
+is_production = environment.lower() == 'production'
 
 # Database helpers (MongoDB only)
 from database import (
@@ -34,7 +43,7 @@ except Exception as error:
     raise
 
 # Load the correct token based on environment
-token_env_key = 'DISCORD_TOKEN' if environment == 'production' else 'DISCORD_DEV_TOKEN'
+token_env_key = 'DISCORD_TOKEN' if is_production else 'DISCORD_DEV_TOKEN'
 token = os.getenv(token_env_key)
 
 handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w')
@@ -961,7 +970,7 @@ def start_discord_bot():
 
 if __name__ == "__main__":
     print("Starting SlashGather Discord Bot...")
-    if environment == "production":
+    if is_production:
         http_thread = threading.Thread(target=start_http_server, daemon=True)
         http_thread.start()
     else:

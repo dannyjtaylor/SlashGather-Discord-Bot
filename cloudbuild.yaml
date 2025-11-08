@@ -9,7 +9,7 @@ steps:
           --region us-central1 \
           --platform managed \
           --no-allow-unauthenticated \
-          --set-env-vars ENVIRONMENT=production,MONGODB_DB_NAME=gatherdb,DEFAULT_BALANCE=100.0 \
+          --set-env-vars ENVIRONMENT_PROD=production,MONGODB_DB_NAME=gatherdb,DEFAULT_BALANCE_PROD=100.0 \
           --set-secrets DISCORD_TOKEN=DISCORD_TOKEN:latest \
           --set-secrets MONGODB_URI=MONGODB_URI:latest \
           --min-instances 1 \

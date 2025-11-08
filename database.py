@@ -10,6 +10,31 @@ from pymongo.server_api import ServerApi
 _client: Optional[MongoClient] = None
 _users_collection: Optional[Collection] = None
 
+
+def _get_environment() -> str:
+    """Determine the active environment for the application."""
+    prod_value = os.getenv("ENVIRONMENT_PROD")
+    if prod_value:
+        return prod_value
+    return os.getenv("ENVIRONMENT", "development")
+
+
+def _get_default_balance() -> float:
+    """Return the default balance based on environment-specific variables."""
+    environment = _get_environment().lower()
+    if environment == "production":
+        fallback = 100.0
+        balance_var = "DEFAULT_BALANCE_PROD"
+    else:
+        fallback = 10000.0
+        balance_var = "DEFAULT_BALANCE"
+
+    try:
+        return float(os.getenv(balance_var, fallback))
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
 def _get_users_collection() -> Collection:
     """Return the MongoDB collection used to store user data."""
     global _client, _users_collection
@@ -32,7 +57,7 @@ def _ensure_user_document(user_id: int) -> None:
     """Create a default user document if one does not already exist."""
     users = _get_users_collection()
     default_doc = {
-        "balance": float(os.getenv("DEFAULT_BALANCE", 100.0)),
+        "balance": _get_default_balance(),
         "last_gather_time": 0.0,
         "total_forage_count": 0,
         "items": {},
@@ -63,7 +88,12 @@ def get_user_balance(user_id: int) -> float:
     _ensure_user_document(user_id)
 
     doc = users.find_one({"_id": int(user_id)}, {"balance": 1})
-    return float(doc.get("balance", 100.0)) if doc else 100.0
+    if not doc:
+        return _get_default_balance()
+    try:
+        return float(doc.get("balance", _get_default_balance()))
+    except (TypeError, ValueError):
+        return _get_default_balance()
 
 
 def update_user_balance(user_id: int, new_balance: float) -> None:

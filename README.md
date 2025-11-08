@@ -27,19 +27,25 @@ A Discord bot built with discord.py.
    ```
 
 5. **Create a `.env` file:**
-   Create a file named `.env` in the project root and add the required settings:
-   ```
-   # Discord
-   DISCORD_TOKEN=your_production_bot_token
-   DISCORD_DEV_TOKEN=your_development_bot_token
-   ENVIRONMENT=development  # switch to production in Cloud Run
+  Create a file named `.env` in the project root and add the required settings:
+  ```
+  # Discord
+  DISCORD_DEV_TOKEN=your_development_bot_token
+  DISCORD_TOKEN=your_production_bot_token   # optional locally, required for Cloud Run
 
-   # MongoDB
-   # Use separate databases on the same Atlas cluster, e.g. gatherdb (prod) and gatherdbdev (dev)
-   MONGODB_URI=mongodb+srv://<user>:<password>@yourcluster.mongodb.net/?retryWrites=true&w=majority&appName=gatherdbdev
-   MONGODB_DB_NAME=gatherdbdev
-   DEFAULT_BALANCE=100.0
-   ```
+  # Environment flags
+  ENVIRONMENT=development
+  DEFAULT_BALANCE=10000.0
+
+  # Production overrides (used in Cloud Run / Secret Manager)
+  ENVIRONMENT_PROD=production
+  DEFAULT_BALANCE_PROD=100.0
+
+  # MongoDB (local development)
+  # Use separate databases on the same Atlas cluster, e.g. gatherdb (prod) and gatherdbdev (dev)
+  MONGODB_URI=mongodb+srv://<user>:<password>@yourcluster.mongodb.net/?retryWrites=true&w=majority&appName=gatherdbdev
+  MONGODB_DB_NAME=gatherdbdev
+  ```
    - Generate your Discord token(s) in the [Discord Developer Portal](https://discord.com/developers/applications)
    - For production, create a Secret Manager entry with the production URI and database name (e.g. `gatherdb`)
    - For development, point to the dev database (e.g. `gatherdbdev`) in your local `.env`

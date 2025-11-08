@@ -37,18 +37,20 @@ Create a file named `.env` in the project root with the following content:
 
 ```env
 # Discord Bot Tokens
-DISCORD_TOKEN=your_production_bot_token_here
 DISCORD_DEV_TOKEN=your_development_bot_token_here
+DISCORD_TOKEN=your_production_bot_token_here  # optional locally, required for production deploys
 
-# Environment
+# Environment (local development)
 ENVIRONMENT=development
+DEFAULT_BALANCE=10000.0
+
+# Production overrides (used in Cloud Run / Secret Manager)
+ENVIRONMENT_PROD=production
+DEFAULT_BALANCE_PROD=100.0
 
 # MongoDB Configuration (development)
 MONGODB_URI=mongodb+srv://your_username:your_password@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority&appName=gatherdbdev
 MONGODB_DB_NAME=gatherdbdev
-
-# Default starting balance for new users
-DEFAULT_BALANCE=100.0
 ```
 
 **Important:** 
