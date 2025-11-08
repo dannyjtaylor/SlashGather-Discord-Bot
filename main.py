@@ -431,8 +431,6 @@ async def play_roulette_round(channel, game_id):
     
     await channel.send(f"<@{next_player_id}>", embed=embed, view=view)
 
-
-
 class RouletteJoinView(discord.ui.View):
     def __init__(self, game_id: str, host_id: int, timeout = 300):
         super().__init__(timeout=timeout)
