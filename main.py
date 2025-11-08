@@ -10,6 +10,21 @@ import time
 import asyncio
 import uuid
 
+import threading
+import http.server
+import socketserver
+import os
+
+def start_health_server():
+    port = int(os.environ.get("PORT", "8080"))
+    handler = http.server.SimpleHTTPRequestHandler
+    httpd = socketserver.TCPServer(("", port), handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    print(f"Health check server listening on port {port}")
+
+start_health_server()
+
 # Load environment variables FIRST
 load_dotenv()
 
@@ -206,6 +221,10 @@ class RouletteGame:
             # update stack w/ new multiplier
             multiplier = self.calculate_total_multiplier(self.players[player_id]["rounds_survived"])
             self.players[player_id]["current_stake"] = self.bet_amount * multiplier
+
+
+
+
 
 
 #start rusian roulette
