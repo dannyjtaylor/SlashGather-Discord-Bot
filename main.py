@@ -10,7 +10,7 @@ import uuid
 import threading
 
 # Load environment variables FIRST
-load_dotenv()
+load_dotenv(override=True)
 
 def _resolve_environment() -> str:
     """Determine which environment the bot is running in."""
