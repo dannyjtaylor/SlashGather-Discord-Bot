@@ -32,15 +32,17 @@ A Discord bot built with discord.py.
    # Discord
    DISCORD_TOKEN=your_production_bot_token
    DISCORD_DEV_TOKEN=your_development_bot_token
-   ENVIRONMENT=development  # or production
+   ENVIRONMENT=development  # switch to production in Cloud Run
 
    # MongoDB
-   MONGODB_URI=your_mongodb_connection_string
-   MONGODB_DB_NAME=slashgather
+   # Use separate databases on the same Atlas cluster, e.g. gatherdb (prod) and gatherdbdev (dev)
+   MONGODB_URI=mongodb+srv://<user>:<password>@yourcluster.mongodb.net/?retryWrites=true&w=majority&appName=gatherdbdev
+   MONGODB_DB_NAME=gatherdbdev
    DEFAULT_BALANCE=100.0
    ```
    - Generate your Discord token(s) in the [Discord Developer Portal](https://discord.com/developers/applications)
-   - `MONGODB_URI` should point to the MongoDB deployment you want to use (Atlas or self-hosted)
+   - For production, create a Secret Manager entry with the production URI and database name (e.g. `gatherdb`)
+   - For development, point to the dev database (e.g. `gatherdbdev`) in your local `.env`
 
 ### Running the Bot
 

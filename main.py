@@ -1,5 +1,3 @@
-from calendar import c
-from tarfile import LENGTH_NAME
 import discord
 from discord.ext import commands
 import logging
@@ -9,24 +7,12 @@ import random
 import time
 import asyncio
 import uuid
-
 import threading
-import http.server
-import socketserver
-import os
-
-def start_health_server():
-    port = int(os.environ.get("PORT", "8080"))
-    handler = http.server.SimpleHTTPRequestHandler
-    httpd = socketserver.TCPServer(("", port), handler)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    print(f"Health check server listening on port {port}")
-
-start_health_server()
 
 # Load environment variables FIRST
 load_dotenv()
+
+environment = os.getenv('ENVIRONMENT', 'development')
 
 # Database helpers (MongoDB only)
 from database import (
@@ -40,8 +26,6 @@ from database import (
     add_ripeness_stat,
 )
 
-environment = os.getenv('ENVIRONMENT', 'development')
-
 try:
     init_database()
     print("Connected to MongoDB successfully")
@@ -50,10 +34,8 @@ except Exception as error:
     raise
 
 # Load the correct token based on environment
-if environment == 'production':
-    token = os.getenv('DISCORD_TOKEN')
-else:
-    token = os.getenv('DISCORD_DEV_TOKEN')
+token_env_key = 'DISCORD_TOKEN' if environment == 'production' else 'DISCORD_DEV_TOKEN'
+token = os.getenv(token_env_key)
 
 handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w')
 intents = discord.Intents.default()
@@ -964,9 +946,9 @@ def start_discord_bot():
     """Start the Discord bot with error handling"""
     try:
         print("Starting Discord bot...")
-        print(f"Environment: {os.environ.get('ENVIRONMENT', 'unknown')}")
-        print(f"Database URL set: {'Yes' if os.environ.get('DATABASE_URL') else 'No'}")
-        print(f"Discord Token set: {'Yes' if os.environ.get('DISCORD_TOKEN') else 'No'}")
+        print(f"Environment: {environment}")
+        print(f"Mongo URI set: {'Yes' if os.environ.get('MONGODB_URI') else 'No'}")
+        print(f"{token_env_key} set: {'Yes' if token else 'No'}")
         print(f"Token length: {len(token) if token else 'None'}")
         print("About to call bot.run()...")
         
@@ -979,11 +961,10 @@ def start_discord_bot():
 
 if __name__ == "__main__":
     print("Starting SlashGather Discord Bot...")
-    
-    # Start HTTP server in a separate thread
-    http_thread = threading.Thread(target=start_http_server)
-    http_thread.daemon = True
-    http_thread.start()
-    
-    # Start the Discord bot
+    if environment == "production":
+        http_thread = threading.Thread(target=start_http_server, daemon=True)
+        http_thread.start()
+    else:
+        print("Health check server disabled in development mode")
+
     start_discord_bot()

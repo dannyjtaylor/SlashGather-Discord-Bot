@@ -24,10 +24,12 @@ Replace `<username>` and `<password>` in the connection string with your actual 
 - And your connection string is: `mongodb+srv://<username>:<password>@cluster0.abc123.mongodb.net/?retryWrites=true&w=majority`
 - Your final URI should be: `mongodb+srv://myuser:mypass123@cluster0.abc123.mongodb.net/?retryWrites=true&w=majority`
 
-### Step 4: Choose a Database Name
-- You can use any name you want (e.g., `slashgather`, `gatherbot`, `mybot`)
-- MongoDB will automatically create the database when you first write data to it
-- The database name is just an identifier - it doesn't need to exist yet
+### Step 4: Choose Database Names
+- Use the same cluster for both environments to stay on the free tier
+- Create two logical databases, for example:
+  - `gatherdb` (production data)
+  - `gatherdbdev` (development/testing data)
+- Atlas creates the database automatically when the bot writes to it
 
 ## Creating Your .env File
 
@@ -41,9 +43,9 @@ DISCORD_DEV_TOKEN=your_development_bot_token_here
 # Environment
 ENVIRONMENT=development
 
-# MongoDB Configuration
-MONGODB_URI=mongodb+srv://your_username:your_password@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority
-MONGODB_DB_NAME=slashgather
+# MongoDB Configuration (development)
+MONGODB_URI=mongodb+srv://your_username:your_password@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority&appName=gatherdbdev
+MONGODB_DB_NAME=gatherdbdev
 
 # Default starting balance for new users
 DEFAULT_BALANCE=100.0
@@ -52,6 +54,7 @@ DEFAULT_BALANCE=100.0
 **Important:** 
 - Replace `your_username` and `your_password` with your actual MongoDB credentials
 - Replace the cluster URL with your actual cluster URL from Step 2
+- For production deployments, store the production URI/DB name (e.g. `gatherdb`) in Secret Manager instead of the `.env` file
 - Never commit the `.env` file to git (it's already in `.gitignore`)
 
 ## Testing Your Connection
