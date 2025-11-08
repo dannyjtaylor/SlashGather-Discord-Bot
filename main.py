@@ -433,12 +433,6 @@ async def play_roulette_round(channel, game_id):
 
 
 
-
-
-
-
-
-    
 class RouletteJoinView(discord.ui.View):
     def __init__(self, game_id: str, host_id: int, timeout = 300):
         super().__init__(timeout=timeout)
