@@ -14,11 +14,32 @@ load_dotenv()
 
 def _resolve_environment() -> str:
     """Determine which environment the bot is running in."""
-    # Cloud Run / production deployments can set ENVIRONMENT_PROD
+    # Explicit ENVIRONMENT takes precedence so local development can override.
+    env_value = os.getenv('ENVIRONMENT')
+    if env_value:
+        return env_value
+
+    # Cloud Run / production deployments can provide ENVIRONMENT_PROD.
     prod_value = os.getenv('ENVIRONMENT_PROD')
     if prod_value:
         return prod_value
-    return os.getenv('ENVIRONMENT', 'development')
+
+    return 'development'
+
+
+def _redact_mongo_uri(uri: str | None) -> str:
+    """Return a redacted Mongo URI suitable for logging."""
+    if not uri:
+        return "None"
+    try:
+        # Split credentials from the rest, e.g. mongodb+srv://user:pass@host/db
+        scheme, remainder = uri.split("://", 1)
+        if "@" in remainder:
+            _, host_part = remainder.split("@", 1)
+            return f"{scheme}://<redacted>@{host_part}"
+        return uri
+    except ValueError:
+        return "<invalid-uri>"
 
 environment = _resolve_environment()
 is_production = environment.lower() == 'production'
@@ -955,9 +976,17 @@ def start_discord_bot():
     """Start the Discord bot with error handling"""
     try:
         print("Starting Discord bot...")
-        print(f"Environment: {environment}")
-        print(f"Mongo URI set: {'Yes' if os.environ.get('MONGODB_URI') else 'No'}")
-        print(f"{token_env_key} set: {'Yes' if token else 'No'}")
+        print(
+            "Environment resolved as: "
+            f"{environment} (ENVIRONMENT={os.getenv('ENVIRONMENT')}, "
+            f"ENVIRONMENT_PROD={os.getenv('ENVIRONMENT_PROD')})"
+        )
+        mongo_uri = os.getenv('MONGODB_URI')
+        print(f"Mongo URI: {_redact_mongo_uri(mongo_uri)}")
+        print(
+            f"Discord token source: {token_env_key} "
+            f"({'set' if token else 'missing'})"
+        )
         print(f"Token length: {len(token) if token else 'None'}")
         print("About to call bot.run()...")
         

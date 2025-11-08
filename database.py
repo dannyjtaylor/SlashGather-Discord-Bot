@@ -13,10 +13,15 @@ _users_collection: Optional[Collection] = None
 
 def _get_environment() -> str:
     """Determine the active environment for the application."""
+    env_value = os.getenv("ENVIRONMENT")
+    if env_value:
+        return env_value
+
     prod_value = os.getenv("ENVIRONMENT_PROD")
     if prod_value:
         return prod_value
-    return os.getenv("ENVIRONMENT", "development")
+
+    return "development"
 
 
 def _get_default_balance() -> float:
