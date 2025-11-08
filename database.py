@@ -10,7 +10,6 @@ from pymongo.server_api import ServerApi
 _client: Optional[MongoClient] = None
 _users_collection: Optional[Collection] = None
 
-
 def _get_users_collection() -> Collection:
     """Return the MongoDB collection used to store user data."""
     global _client, _users_collection
