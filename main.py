@@ -440,7 +440,6 @@ class RouletteJoinView(discord.ui.View):
     @discord.ui.button(label = "Join Game", style = discord.ButtonStyle.green, emoji = "🔫")
     async def join_game(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
-        
         if self.game_id not in active_roulette_games:
             await interaction.response.send_message("❌ Game no longer exists!", ephemeral=True)
             return
