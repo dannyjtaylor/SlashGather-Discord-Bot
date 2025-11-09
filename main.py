@@ -72,7 +72,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix='/', intents=intents)
-GATHER_COOLDOWN = 2 #(seconds)
+GATHER_COOLDOWN = 60 #(seconds)
 
 def can_gather(user_id):
     last_gather_time = get_user_last_gather_time(user_id)
