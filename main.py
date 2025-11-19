@@ -74,6 +74,24 @@ intents.members = True
 bot = commands.Bot(command_prefix='/', intents=intents)
 GATHER_COOLDOWN = 60 #(seconds)
 
+
+def assign_gatherer_role(user_id):
+    #assign gatherer role to the user
+    #gathere1 - 0-50 items gathered
+    #gathere2 - 51-200 items gathered
+    #gatherer 3 - 201-500 items gathered
+    if total_forage_count < 50:
+        role = discord.utils.get(user.guild.roles, name="gatherer1")
+        await user.add_roles(role)
+    elif total_forage_count < 200 && total_forage_count > 50:
+        role = discord.utils.get(user.guild.roles, name="gatherer2")
+        await user.add_roles(role)
+    elif total_forage_count < 500 && total_forage_count > 200:
+        role = discord.utils.get(user.guild.roles, name="gatherer3")
+        await user.add_roles(role)
+
+
+
 def can_gather(user_id):
     last_gather_time = get_user_last_gather_time(user_id)
     current_time = time.time()

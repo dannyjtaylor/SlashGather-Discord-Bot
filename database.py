@@ -67,14 +67,31 @@ def _ensure_user_document(user_id: int) -> None:
         "total_forage_count": 0,
         "items": {},
         "ripeness_stats": {},
+        "gather_stats": {
+            "total_items": 0,
+            "categories": {},
+            "items": {}
+        }
     }
-
     users.update_one(
         {"_id": int(user_id)},
         {"$setOnInsert": default_doc},
         upsert=True,
     )
 
+
+def increment_gather_stats(userid: int, category: str, item: str) -> None:
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(userid)},
+        {
+            "$inc": {
+                "gather_stats.total_items:" 1,
+                f"gather_stats.categories.{category}": 1,
+                f"gather_stats.items.{item}": 1,
+        },
+        
+    )
 
 def init_database() -> None:
     """Initialise MongoDB indexes and verify connectivity."""
