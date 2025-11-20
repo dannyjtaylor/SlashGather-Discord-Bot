@@ -90,8 +90,6 @@ def assign_gatherer_role(user_id):
         role = discord.utils.get(user.guild.roles, name="gatherer3")
         await user.add_roles(role)
 
-
-
 def can_gather(user_id):
     last_gather_time = get_user_last_gather_time(user_id)
     current_time = time.time()
