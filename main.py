@@ -51,7 +51,11 @@ from database import (
     update_user_balance,
     get_user_last_gather_time,
     update_user_last_gather_time,
+    get_user_last_harvest_time,
+    update_user_last_harvest_time,
     increment_forage_count,
+    get_forage_count,
+    increment_gather_stats,
     add_user_item,
     add_ripeness_stat,
 )
@@ -73,22 +77,67 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix='/', intents=intents)
 GATHER_COOLDOWN = 60 #(seconds)
+HARVEST_COOLDOWN = 60 * 60 #(an hour)
 
+def can_harvest(user_id):
+    last_harvest_time = get_user_last_harvest_time(user_id)
+    current_time = time.time()
+    if last_harvest_time == 0:
+        return True, 0
+    cooldown_end = last_harvest_time + HARVEST_COOLDOWN
+    if current_time >= cooldown_end:
+        return True, 0
+    else:
+        time_left = int(cooldown_end - current_time)
+        return False, time_left
 
-def assign_gatherer_role(user_id):
+def set_harvest_cooldown(user_id):
+    update_user_last_harvest_time(user_id, time.time())
+
+    
+async def assign_gatherer_role(member: discord.Member, guild: discord.Guild):
     #assign gatherer role to the user
     #gathere1 - 0-50 items gathered
-    #gathere2 - 51-200 items gathered
-    #gatherer 3 - 201-500 items gathered
+    #gathere2 - 51-150 items gathered
+    #gatherer 3 - 150-299 items gathered
+    #gatheher 4 - 300-499 items gathered
+    #gatherer 5 - 500+ items gathered
+
+    user_id = member.id
+    total_forage_count = get_forage_count(user_id)
+    planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V"]
+
+    for role_name in planter_roles:
+        role = discord.utils.get(guild.roles, name=role_name)
+        if role and role in member.roles:
+            try:
+                await member.remove_roles(role)
+            except Exception as e:
+                print(f"Error removing role {role_name} from user {user_id}: {e}")
+    target_role_name = None
     if total_forage_count < 50:
-        role = discord.utils.get(user.guild.roles, name="gatherer1")
-        await user.add_roles(role)
-    elif total_forage_count < 200 && total_forage_count > 50:
-        role = discord.utils.get(user.guild.roles, name="gatherer2")
-        await user.add_roles(role)
-    elif total_forage_count < 500 && total_forage_count > 200:
-        role = discord.utils.get(user.guild.roles, name="gatherer3")
-        await user.add_roles(role)
+        target_role_name = "PLANTER I"
+    elif total_forage_count < 150:
+        target_role_name = "PLANTER II"
+    elif total_forage_count < 299:
+        target_role_name = "PLANTER III"
+    elif total_forage_count < 499:
+        target_role_name = "PLANTER IV"
+    else: #500+
+        target_role_name = "PLANTER V"
+
+    #assign actual roles
+    if target_role_name:
+        role = discord.utils.get(guild.roles, name=target_role_name)
+        if role:
+            try:
+                await member.add_roles(role)
+            except Exception as e:
+                print(f"Error adding role {target_role_name} to user {user_id}: {e}")
+        else:
+            print(f"Role {target_role_name} not found for user {user_id}")
+
+
 
 
 def can_gather(user_id):
@@ -730,6 +779,14 @@ async def end_roulette_game(channel, game_id):
 @bot.event 
 async def on_ready():
     print(f"Slash Gather, {bot.user.name}")
+
+    #set bot status
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.playing,
+            name="🌳 running /gather on V0.0.0 :3"
+        )
+    )
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} commands")
@@ -739,8 +796,27 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member):
-    # fix the thanking member name, need to be able to check who sent an invite
-    await member.send(f"🌿Welcome to /GATHER, {member.name}! Thank you to {member.name} for inviting them!🌿")
+    # Find the welcome channel
+    welcome_channel = discord.utils.get(member.guild.text_channels, name="welcome")
+    
+    if welcome_channel:
+        #send welcome message to the welcome channel
+        await welcome_channel.send(f"🌿 Welcome to /GATHER, {member.mention}! 🌿")
+    # else:
+    #     #fallback in case it fails
+    #     for channel in member.guild.text_channels:
+    #         if "welcome" in channel.name.lower():
+    #             await channel.send(f"🌿 Welcome to /GATHER, {member.mention}! 🌿")
+    #             break
+    #     else:
+    #         #if no welcome channel found
+    #         print(f"Warning: No 'welcome' channel found in {member.guild.name}. Could not welcome {member.name}.")
+
+    #assign gatherer1 role or whatever they have incase they joined and then left, and then rejoined
+    try:
+        await assign_gatherer_role(member, member.guild)
+    except Exception as e:
+        print(f"Error assigning gatherer role to user {member.id}: {e}")
 
 @bot.tree.command(name="gather", description="Gather a random item from nature!")
 async def gather(interaction: discord.Interaction):
@@ -796,6 +872,13 @@ async def gather(interaction: discord.Interaction):
 
     add_user_item(user_id, name)
     add_ripeness_stat(user_id, ripeness["name"])
+    increment_gather_stats(user_id, item["category"], name)
+
+    # assign role
+    try:
+        await assign_gatherer_role(interaction.user, interaction.guild)
+    except Exception as e:
+        print(f"Error assigning gatherer role to user {user_id}: {e}")
 
     #create discord embed
     embed = discord.Embed(
@@ -811,6 +894,95 @@ async def gather(interaction: discord.Interaction):
     embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
     embed.add_field(name="new balance: ", value=f"**${new_balance:.2f}**", inline=False)
     await interaction.followup.send(embed=embed) 
+
+#/harvest command, basically /castnet
+@bot.tree.command(name="harvest", description="Harvest a bunch of plants at once!")
+async def harvest(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=False)
+    user_id = interaction.user.id
+    can_user_harvest, time_left = can_harvest(user_id)
+    if not can_user_harvest:
+        minutes_left = time_left // 60
+        seconds_left = time_left % 60   
+        await interaction.followup.send(
+            f"You must wait {minutes_left} minutes and {seconds_left} seconds before harvesting again, {interaction.user.name}.", ephemeral=True
+        )
+        return
+    set_harvest_cooldown(user_id)
+    #/gather 10 times
+    gathered_items = []
+    total_value = 0.0
+    current_balance = get_user_balance(user_id)
+
+    for i in range(10):
+        item = random.choice(GATHERABLE_ITEMS)
+        name = item["name"]
+        if item["category"] == "Fruit":
+            ripeness_list = LEVEL_OF_RIPENESS_FRUITS
+        elif item["category"] == "Vegetable":
+            ripeness_list = LEVEL_OF_RIPENESS_VEGETABLES
+        elif item["category"] == "Flower":
+            ripeness_list = LEVEL_OF_RIPENESS_FLOWERS
+        else:
+            ripeness_list = []
+
+        #calcualte value w/ ripeness
+        if ripeness_list:
+            weights = [r["chance"] for r in ripeness_list]
+            ripeness = random.choices(ripeness_list, weights=weights, k=1)[0]
+            final_value = item["base_value"] * ripeness["multiplier"]
+        else:
+            final_value = item["base_value"]
+            ripeness = {"name": "Normal"}
+
+        #check for whatevers gathered is a GMO
+        gmo_chance = 0.05
+        is_gmo = random.choices([True, False], weights=[gmo_chance, 1-gmo_chance], k=1)[0]
+        if is_gmo:
+            final_value *= 1.5
+
+        #update new balance
+        current_balance += final_value
+        total_value += final_value
+
+        #store items and stats
+        add_user_item(user_id, name)
+        add_ripeness_stat(user_id, ripeness["name"])
+        increment_forage_count(user_id)
+        increment_gather_stats(user_id, item["category"], name)
+
+        #track what was gathered
+        gathered_items.append({"name": name, "value": final_value, "ripeness": ripeness["name"], "is_gmo": is_gmo})
+
+    #save_final_balance
+    update_user_balance(user_id, current_balance)
+
+    #assign role in case they hit a new gatherer level in a harvest
+    try:
+        await assign_gatherer_role(interaction.user, interaction.guild)
+    except Exception as e:
+        print(f"Error assigning gatherer role to user {user_id}: {e}")
+
+    #create harvest embed
+    embed = discord.Embed(
+        title = "You Harvested!",
+        color = discord.Color.green()
+    )
+
+    #show gathered items, just using 20 for now
+    items_text = ""
+    for item in gathered_items[:20]:
+        gmo_text = " ✨" if item["is_gmo"] else ""
+        items_text += f"• **{item['name']}** - ${item['value']:.2f} ({item['ripeness']}){gmo_text}\n"
+
+    embed.add_field(name="📦 Items Gathered", value=items_text or "No items", inline=False)
+    embed.add_field(name="💰 Total Value", value=f"**${total_value:.2f}**", inline=True)
+    embed.add_field(name="💵 New Balance", value=f"**${current_balance:.2f}**", inline=True)
+    embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
+
+    await interaction.followup.send(embed=embed)
+    #end harvest
+
 
 # balance command
 @bot.tree.command(name="balance", description="Check your current balance")

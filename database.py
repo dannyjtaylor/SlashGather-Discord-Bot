@@ -64,6 +64,7 @@ def _ensure_user_document(user_id: int) -> None:
     default_doc = {
         "balance": _get_default_balance(),
         "last_gather_time": 0.0,
+        "last_harvest_time": 0.0,
         "total_forage_count": 0,
         "items": {},
         "ripeness_stats": {},
@@ -86,11 +87,12 @@ def increment_gather_stats(userid: int, category: str, item: str) -> None:
         {"_id": int(userid)},
         {
             "$inc": {
-                "gather_stats.total_items:" 1,
+                "gather_stats.total_items": 1,
                 f"gather_stats.categories.{category}": 1,
                 f"gather_stats.items.{item}": 1,
+            }
         },
-        
+        upsert=True,
     )
 
 def init_database() -> None:
@@ -188,4 +190,17 @@ def update_user_last_gather_time(user_id: int, timestamp: float) -> None:
         upsert=True,
     )
 
+def get_user_last_harvest_time(user_id: int) -> float:
+    users = _get_users_collection()
+    doc = users.find_one({"_id": int(user_id)}, {"last_harvest_time": 1})
+    return float(doc.get("last_harvest_time", 0.0)) if doc else 0.0
 
+
+def update_user_last_harvest_time(user_id: int, timestamp: float) -> None:
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"last_harvest_time": float(timestamp)}},
+        upsert=True,
+    )
+    
