@@ -95,25 +95,22 @@ def set_harvest_cooldown(user_id):
     update_user_last_harvest_time(user_id, time.time())
 
     
-async def assign_gatherer_role(member: discord.Member, guild: discord.Guild):
+async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> tuple[str | None, str | None]:
     #assign gatherer role to the user
-    #gathere1 - 0-50 items gathered
-    #gathere2 - 51-150 items gathered
+    #gatherer 1 - 0-50 items gathered
+    #gatherer 2 - 51-150 items gathered
     #gatherer 3 - 150-299 items gathered
-    #gatheher 4 - 300-499 items gathered
+    #gatherer 4 - 300-499 items gathered
     #gatherer 5 - 500+ items gathered
 
     user_id = member.id
     total_forage_count = get_forage_count(user_id)
     planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V"]
 
-    for role_name in planter_roles:
-        role = discord.utils.get(guild.roles, name=role_name)
-        if role and role in member.roles:
-            try:
-                await member.remove_roles(role)
-            except Exception as e:
-                print(f"Error removing role {role_name} from user {user_id}: {e}")
+    # Find the user's current planter role
+    previous_role_name = next((role.name for role in member.roles if role.name in planter_roles), None)
+    
+    # Determine the target role based on forage count
     target_role_name = None
     if total_forage_count < 50:
         target_role_name = "PLANTER I"
@@ -126,16 +123,35 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild):
     else: #500+
         target_role_name = "PLANTER V"
 
-    #assign actual roles
-    if target_role_name:
-        role = discord.utils.get(guild.roles, name=target_role_name)
-        if role:
+    # If the target role is the same as current role, no changes needed
+    if target_role_name == previous_role_name:
+        return previous_role_name, None
+
+    # Remove the old planter role if they had one
+    if previous_role_name:
+        old_role = discord.utils.get(guild.roles, name=previous_role_name)
+        if old_role:
             try:
-                await member.add_roles(role)
+                await member.remove_roles(old_role)
+            except Exception as e:
+                print(f"Error removing role {previous_role_name} from user {user_id}: {e}")
+
+    # Assign the new planter role
+    if target_role_name:
+        new_role = discord.utils.get(guild.roles, name=target_role_name)
+        if new_role:
+            try:
+                await member.add_roles(new_role)
+                return previous_role_name, target_role_name
             except Exception as e:
                 print(f"Error adding role {target_role_name} to user {user_id}: {e}")
+                return previous_role_name, None
         else:
             print(f"Role {target_role_name} not found for user {user_id}")
+            return previous_role_name, None
+    
+    # Fallback return (should not normally reach here)
+    return previous_role_name, None
 
 
 
@@ -874,11 +890,22 @@ async def gather(interaction: discord.Interaction):
     add_ripeness_stat(user_id, ripeness["name"])
     increment_gather_stats(user_id, item["category"], name)
 
-    # assign role
+    # assign role and check for rank-up
+    old_role = None
+    new_role = None
     try:
-        await assign_gatherer_role(interaction.user, interaction.guild)
+        old_role, new_role = await assign_gatherer_role(interaction.user, interaction.guild)
     except Exception as e:
         print(f"Error assigning gatherer role to user {user_id}: {e}")
+
+    # Send rank-up notification if player advanced
+    if new_role:
+        rankup_embed = discord.Embed(
+            title="🌱 Rank Up!",
+            description=f"{interaction.user.mention} advanced from **{old_role or 'New Recruit'}** to **{new_role}**!",
+            color=discord.Color.gold(),
+        )
+        await interaction.followup.send(embed=rankup_embed)
 
     #create discord embed
     embed = discord.Embed(
@@ -958,10 +985,21 @@ async def harvest(interaction: discord.Interaction):
     update_user_balance(user_id, current_balance)
 
     #assign role in case they hit a new gatherer level in a harvest
+    old_role = None
+    new_role = None
     try:
-        await assign_gatherer_role(interaction.user, interaction.guild)
+        old_role, new_role = await assign_gatherer_role(interaction.user, interaction.guild)
     except Exception as e:
         print(f"Error assigning gatherer role to user {user_id}: {e}")
+
+    # Send rank-up notification if player advanced
+    if new_role:
+        rankup_embed = discord.Embed(
+            title="🌾 Rank Up!",
+            description=f"{interaction.user.mention} advanced from **{old_role or 'New Recruit'}** to **{new_role}**!",
+            color=discord.Color.gold(),
+        )
+        await interaction.followup.send(embed=rankup_embed)
 
     #create harvest embed
     embed = discord.Embed(
@@ -972,7 +1010,7 @@ async def harvest(interaction: discord.Interaction):
     #show gathered items, just using 20 for now
     items_text = ""
     for item in gathered_items[:20]:
-        gmo_text = " ✨" if item["is_gmo"] else ""
+        gmo_text = f" (GMO? Yes ✨)" if item["is_gmo"] else " (GMO? No)"
         items_text += f"• **{item['name']}** - ${item['value']:.2f} ({item['ripeness']}){gmo_text}\n"
 
     embed.add_field(name="📦 Items Gathered", value=items_text or "No items", inline=False)
