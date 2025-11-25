@@ -153,11 +153,15 @@ def add_user_item(user_id: int, item_name: str) -> None:
     )
 
 
+def _get_item_count(item):
+    """Helper function to get the count (value) from an item tuple."""
+    return item[1]
+
 def get_user_items(user_id: int) -> Dict[str, int]:
     users = _get_users_collection()
     doc = users.find_one({"_id": int(user_id)}, {"items": 1})
     items: Dict[str, int] = doc.get("items", {}) if doc else {}
-    return dict(sorted(items.items(), key=lambda item: item[1], reverse=True))
+    return dict(sorted(items.items(), key=_get_item_count, reverse=True))
 
 
 def add_ripeness_stat(user_id: int, ripeness_name: str) -> None:
@@ -173,7 +177,7 @@ def get_user_ripeness_stats(user_id: int) -> Dict[str, int]:
     users = _get_users_collection()
     doc = users.find_one({"_id": int(user_id)}, {"ripeness_stats": 1})
     stats: Dict[str, int] = doc.get("ripeness_stats", {}) if doc else {}
-    return dict(sorted(stats.items(), key=lambda item: item[1], reverse=True))
+    return dict(sorted(stats.items(), key=_get_item_count, reverse=True))
 
 
 def get_user_last_gather_time(user_id: int) -> float:
@@ -203,4 +207,50 @@ def update_user_last_harvest_time(user_id: int, timestamp: float) -> None:
         {"$set": {"last_harvest_time": float(timestamp)}},
         upsert=True,
     )
+
+
+def _get_balance_value(user_tuple):
+    """Helper function to get the balance (second element) from a user tuple."""
+    return user_tuple[1]
+
+def get_all_users_balance() -> list[tuple[int, float]]:
+    """Get all users with their balances, sorted by balance descending."""
+    users = _get_users_collection()
+    cursor = users.find({}, {"_id": 1, "balance": 1})
+    results = []
+    for doc in cursor:
+        user_id = doc.get("_id")
+        balance = float(doc.get("balance", _get_default_balance()))
+        results.append((user_id, balance))
+    # Sort by balance descending
+    results.sort(key=_get_balance_value, reverse=True)
+    return results
+
+
+def _get_total_items_value(user_tuple):
+    """Helper function to get the total_items (second element) from a user tuple."""
+    return user_tuple[1]
+
+def get_user_total_items(user_id: int) -> int:
+    """Get a user's total items gathered."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"gather_stats.total_items": 1})
+    if not doc:
+        return 0
+    gather_stats = doc.get("gather_stats", {})
+    return int(gather_stats.get("total_items", 0))
+
+def get_all_users_total_items() -> list[tuple[int, int]]:
+    """Get all users with their total items gathered, sorted by total_items descending."""
+    users = _get_users_collection()
+    cursor = users.find({}, {"_id": 1, "gather_stats.total_items": 1})
+    results = []
+    for doc in cursor:
+        user_id = doc.get("_id")
+        total_items = int(doc.get("gather_stats", {}).get("total_items", 0))
+        results.append((user_id, total_items))
+    # Sort by total_items descending
+    results.sort(key=_get_total_items_value, reverse=True)
+    return results
     

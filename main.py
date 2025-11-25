@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 import logging
 from dotenv import load_dotenv
@@ -58,6 +59,10 @@ from database import (
     increment_gather_stats,
     add_user_item,
     add_ripeness_stat,
+    get_all_users_balance,
+    get_all_users_total_items,
+    get_user_total_items,
+    get_user_items,
 )
 
 try:
@@ -206,6 +211,35 @@ GATHERABLE_ITEMS = [
     {"category": "Vegetable","name": "Broccoli 🥦", "base_value": 5},
 ]   
 
+# Item descriptions for almanac
+ITEM_DESCRIPTIONS = {
+    "Rose 🌹": "A classic symbol of love and passion!",
+    "Lily 🌺": "Elegant and fragrant, a garden favorite!",
+    "Sunflower 🌻": "Bright and cheerful, follows the sun!",
+    "Daisy 🌼": "Simple and pure, a field of dreams!",
+    "Tulip 🌷": "Colorful and springy, a Dutch delight!",
+    "Daffodil 🌼": "The first sign of spring's arrival!",
+    "Flowey": "Your Best Friend!",
+    "Lotus🪷": "The Valorant Map, or the Person?",
+    "Sakura 🌸": "I really want to go to Japan one day...",
+    "Strawberry 🍓": "Sweet and juicy, nature's candy!",
+    "Blueberry 🫐": "Tiny but packed with flavor!",
+    "Raspberry": "Tart and tangy, perfect for desserts!",
+    "Cherry 🍒": "Small and sweet, a summer treat!",
+    "Apple 🍎": "One a day keeps the doctor away!",
+    "Pear 🍐": "Sweet and crisp!",
+    "Orange 🍊": "Yeah, we're from Florida. Hey Apple!",
+    "Grape 🍇": "Not statuatory!",
+    "Carrot 🥕": "Good for your eyes!",
+    "Potato 🥔": "An Irish delight!",
+    "Onion 🧅": "Makes you cry...!",
+    "Garlic 🧄": "Wards off vampires!",
+    "Tomato 🍅": "Technically a fruit!",
+    "Lettuce 🥬": "THIS is what the Titanic hit?",
+    "Cabbage 🥬": "Round and leafy, great for coleslaw!",
+    "Broccoli 🥦": "A tiny tree that's super healthy!",
+}
+
 #level of ripeness - FRUITS
 LEVEL_OF_RIPENESS_FRUITS = [
     {"name": "Budding", "multiplier": 0.9, "chance": 25},
@@ -215,7 +249,7 @@ LEVEL_OF_RIPENESS_FRUITS = [
     {"name": "Perfectly Ripe", "multiplier": 2.5, "chance": 20},
     {"name": "Overripe", "multiplier": 1.6, "chance": 10},  
     {"name": "Spoiled", "multiplier": 0.9, "chance": 4.99999},
-    {"name": "One in a Million", "multiplier": 50, "chance": 0.000001},
+    {"name": "One in a Million", "multiplier": 50, "chance": 1},
 ]
 
 #level of ripeness - VEGETABLES
@@ -226,7 +260,7 @@ LEVEL_OF_RIPENESS_VEGETABLES = [
     {"name": "Perfectly Ripe", "multiplier": 2.5, "chance": 20},
     {"name": "Overripe", "multiplier": 1.6, "chance": 10},
     {"name": "Spoiled", "multiplier": 0.9, "chance": 4.99999},
-    {"name": "One in a Million", "multiplier": 50, "chance": 0.000001},
+    {"name": "One in a Million", "multiplier": 50, "chance": 1},
 ]
 
 #level of ripeness - FLOWERS
@@ -235,7 +269,7 @@ LEVEL_OF_RIPENESS_FLOWERS = [
     {"name": "Blooming", "multiplier": 1, "chance": 45},
     {"name": "Full Bloom", "multiplier": 1.5, "chance": 20},
     {"name": "Wilted", "multiplier": 0.6, "chance": 4.99999},
-    {"name": "One in a Million", "multiplier": 50, "chance": 0.000001},
+    {"name": "One in a Million", "multiplier": 50, "chance": 1},
 ]
 
 MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
@@ -390,7 +424,7 @@ async def play_roulette_round(channel, game_id):
     #revolver chamber spinning animation
     embed = discord.Embed(
         title=f"🔫 {current_player['name']}'s Turn",
-        description="*Spinning the chamber...*\n\n🔄 🔄 🔄",
+        description="*The cylinder re-spins for this turn...*\n\n🔄 🔄 🔄\n\n**The chamber is re-spun every time it's someone's turn!**",
         color=discord.Color.orange()
     )
     embed.add_field(name="💀 Bullets Remaining", value=f"{game.bullets}/6", inline=True)
@@ -437,10 +471,66 @@ async def play_roulette_round(channel, game_id):
             await end_roulette_game(channel, game_id)
             return
     
-        #continue to next player
+        #continue to next player - give them option to cash out (except first turn)
         game.next_turn()
         await asyncio.sleep(2)
-        await play_roulette_round(channel, game_id)
+        
+        # Check if this is the very first turn (no one has survived a round yet)
+        is_first_turn = all(player['rounds_survived'] == 0 for player in game.players.values())
+        
+        if is_first_turn:
+            # First turn - immediately continue to next player's turn
+            await play_roulette_round(channel, game_id)
+        else:
+            # Not first turn - give next player option to cash out or continue
+            alive_players = game.get_alive_players()
+            if len(alive_players) == 0:
+                await end_roulette_game(channel, game_id)
+                return
+            
+            next_player_id = game.get_current_player()
+            if next_player_id is None:
+                await end_roulette_game(channel, game_id)
+                return
+            
+            next_player = game.players[next_player_id]
+            
+            # Determine total winnings if they cash out now
+            if len(alive_players) == 1:
+                potential_winnings = game.pot + next_player['current_stake']
+            else:
+                potential_winnings = next_player['current_stake']
+            
+            # Create continue/cashout view (only allow cash out if not first turn)
+            is_first_turn_here = all(player['rounds_survived'] == 0 for player in game.players.values())
+            view = RouletteContinueView(game_id, allow_cashout=not is_first_turn_here)
+            
+            if is_first_turn_here:
+                embed = discord.Embed(
+                    title="⚠️ YOUR TURN ⚠️",
+                    description=f"**{next_player['name']}**, it's your turn!\n\nClick **Pull Trigger** to continue.\n\n⏰ **You have 5 minutes to decide, or you'll automatically cash out.**\n\n*Note: Cash out is not available on the very first turn.*",
+                    color=discord.Color.gold()
+                )
+            else:
+                embed = discord.Embed(
+                    title="⚠️ YOUR TURN ⚠️",
+                    description=f"**{next_player['name']}**, it's your turn!\n\nClick **Pull Trigger** to continue or **Cash Out** to leave with your winnings.\n\n⏰ **You have 5 minutes to decide, or you'll automatically cash out.**",
+                    color=discord.Color.gold()
+                )
+            embed.add_field(name="💰 Potential Winnings", value=f"${potential_winnings:.2f}", inline=True)
+            embed.add_field(name="🔫 Bullets", value=f"{game.bullets}/6", inline=True)
+            embed.add_field(name="💀 Death Odds", value=f"{(game.bullets/6)*100:.1f}%", inline=True)
+            embed.add_field(name="📈 Current Multiplier", value=f"{game.calculate_total_multiplier(next_player['rounds_survived']):.2f}x", inline=True)
+            embed.add_field(name="🎯 Rounds Survived", value=f"{next_player['rounds_survived']}", inline=True)
+            
+            if len(alive_players) == 1 and game.max_players > 1:
+                embed.add_field(
+                    name="🏆 Victory Status",
+                    value="You won the multiplayer round! Keep playing to increase your multiplier or cash out now!",
+                    inline=False
+                )
+            
+            await channel.send(f"<@{next_player_id}>", embed=embed, view=view)
         return
     
     else:
@@ -493,6 +583,9 @@ async def play_roulette_round(channel, game_id):
         
     next_player = game.players[next_player_id]
     
+    # Check if this is the very first turn (no one has survived a round yet)
+    is_first_turn = all(player['rounds_survived'] == 0 for player in game.players.values())
+    
     # Determine total winnings if they cash out now
     if len(alive_players) == 1:
         # Last player standing gets pot + their stake
@@ -501,14 +594,22 @@ async def play_roulette_round(channel, game_id):
         # Multiplayer - just show their stake
         potential_winnings = next_player['current_stake']
     
-    # Create continue/cashout view
-    view = RouletteContinueView(game_id)
+    # Create continue/cashout view (only allow cash out if not first turn)
+    view = RouletteContinueView(game_id, allow_cashout=not is_first_turn)
     
-    embed = discord.Embed(
-        title="⚠️ YOUR TURN ⚠️",
-        description=f"**{next_player['name']}**, it's your turn!\n\nClick **Pull Trigger** to continue or **Cash Out** to leave with your winnings.",
-        color=discord.Color.gold()
-    )
+    if is_first_turn:
+        embed = discord.Embed(
+            title="⚠️ YOUR TURN ⚠️",
+            description=f"**{next_player['name']}**, it's your turn!\n\nClick **Pull Trigger** to continue.\n\n⏰ **You have 5 minutes to decide, or you'll automatically cash out.**\n\n*Note: Cash out is not available on the very first turn.*",
+            color=discord.Color.gold()
+        )
+    else:
+        embed = discord.Embed(
+            title="⚠️ YOUR TURN ⚠️",
+            description=f"**{next_player['name']}**, it's your turn!\n\nClick **Pull Trigger** to continue or **Cash Out** to leave with your winnings.\n\n⏰ **You have 5 minutes to decide, or you'll automatically cash out.**",
+            color=discord.Color.gold()
+        )
+    
     embed.add_field(name="💰 Potential Winnings", value=f"${potential_winnings:.2f}", inline=True)
     embed.add_field(name="🔫 Bullets", value=f"{game.bullets}/6", inline=True)
     embed.add_field(name="💀 Death Odds", value=f"{(game.bullets/6)*100:.1f}%", inline=True)
@@ -633,9 +734,10 @@ class RouletteJoinView(discord.ui.View):
 
 # roulette continue view
 class RouletteContinueView(discord.ui.View):
-    def __init__(self, game_id, timeout=60):
+    def __init__(self, game_id, timeout=300, allow_cashout=True):
         super().__init__(timeout=timeout)
         self.game_id = game_id
+        self.allow_cashout = allow_cashout
     
     @discord.ui.button(label="Pull Trigger", style=discord.ButtonStyle.danger, emoji="🔫")
     async def continue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -658,6 +760,10 @@ class RouletteContinueView(discord.ui.View):
     
     @discord.ui.button(label="Cash Out", style=discord.ButtonStyle.secondary, emoji="💰")
     async def cashout_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.allow_cashout:
+            await interaction.response.send_message("❌ Cash out is not available on the very first turn!", ephemeral=True)
+            return
+        
         if self.game_id not in active_roulette_games:
             await interaction.response.send_message("❌ Game no longer exists!", ephemeral=True)
             return
@@ -708,6 +814,69 @@ class RouletteContinueView(discord.ui.View):
             game.next_turn()
             await asyncio.sleep(2)
             await play_roulette_round(interaction.channel, self.game_id)
+    
+    async def on_timeout(self):
+        # Auto-cash out when timeout expires
+        if self.game_id not in active_roulette_games:
+            return
+        
+        game = active_roulette_games[self.game_id]
+        current_player_id = game.get_current_player()
+        
+        if current_player_id is None:
+            return
+        
+        # Check if player is still alive (hasn't already been eliminated)
+        if current_player_id not in game.players or not game.players[current_player_id]['alive']:
+            return
+        
+        # Get the message channel - we need to find it from the game
+        channel = None
+        for ch_id, tracked_game_id in active_roulette_channel_games.items():
+            if tracked_game_id == self.game_id:
+                channel = bot.get_channel(ch_id)
+                break
+        
+        if channel is None:
+            return
+        
+        # Cash out - player gets their stake back
+        player = game.players[current_player_id]
+        winnings = player['current_stake']
+        
+        # Add winnings to player balance
+        current_balance = get_user_balance(current_player_id)
+        update_user_balance(current_player_id, current_balance + winnings)
+        
+        # Remove from active games
+        if current_player_id in user_active_games:
+            del user_active_games[current_player_id]
+        
+        # Mark player as eliminated (cashed out)
+        game.players[current_player_id]['alive'] = False
+        
+        embed = discord.Embed(
+            title="💰 AUTO CASHED OUT! 💰",
+            description=f"**{player['name']}** timed out and was automatically cashed out!",
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="💵 Winnings", value=f"${winnings:.2f}", inline=True)
+        embed.add_field(name="💸 Profit", value=f"${winnings - game.bet_amount:.2f}", inline=True)
+        embed.add_field(name="📈 Multiplier Achieved", value=f"{game.calculate_total_multiplier(player['rounds_survived']):.2f}x", inline=True)
+        embed.add_field(name="🎯 Rounds Survived", value=f"{player['rounds_survived']}", inline=True)
+        
+        await channel.send(embed=embed)
+        
+        # Check if game ends
+        alive_count = len(game.get_alive_players())
+        
+        if alive_count == 0 or (alive_count == 1 and game.max_players > 1):
+            await asyncio.sleep(2)
+            await end_roulette_game(channel, self.game_id)
+        else:
+            game.next_turn()
+            await asyncio.sleep(2)
+            await play_roulette_round(channel, self.game_id)
 
 # end roulette
 
@@ -784,6 +953,46 @@ async def end_roulette_game(channel, game_id):
             break
 
 
+
+# command to add /coinflip, user bets on heads or tails, if they win they get double their bet, if they lose they lose their bet
+@bot.tree.command(name="coinflip", description="Bet on heads or tails!")
+@app_commands.choices(choice=[
+    app_commands.Choice(name="heads", value="heads"),
+    app_commands.Choice(name="tails", value="tails")
+])
+async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
+    await interaction.response.defer(ephemeral=False)
+    user_id = interaction.user.id
+    current_balance = get_user_balance(user_id)
+    if current_balance < bet:
+        await interaction.followup.send(f"You do not have enough balance to bet **${bet:.2f}**, {interaction.user.name}.", ephemeral=False)
+        return
+    
+    # Deduct bet first
+    update_user_balance(user_id, current_balance - bet)
+    
+    # Flip the coin - randomly choose heads or tails (lowercase)
+    coin_result = random.choice(["heads", "tails"])
+    
+    # Check if they won (their choice matches the result, both lowercase)
+    won = choice.lower() == coin_result
+    
+    # Calculate new balance
+    if won:
+        # They win - get double their bet back (bet was already deducted, so add 2*bet)
+        new_balance = current_balance - bet + (bet * 2)
+        update_user_balance(user_id, new_balance)
+        message = f"You placed **${bet:.2f}** on **{choice}**!\nThe coin landed on **{coin_result}**! You doubled your bet!!\nYour new balance is **${new_balance:.2f}**."
+    else:
+        # They lose - bet was already deducted
+        new_balance = current_balance - bet
+        # Get the opposite choice for display (lowercase)
+        opposite = "tails" if choice.lower() == "heads" else "heads"
+        message = f"You placed **${bet:.2f}** on **{choice}**!\nOuch {interaction.user.name}, the coin landed on **{opposite}**. You lost **${bet:.2f}**.\nYour new balance is **${new_balance:.2f}**."
+    
+    await interaction.followup.send(message, ephemeral=False)
+
+
 # user_balances = {}
 # def get_user_balance(user_id):
 #     # get users balance and start them with 100 if they're new
@@ -808,6 +1017,10 @@ async def on_ready():
         print(f"Synced {len(synced)} commands")
     except Exception as e:
         print(f"Error syncing commands: {e}")
+    
+    # Start the leaderboard update task
+    bot.loop.create_task(update_all_leaderboards())
+    print("Started automatic leaderboard updates")
 
 
 @bot.event
@@ -1010,7 +1223,7 @@ async def harvest(interaction: discord.Interaction):
     #show gathered items, just using 20 for now
     items_text = ""
     for item in gathered_items[:20]:
-        gmo_text = f" (GMO? Yes ✨)" if item["is_gmo"] else " (GMO? No)"
+        gmo_text = " GMO! ✨" if item["is_gmo"] else ""
         items_text += f"• **{item['name']}** - ${item['value']:.2f} ({item['ripeness']}){gmo_text}\n"
 
     embed.add_field(name="📦 Items Gathered", value=items_text or "No items", inline=False)
@@ -1022,14 +1235,295 @@ async def harvest(interaction: discord.Interaction):
     #end harvest
 
 
-# balance command
-@bot.tree.command(name="balance", description="Check your current balance")
-#use defer for thinking message
-async def balance(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
+# # balance command
+# commented since we have userstats
+# @bot.tree.command(name="balance", description="Check your current balance")
+# #use defer for thinking message
+# async def balance(interaction: discord.Interaction):
+#     await interaction.response.defer(ephemeral=True)
+#     user_id = interaction.user.id
+#     user_balance = get_user_balance(user_id)
+#     await interaction.followup.send(f"{interaction.user.name}, you have **${user_balance:.2f}**.")
+
+
+# userstats command
+@bot.tree.command(name="userstats", description="View your statistics!")
+async def userstats(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=False)
+    
     user_id = interaction.user.id
     user_balance = get_user_balance(user_id)
-    await interaction.followup.send(f"{interaction.user.name}, you have **${user_balance:.2f}**.")
+    total_items = get_user_total_items(user_id)
+    forage_count = get_forage_count(user_id)
+    
+    # Calculate items needed for next rankup
+    # PLANTER I: 0-49 (need 50 for PLANTER II)
+    # PLANTER II: 50-149 (need 150 for PLANTER III)
+    # PLANTER III: 150-298 (need 299 for PLANTER IV)
+    # PLANTER IV: 300-498 (need 499 for PLANTER V)
+    # PLANTER V: 500+ (max rank)
+    items_needed = None
+    next_rank = None
+    
+    if forage_count < 50:
+        items_needed = 50 - forage_count
+        next_rank = "PLANTER II"
+    elif forage_count < 150:
+        items_needed = 150 - forage_count
+        next_rank = "PLANTER III"
+    elif forage_count < 299:
+        items_needed = 299 - forage_count
+        next_rank = "PLANTER IV"
+    elif forage_count < 499:
+        items_needed = 499 - forage_count
+        next_rank = "PLANTER V"
+    else:
+        # Max rank achieved
+        items_needed = 0
+        next_rank = "MAX RANK"
+    
+    embed = discord.Embed(
+        title=f"📊 {interaction.user.name}'s Stats",
+        color=discord.Color.blue()
+    )
+    
+    embed.add_field(name="💰 Balance", value=f"**${user_balance:.2f}**", inline=True)
+    embed.add_field(name="🌱 Plants Gathered", value=f"**{forage_count}** plants", inline=True)
+    
+    if items_needed == 0:
+        embed.add_field(name="🏆 Rank Status", value=f"**{next_rank}** - You've reached the maximum rank!", inline=False)
+    else:
+        embed.add_field(name="📈 Next Rank", value=f"**{items_needed}** more plants until **{next_rank}**", inline=False)
+    
+    await interaction.followup.send(embed=embed)
+
+
+# almanac command
+@bot.tree.command(name="almanac", description="View your collection of your gathered items!")
+async def almanac(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=False)
+    
+    user_id = interaction.user.id
+    user_items = get_user_items(user_id)
+    
+    if not user_items:
+        embed = discord.Embed(
+            title=f"{interaction.user.name}'s Almanac",
+            description="Your collection is empty! Start gathering items with `/gather` or `/harvest` to fill it up!",
+            color=discord.Color.orange()
+        )
+        await interaction.followup.send(embed=embed)
+        return
+    
+    # Build the almanac text
+    almanac_text = ""
+    for item_name, count in user_items.items():
+        # Get description or use a default one
+        description = ITEM_DESCRIPTIONS.get(item_name, "A mysterious item from nature!")
+        # Format: [ ITEM NAME ] xCount : "Description"
+        almanac_text += f"[ {item_name.upper()} ] x{count} : \"{description}\"\n"
+    
+    embed = discord.Embed(
+        title=f"{interaction.user.name}'s Almanac",
+        description=almanac_text,
+        color=discord.Color.green()
+    )
+    
+    await interaction.followup.send(embed=embed)
+
+
+# Leaderboard pagination view
+class LeaderboardView(discord.ui.View):
+    def __init__(self, leaderboard_data: list[tuple[int, float | int]], leaderboard_type: str, guild: discord.Guild, timeout=300):
+        super().__init__(timeout=timeout)
+        self.leaderboard_data = leaderboard_data
+        self.leaderboard_type = leaderboard_type
+        self.guild = guild
+        self.current_page = 0
+        self.items_per_page = 10
+        self.total_pages = (len(leaderboard_data) + self.items_per_page - 1) // self.items_per_page
+        
+    def get_page_data(self, page: int) -> list[tuple[int, float | int]]:
+        """Get the data for a specific page."""
+        start_idx = page * self.items_per_page
+        end_idx = start_idx + self.items_per_page
+        return self.leaderboard_data[start_idx:end_idx]
+    
+    def get_username(self, user_id: int) -> str:
+        """Get username from guild, or return 'Unknown User' if not found."""
+        member = self.guild.get_member(user_id)
+        if member:
+            return member.display_name or member.name
+        return "Unknown User"
+    
+    def create_embed(self, page: int) -> discord.Embed:
+        """Create the embed for a specific page."""
+        page_data = self.get_page_data(page)
+        
+        if self.leaderboard_type == "plants":
+            title = "🌱 Plants Leaderboard"
+            description = "Ranked by total items gathered"
+            value_name = "Items"
+        else:  # money
+            title = "💰 Money Leaderboard"
+            description = "Ranked by balance"
+            value_name = "Balance"
+        
+        embed = discord.Embed(
+            title=title,
+            description=description,
+            color=discord.Color.gold()
+        )
+        
+        leaderboard_text = ""
+        start_rank = page * self.items_per_page + 1
+        
+        for idx, (user_id, value) in enumerate(page_data):
+            rank = start_rank + idx
+            username = self.get_username(user_id)
+            
+            if self.leaderboard_type == "plants":
+                leaderboard_text += f"**{rank}.** {username}: **{value}** items\n"
+            else:  # money
+                leaderboard_text += f"**{rank}.** {username}: **${value:.2f}**\n"
+        
+        if not leaderboard_text:
+            leaderboard_text = "No data available"
+        
+        embed.add_field(name="Rankings", value=leaderboard_text, inline=False)
+        embed.set_footer(text=f"Page {page + 1} of {self.total_pages} | Total: {len(self.leaderboard_data)} users")
+        
+        return embed
+    
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, disabled=True)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            embed = self.create_embed(self.current_page)
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+    
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            self.update_buttons()
+            embed = self.create_embed(self.current_page)
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+    
+    def update_buttons(self):
+        """Update button states based on current page."""
+        self.previous_button.disabled = self.current_page == 0
+        self.next_button.disabled = self.current_page >= self.total_pages - 1
+
+
+# Store leaderboard message IDs per guild and type
+leaderboard_messages = {}  # {guild_id: {"plants": message_id, "money": message_id}}
+
+async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str):
+    """Update or create a leaderboard message in the #leaderboard channel."""
+    # Find the leaderboard channel
+    leaderboard_channel = discord.utils.get(guild.text_channels, name="leaderboard")
+    
+    if not leaderboard_channel:
+        return  # Channel doesn't exist, skip
+    
+    # Get all guild member IDs
+    guild_member_ids = {member.id for member in guild.members}
+    
+    # Get leaderboard data
+    if leaderboard_type == "plants":
+        all_data = get_all_users_total_items()
+    else:  # money
+        all_data = get_all_users_balance()
+    
+    # Filter to only include users in the guild
+    leaderboard_data = [(user_id, value) for user_id, value in all_data if user_id in guild_member_ids]
+    
+    if not leaderboard_data:
+        return  # No data available
+    
+    # Create embed (first page only, no pagination for auto-updates)
+    if leaderboard_type == "plants":
+        title = "🌱 Plants Leaderboard"
+        description = "Ranked by total items gathered"
+    else:  # money
+        title = "💰 Money Leaderboard"
+        description = "Ranked by balance"
+    
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=discord.Color.gold()
+    )
+    
+    # Show top 10
+    leaderboard_text = ""
+    for idx, (user_id, value) in enumerate(leaderboard_data[:10]):
+        rank = idx + 1
+        member = guild.get_member(user_id)
+        username = member.display_name or member.name if member else "Unknown User"
+        
+        if leaderboard_type == "plants":
+            leaderboard_text += f"**{rank}.** {username}: **{value}** items\n"
+        else:  # money
+            leaderboard_text += f"**{rank}.** {username}: **${value:.2f}**\n"
+    
+    if not leaderboard_text:
+        leaderboard_text = "No data available"
+    
+    embed.add_field(name="Top 10 Rankings", value=leaderboard_text, inline=False)
+    embed.set_footer(text=f"Updates every minute | Total: {len(leaderboard_data)} users")
+    embed.timestamp = discord.utils.utcnow()
+    
+    # Try to edit existing message, or create new one
+    guild_id = guild.id
+    if guild_id not in leaderboard_messages:
+        leaderboard_messages[guild_id] = {}
+    
+    message_id = leaderboard_messages[guild_id].get(leaderboard_type)
+    
+    try:
+        if message_id:
+            # Try to edit existing message
+            try:
+                message = await leaderboard_channel.fetch_message(message_id)
+                await message.edit(embed=embed)
+                return
+            except (discord.NotFound, discord.HTTPException):
+                # Message was deleted or error, create new one
+                pass
+        
+        # Create new message
+        message = await leaderboard_channel.send(embed=embed)
+        leaderboard_messages[guild_id][leaderboard_type] = message.id
+    except Exception as e:
+        print(f"Error updating leaderboard in {guild.name}: {e}")
+
+async def update_all_leaderboards():
+    """Background task to update all leaderboards every minute."""
+    await bot.wait_until_ready()
+    
+    # Wait a bit for guilds to fully load
+    await asyncio.sleep(5)
+    
+    while not bot.is_closed():
+        try:
+            # Update leaderboards for all guilds the bot is in
+            for guild in bot.guilds:
+                await update_leaderboard_message(guild, "plants")
+                await asyncio.sleep(1)  # Small delay between updates
+                await update_leaderboard_message(guild, "money")
+                await asyncio.sleep(1)
+        except Exception as e:
+            print(f"Error in leaderboard update task: {e}")
+        
+        # Wait 60 seconds before next update
+        await asyncio.sleep(60)
 
 
 # gambling commands
