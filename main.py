@@ -1331,6 +1331,41 @@ async def almanac(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 
+# pay command
+@bot.tree.command(name="pay", description="Pay money to another user!")
+async def pay(interaction: discord.Interaction, amount: float, user: discord.Member):
+    await interaction.response.defer(ephemeral=False)
+    
+    sender_id = interaction.user.id
+    recipient_id = user.id
+    
+    # Can't pay yourself
+    if sender_id == recipient_id:
+        await interaction.followup.send("❌ You can't pay yourself!", ephemeral=True)
+        return
+    
+    # Check sender balance
+    sender_balance = get_user_balance(sender_id)
+    if sender_balance < amount:
+        await interaction.followup.send(f"❌ You don't have enough balance!", ephemeral=True)
+        return
+    
+    # Get recipient balance
+    recipient_balance = get_user_balance(recipient_id)
+    
+    # Transfer money
+    update_user_balance(sender_id, sender_balance - amount)
+    update_user_balance(recipient_id, recipient_balance + amount)
+    
+    # Send confirmation message
+    embed = discord.Embed(
+        title="💰 Payment Successful!",
+        description=f"**{interaction.user.name}** paid **{user.name}** **${amount:.2f}**!",
+        color=discord.Color.green()
+    )
+    await interaction.followup.send(embed=embed)
+
+
 # Leaderboard pagination view
 class LeaderboardView(discord.ui.View):
     def __init__(self, leaderboard_data: list[tuple[int, float | int]], leaderboard_type: str, guild: discord.Guild, timeout=300):
@@ -1382,9 +1417,23 @@ class LeaderboardView(discord.ui.View):
             username = self.get_username(user_id)
             
             if self.leaderboard_type == "plants":
-                leaderboard_text += f"**{rank}.** {username}: **{value}** items\n"
+                # Top 3 get different tree emojis, bottom 7 get plant emoji
+                if rank == 1:
+                    emoji = "🌳"
+                elif rank == 2:
+                    emoji = "🎄"
+                elif rank == 3:
+                    emoji = "🌲"
+                else:
+                    emoji = "🌱"
+                leaderboard_text += f"{emoji} **{rank}.** {username}: **{value}** items\n"
             else:  # money
-                leaderboard_text += f"**{rank}.** {username}: **${value:.2f}**\n"
+                # Top 3 get money bag, bottom 7 get cash emoji
+                if rank <= 3:
+                    emoji = "💰"
+                else:
+                    emoji = "💵"
+                leaderboard_text += f"{emoji} **{rank}.** {username}: **${value:.2f}**\n"
         
         if not leaderboard_text:
             leaderboard_text = "No data available"
@@ -1468,9 +1517,23 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
         username = member.display_name or member.name if member else "Unknown User"
         
         if leaderboard_type == "plants":
-            leaderboard_text += f"**{rank}.** {username}: **{value}** items\n"
+            # Top 3 get different tree emojis, bottom 7 get plant emoji
+            if rank == 1:
+                emoji = "🌳"
+            elif rank == 2:
+                emoji = "🎄"
+            elif rank == 3:
+                emoji = "🌲"
+            else:
+                emoji = "🌱"
+            leaderboard_text += f"{emoji} **{rank}.** {username}: **{value}** items\n"
         else:  # money
-            leaderboard_text += f"**{rank}.** {username}: **${value:.2f}**\n"
+            # Top 3 get money bag, bottom 7 get cash emoji
+            if rank <= 3:
+                emoji = "💰"
+            else:
+                emoji = "💵"
+            leaderboard_text += f"{emoji} **{rank}.** {username}: **${value:.2f}**\n"
     
     if not leaderboard_text:
         leaderboard_text = "No data available"
