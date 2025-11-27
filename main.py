@@ -1988,9 +1988,7 @@ async def russian(
 #END
 
 # Cloud Run compatibility - add simple HTTP server
-import threading
-import time
-import os
+# Note: threading, time, os already imported at top
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -2003,6 +2001,10 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
+    
+    def log_message(self, format, *args):
+        # Suppress HTTP server logs
+        pass
 
 def start_http_server():
     """Start a simple HTTP server for Cloud Run health checks"""
@@ -2013,6 +2015,10 @@ def start_http_server():
         server.serve_forever()
     except Exception as e:
         print(f"HTTP server error: {e}")
+        import traceback
+        traceback.print_exc()
+        # Re-raise to prevent silent failures
+        raise
 
 def start_discord_bot():
     """Start the Discord bot with error handling"""
@@ -2035,15 +2041,21 @@ def start_discord_bot():
         bot.run(token, log_handler=handler, log_level=logging.DEBUG)
     except Exception as e:
         print(f"Discord bot error: {e}")
-        # Keep the process alive even if bot fails
+        import traceback
+        traceback.print_exc()
+        # Keep the process alive even if bot fails (so HTTP server keeps running)
         while True:
             time.sleep(60)
 
 if __name__ == "__main__":
     print("Starting SlashGather Discord Bot...")
     if is_production:
-        http_thread = threading.Thread(target=start_http_server, daemon=True)
+        # Start HTTP server as non-daemon so it keeps running
+        http_thread = threading.Thread(target=start_http_server, daemon=False)
         http_thread.start()
+        # Give the HTTP server time to bind to the port
+        time.sleep(2)
+        print("HTTP health check server started and bound to port")
     else:
         print("Health check server disabled in development mode")
 
