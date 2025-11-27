@@ -72,6 +72,12 @@ def _ensure_user_document(user_id: int) -> None:
             "total_items": 0,
             "categories": {},
             "items": {}
+        },
+        "basket_upgrades": {
+            "basket": 0,
+            "shoes": 0,
+            "gloves": 0,
+            "soil": 0
         }
     }
     users.update_one(
@@ -253,4 +259,29 @@ def get_all_users_total_items() -> list[tuple[int, int]]:
     # Sort by total_items descending
     results.sort(key=_get_total_items_value, reverse=True)
     return results
-    
+
+
+def get_user_basket_upgrades(user_id: int) -> Dict[str, int]:
+    """Get user's basket upgrade levels. Returns dict with keys: basket, shoes, gloves, soil."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"basket_upgrades": 1})
+    if not doc:
+        return {"basket": 0, "shoes": 0, "gloves": 0, "soil": 0}
+    upgrades = doc.get("basket_upgrades", {})
+    return {
+        "basket": upgrades.get("basket", 0),
+        "shoes": upgrades.get("shoes", 0),
+        "gloves": upgrades.get("gloves", 0),
+        "soil": upgrades.get("soil", 0)
+    }
+
+
+def set_user_basket_upgrade(user_id: int, upgrade_type: str, tier: int) -> None:
+    """Set user's basket upgrade tier. upgrade_type: 'basket', 'shoes', 'gloves', or 'soil'."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {f"basket_upgrades.{upgrade_type}": int(tier)}},
+        upsert=True,
+    )

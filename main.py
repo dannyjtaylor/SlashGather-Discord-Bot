@@ -63,6 +63,8 @@ from database import (
     get_all_users_total_items,
     get_user_total_items,
     get_user_items,
+    get_user_basket_upgrades,
+    set_user_basket_upgrade,
 )
 
 try:
@@ -83,6 +85,61 @@ intents.members = True
 bot = commands.Bot(command_prefix='/', intents=intents)
 GATHER_COOLDOWN = 60 #(seconds)
 HARVEST_COOLDOWN = 60 * 60 #(an hour)
+
+# BASKET UPGRADE PATHS
+UPGRADE_PRICES = [500, 1500, 4000, 10000, 25000, 60000, 150000, 350000, 700000, 1000000]
+
+BASKET_UPGRADES = [
+    {"name": "String Basket", "multiplier": 1.1},
+    {"name": "Wooden Basket", "multiplier": 1.5},
+    {"name": "Stone Basket", "multiplier": 2.0},
+    {"name": "Iron Basket", "multiplier": 3.0},
+    {"name": "Gold Basket", "multiplier": 5.0},
+    {"name": "Diamond Basket", "multiplier": 7.5},
+    {"name": "Netherite Basket", "multiplier": 12.0},
+    {"name": "Void Basket", "multiplier": 20.0},
+    {"name": "Spectral Basket", "multiplier": 30.0},
+    {"name": "Luminite Basket", "multiplier": 55.0},
+]
+
+SHOES_UPGRADES = [
+    {"name": "Sandals", "reduction": 1},
+    {"name": "Tennis Shoes", "reduction": 2},
+    {"name": "Nike Air Forces", "reduction": 4},
+    {"name": "Diamond Boots", "reduction": 6},
+    {"name": "Herme's Boots", "reduction": 8},
+    {"name": "Lightning Boots", "reduction": 10},
+    {"name": "Frostpark Boots", "reduction": 15},
+    {"name": "Lava Waders", "reduction": 20},
+    {"name": "Terraspark Boots", "reduction": 25},
+    {"name": "Solar Boots", "reduction": 30},
+]
+
+GLOVES_UPGRADES = [
+    {"name": "Paper Gloves", "chain_chance": 0.01},
+    {"name": "Oven Mitts", "chain_chance": 0.05},
+    {"name": "Latex Gloves", "chain_chance": 0.08},
+    {"name": "Surgical Gloves", "chain_chance": 0.10},
+    {"name": "Green Thumb Gloves", "chain_chance": 0.15},
+    {"name": "Astral Gloves", "chain_chance": 0.20},
+    {"name": "Spectral Gloves", "chain_chance": 0.25},
+    {"name": "Luminite Mitts", "chain_chance": 0.30},
+    {"name": "Plutonium Hands", "chain_chance": 0.35},
+    {"name": "Galaxial Gloves", "chain_chance": 0.40},
+]
+
+SOIL_UPGRADES = [
+    {"name": "Asphalt", "gmo_boost": 0.005},
+    {"name": "Dry Soil", "gmo_boost": 0.01},
+    {"name": "Grass", "gmo_boost": 0.015},
+    {"name": "Wet Soil", "gmo_boost": 0.02},
+    {"name": "Fertile Soil", "gmo_boost": 0.03},
+    {"name": "Fertile Crescent", "gmo_boost": 0.04},
+    {"name": "Oasis Soil", "gmo_boost": 0.05},
+    {"name": "Astral Soil", "gmo_boost": 0.06},
+    {"name": "Solar Soil", "gmo_boost": 0.08},
+    {"name": "The Best Soil In The Entire Universe", "gmo_boost": 0.10},
+]
 
 def can_harvest(user_id):
     last_harvest_time = get_user_last_harvest_time(user_id)
@@ -168,7 +225,18 @@ def can_gather(user_id):
     #right off the bat if the user is new they have no cooldown
     if last_gather_time == 0:
         return True, 0
-    cooldown_end = last_gather_time + GATHER_COOLDOWN
+    
+    # Get shoes upgrade cooldown reduction
+    user_upgrades = get_user_basket_upgrades(user_id)
+    shoes_tier = user_upgrades["shoes"]
+    cooldown_reduction = 0
+    if shoes_tier > 0:
+        cooldown_reduction = SHOES_UPGRADES[shoes_tier - 1]["reduction"]
+    
+    # Calculate effective cooldown (base cooldown minus reduction, minimum 0)
+    effective_cooldown = max(0, GATHER_COOLDOWN - cooldown_reduction)
+    cooldown_end = last_gather_time + effective_cooldown
+    
     if current_time >= cooldown_end:
         return True, 0
     else:
@@ -503,7 +571,7 @@ async def play_roulette_round(channel, game_id):
             
             # Create continue/cashout view (only allow cash out if not first turn)
             is_first_turn_here = all(player['rounds_survived'] == 0 for player in game.players.values())
-            view = RouletteContinueView(game_id, allow_cashout=not is_first_turn_here)
+            view = RouletteContinueView(game_id, timeout=300, allow_cashout=not is_first_turn_here)
             
             if is_first_turn_here:
                 embed = discord.Embed(
@@ -595,7 +663,7 @@ async def play_roulette_round(channel, game_id):
         potential_winnings = next_player['current_stake']
     
     # Create continue/cashout view (only allow cash out if not first turn)
-    view = RouletteContinueView(game_id, allow_cashout=not is_first_turn)
+    view = RouletteContinueView(game_id, timeout=300, allow_cashout=not is_first_turn)
     
     if is_first_turn:
         embed = discord.Embed(
@@ -710,25 +778,28 @@ class RouletteJoinView(discord.ui.View):
         
         # Start the actual game
         await start_roulette_game(interaction.channel, self.game_id)
-
-        async def on_timeout(self):
-        #auto-start the game after 5 minutes if host hasn't started it
-            if self.game_id in active_roulette_games:
-                game = active_roulette_games[self.game_id]
-                if not game.game_started and len(game.players) >= 1:  # At least host is in game
-                    game.game_started = True
-                    game.pot = game.bet_amount * len(game.players)
+    
+    async def on_timeout(self):
+        # Auto-start the game after 5 minutes if host hasn't started it
+        if self.game_id in active_roulette_games:
+            game = active_roulette_games[self.game_id]
+            if not game.game_started and len(game.players) >= 1:  # At least host is in game
+                game.game_started = True
+                game.pot = game.bet_amount * len(game.players)
                 
-                # find the channel where this game is running
-                    channel = None
-                    for ch_id, tracked_game_id in active_roulette_channel_games.items():
-                        if tracked_game_id == self.game_id:
-                            channel = bot.get_channel(ch_id)
-                            break
+                # Find the channel where this game is running
+                channel = None
+                for ch_id, tracked_game_id in active_roulette_channel_games.items():
+                    if tracked_game_id == self.game_id:
+                        channel = bot.get_channel(ch_id)
+                        break
                 
-                    if channel:
+                if channel:
+                    try:
                         await channel.send("⏰ **Auto-starting game after 5 minutes!**")
                         await start_roulette_game(channel, self.game_id)
+                    except Exception as e:
+                        print(f"Error auto-starting roulette game: {e}")
 
 
 
@@ -1009,7 +1080,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="🌳 running /gather on V0.0.0 :3"
+            name="🌳 running /gather on V0.1.0 :3"
         )
     )
     try:
@@ -1084,16 +1155,27 @@ async def gather(interaction: discord.Interaction):
     else:
         final_value = item["base_value"]
 
+    # Get user upgrades
+    user_upgrades = get_user_basket_upgrades(user_id)
+    
+    # Apply soil upgrade GMO chance boost
+    soil_tier = user_upgrades["soil"]
+    base_gmo_chance = 0.05
+    soil_gmo_boost = SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] if soil_tier > 0 else 0
+    gmo_chance = base_gmo_chance + soil_gmo_boost
+    
     # see if the gathered item is a GMO
-    gmo_chance = 0.05
     is_gmo = random.choices([True, False], weights=[gmo_chance, 1-gmo_chance], k=1)[0]
     if is_gmo:
-        final_value *= 1.5
-    else:
-        final_value *= 1
+        final_value *= 2
+    
+    # Apply basket upgrade money multiplier
+    basket_tier = user_upgrades["basket"]
+    if basket_tier > 0:
+        basket_multiplier = BASKET_UPGRADES[basket_tier - 1]["multiplier"]
+        final_value *= basket_multiplier
 
     #add the value to the balance for the user
-    user_id = interaction.user.id
     current_balance = get_user_balance(user_id)
     new_balance = current_balance + final_value
     #save to database
@@ -1133,6 +1215,18 @@ async def gather(interaction: discord.Interaction):
     # add a line to show [username] in [month]
     embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
     embed.add_field(name="new balance: ", value=f"**${new_balance:.2f}**", inline=False)
+    
+    # Check for chain chance (gloves upgrade)
+    gloves_tier = user_upgrades["gloves"]
+    chain_triggered = False
+    if gloves_tier > 0:
+        chain_chance = GLOVES_UPGRADES[gloves_tier - 1]["chain_chance"]
+        chain_triggered = random.random() < chain_chance
+        if chain_triggered:
+            # Reset cooldown by setting last_gather_time to 0 (allows immediate next gather)
+            update_user_last_gather_time(user_id, 0)
+            embed.add_field(name="⚡ CHAIN!", value="Your cooldown has been reset! Gather again!", inline=False)
+    
     await interaction.followup.send(embed=embed) 
 
 #/harvest command, basically /castnet
@@ -1149,6 +1243,18 @@ async def harvest(interaction: discord.Interaction):
         )
         return
     set_harvest_cooldown(user_id)
+    
+    # Get user upgrades (same for all 10 gathers)
+    user_upgrades = get_user_basket_upgrades(user_id)
+    basket_tier = user_upgrades["basket"]
+    soil_tier = user_upgrades["soil"]
+    
+    # Get upgrade multipliers
+    basket_multiplier = BASKET_UPGRADES[basket_tier - 1]["multiplier"] if basket_tier > 0 else 1.0
+    base_gmo_chance = 0.05
+    soil_gmo_boost = SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] if soil_tier > 0 else 0
+    gmo_chance = base_gmo_chance + soil_gmo_boost
+    
     #/gather 10 times
     gathered_items = []
     total_value = 0.0
@@ -1175,11 +1281,13 @@ async def harvest(interaction: discord.Interaction):
             final_value = item["base_value"]
             ripeness = {"name": "Normal"}
 
-        #check for whatevers gathered is a GMO
-        gmo_chance = 0.05
+        # Apply soil upgrade GMO chance boost and check for GMO
         is_gmo = random.choices([True, False], weights=[gmo_chance, 1-gmo_chance], k=1)[0]
         if is_gmo:
             final_value *= 1.5
+        
+        # Apply basket upgrade money multiplier
+        final_value *= basket_multiplier
 
         #update new balance
         current_balance += final_value
@@ -1332,6 +1440,197 @@ async def almanac(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 
+# Basket Upgrade View with buttons
+class BasketUpgradeView(discord.ui.View):
+    def __init__(self, user_id: int, guild: discord.Guild, timeout=300):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.guild = guild
+    
+    def create_embed(self) -> discord.Embed:
+        """Create the basket upgrade embed."""
+        upgrades = get_user_basket_upgrades(self.user_id)
+        balance = get_user_balance(self.user_id)
+        
+        embed = discord.Embed(
+            title="🛒 Gear Upgrade Shop",
+            description=f"💰 Your Balance: **${balance:,.2f}**\n\nChoose an upgrade path to purchase!",
+            color=discord.Color.gold()
+        )
+        
+        # Path 1: Baskets (Money Multiplier)
+        basket_tier = upgrades["basket"]
+        current_basket = "No Basket" if basket_tier == 0 else BASKET_UPGRADES[basket_tier - 1]["name"]
+        current_multiplier = 1.0 if basket_tier == 0 else BASKET_UPGRADES[basket_tier - 1]["multiplier"]
+        if basket_tier < 10:
+            next_basket = BASKET_UPGRADES[basket_tier]["name"]
+            next_multiplier = BASKET_UPGRADES[basket_tier]["multiplier"]
+            next_cost = UPGRADE_PRICES[basket_tier]
+            can_afford = "✅" if balance >= next_cost else "❌"
+            basket_text = f"**Upgrade {basket_tier + 1}/10**\n**Current:** {current_basket} ({current_multiplier}x money)\n**Next:** {next_basket} ({next_multiplier}x money)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+        else:
+            basket_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_basket} ({current_multiplier}x money)"
+        
+        embed.add_field(
+            name="🧺 PATH 1: BASKETS",
+            value=basket_text,
+            inline=False
+        )
+        
+        # Path 2: Shoes (Cooldown Reduction)
+        shoes_tier = upgrades["shoes"]
+        current_shoes = "Bare Feet" if shoes_tier == 0 else SHOES_UPGRADES[shoes_tier - 1]["name"]
+        current_reduction = 0 if shoes_tier == 0 else SHOES_UPGRADES[shoes_tier - 1]["reduction"]
+        if shoes_tier < 10:
+            next_shoes = SHOES_UPGRADES[shoes_tier]["name"]
+            next_reduction = SHOES_UPGRADES[shoes_tier]["reduction"]
+            next_cost = UPGRADE_PRICES[shoes_tier]
+            can_afford = "✅" if balance >= next_cost else "❌"
+            shoes_text = f"**Upgrade {shoes_tier + 1}/10**\n**Current:** {current_shoes} (-{current_reduction}s cooldown)\n**Next:** {next_shoes} (-{next_reduction}s cooldown)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+        else:
+            shoes_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_shoes} (-{current_reduction}s cooldown)"
+        
+        embed.add_field(
+            name="👟 PATH 2: RUNNING SHOES",
+            value=shoes_text,
+            inline=False
+        )
+        
+        # Path 3: Gloves (Chain Chance)
+        gloves_tier = upgrades["gloves"]
+        current_gloves = "Bare Hands" if gloves_tier == 0 else GLOVES_UPGRADES[gloves_tier - 1]["name"]
+        current_chain = 0 if gloves_tier == 0 else GLOVES_UPGRADES[gloves_tier - 1]["chain_chance"] * 100
+        if gloves_tier < 10:
+            next_gloves = GLOVES_UPGRADES[gloves_tier]["name"]
+            next_chain = GLOVES_UPGRADES[gloves_tier]["chain_chance"] * 100
+            next_cost = UPGRADE_PRICES[gloves_tier]
+            can_afford = "✅" if balance >= next_cost else "❌"
+            gloves_text = f"**Upgrade {gloves_tier + 1}/10**\n**Current:** {current_gloves} ({current_chain}% chain chance)\n**Next:** {next_gloves} ({next_chain}% chain chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+        else:
+            gloves_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_gloves} ({current_chain}% chain chance)"
+        
+        embed.add_field(
+            name="🧤 PATH 3: GLOVES",
+            value=gloves_text,
+            inline=False
+        )
+        
+        # Path 4: Soil (GMO Chance)
+        soil_tier = upgrades["soil"]
+        current_soil = "Regular Soil" if soil_tier == 0 else SOIL_UPGRADES[soil_tier - 1]["name"]
+        current_gmo = 0 if soil_tier == 0 else SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] * 100
+        if soil_tier < 10:
+            next_soil = SOIL_UPGRADES[soil_tier]["name"]
+            next_gmo = SOIL_UPGRADES[soil_tier]["gmo_boost"] * 100
+            next_cost = UPGRADE_PRICES[soil_tier]
+            can_afford = "✅" if balance >= next_cost else "❌"
+            soil_text = f"**Upgrade {soil_tier + 1}/10**\n**Current:** {current_soil} (+{current_gmo}% GMO chance)\n**Next:** {next_soil} (+{next_gmo}% GMO chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+        else:
+            soil_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_soil} (+{current_gmo}% GMO chance)"
+        
+        embed.add_field(
+        name="🌱 PATH 4: SOIL",
+            value=soil_text,
+            inline=False
+        )
+        
+        embed.set_footer(text="Click a button below to purchase an upgrade!")
+        
+        return embed
+    
+    @discord.ui.button(label="🧺 Buy Basket", style=discord.ButtonStyle.primary, row=0)
+    async def buy_basket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_purchase(interaction, "basket", BASKET_UPGRADES, "Basket")
+    
+    @discord.ui.button(label="👟 Buy Shoes", style=discord.ButtonStyle.primary, row=0)
+    async def buy_shoes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_purchase(interaction, "shoes", SHOES_UPGRADES, "Shoes")
+    
+    @discord.ui.button(label="🧤 Buy Gloves", style=discord.ButtonStyle.primary, row=1)
+    async def buy_gloves(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_purchase(interaction, "gloves", GLOVES_UPGRADES, "Gloves")
+    
+    @discord.ui.button(label="🌱 Buy Soil", style=discord.ButtonStyle.primary, row=1)
+    async def buy_soil(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_purchase(interaction, "soil", SOIL_UPGRADES, "Soil")
+    
+    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=2)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ This is not your gear shop!", ephemeral=True)
+            return
+        
+        embed = self.create_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def handle_purchase(self, interaction: discord.Interaction, upgrade_type: str, upgrade_list: list, upgrade_name: str):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(f"❌ This is not your gear shop!", ephemeral=True)
+            return
+        
+        upgrades = get_user_basket_upgrades(self.user_id)
+        current_tier = upgrades[upgrade_type]
+        
+        if current_tier >= 10:
+            await interaction.response.send_message(f"❌ You already have the maximum {upgrade_name} upgrade!", ephemeral=True)
+            return
+        
+        cost = UPGRADE_PRICES[current_tier]
+        balance = get_user_balance(self.user_id)
+        
+        if balance < cost:
+            await interaction.response.send_message(
+                f"❌ You don't have enough money! You need **${cost:,.2f}** but only have **${balance:,.2f}**.", 
+                ephemeral=True
+            )
+            return
+        
+        # Deduct money and upgrade
+        new_balance = balance - cost
+        update_user_balance(self.user_id, new_balance)
+        set_user_basket_upgrade(self.user_id, upgrade_type, current_tier + 1)
+        
+        next_upgrade = upgrade_list[current_tier]
+        
+        # Send quick confirmation and update the main embed
+        await interaction.response.send_message(f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
+        
+        embed = self.create_embed()
+        await interaction.message.edit(embed=embed, view=self)
+
+
+# Gear command
+@bot.tree.command(name="gear", description="Upgrade your gathering equipment!")
+async def gear(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=False)
+    
+    user_id = interaction.user.id
+    view = BasketUpgradeView(user_id, interaction.guild)
+    embed = view.create_embed()
+    
+    await interaction.followup.send(embed=embed, view=view)
+
+
+# # Temporary admin command for dev - give yourself money
+# @bot.tree.command(name="danny", description="Dev command - Give yourself money")
+# async def danny(interaction: discord.Interaction):
+#     await interaction.response.defer(ephemeral=True)
+    
+#     user_id = interaction.user.id
+#     current_balance = get_user_balance(user_id)
+#     new_balance = current_balance + 1_000_000_000  # 1 billion
+#     update_user_balance(user_id, new_balance)
+    
+#     embed = discord.Embed(
+#         title="💰 Money Added!",
+#         description=f"You've been given **$1,000,000,000**!",
+#         color=discord.Color.gold()
+#     )
+#     embed.add_field(name="💰 New Balance", value=f"${new_balance:,.2f}", inline=False)
+    
+#     await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 # Leaderboard pagination view
 class LeaderboardView(discord.ui.View):
     def __init__(self, leaderboard_data: list[tuple[int, float | int]], leaderboard_type: str, guild: discord.Guild, timeout=300):
@@ -1361,12 +1660,12 @@ class LeaderboardView(discord.ui.View):
         page_data = self.get_page_data(page)
         
         if self.leaderboard_type == "plants":
-            title = "🌱 Plants Leaderboard"
-            description = "Ranked by total items gathered"
+            title = "**🌱 PLANTS**"
+            description = ""
             value_name = "Items"
         else:  # money
-            title = "💰 Money Leaderboard"
-            description = "Ranked by balance"
+            title = "**💰 MONEY**"
+            description = ""
             value_name = "Balance"
         
         embed = discord.Embed(
@@ -1449,11 +1748,11 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
     
     # Create embed (first page only, no pagination for auto-updates)
     if leaderboard_type == "plants":
-        title = "🌱 Plants Leaderboard"
-        description = "Ranked by total items gathered"
+        title = "**🌱 PLANTS**"
+        description = ""
     else:  # money
-        title = "💰 Money Leaderboard"
-        description = "Ranked by balance"
+        title = "**💰 MONEY**"
+        description = ""
     
     embed = discord.Embed(
         title=title,
@@ -1494,15 +1793,37 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
                 message = await leaderboard_channel.fetch_message(message_id)
                 await message.edit(embed=embed)
                 return
-            except (discord.NotFound, discord.HTTPException):
-                # Message was deleted or error, create new one
-                pass
+            except discord.NotFound:
+                # Message was deleted, search for existing one
+                message_id = None
+            except discord.HTTPException as e:
+                # Other error (permissions, etc.), search for existing one
+                print(f"Error editing {leaderboard_type} leaderboard in {guild.name}: {e}")
+                message_id = None
         
-        # Create new message
+        # If no valid message_id, search for existing leaderboard message in channel
+        if not message_id:
+            try:
+                # Search through recent messages to find existing leaderboard
+                async for message in leaderboard_channel.history(limit=50):
+                    if message.author.id == bot.user.id and message.embeds:
+                        embed_title = message.embeds[0].title if message.embeds[0].title else ""
+                        # Check if this is the leaderboard message we're looking for
+                        if (leaderboard_type == "plants" and "🌱 PLANTS" in embed_title) or \
+                           (leaderboard_type == "money" and "💰 MONEY" in embed_title):
+                            # Found existing message, update it
+                            message_id = message.id
+                            leaderboard_messages[guild_id][leaderboard_type] = message_id
+                            await message.edit(embed=embed)
+                            return
+            except Exception as e:
+                print(f"Error searching for existing leaderboard message: {e}")
+        
+        # Create new message only if we couldn't find or edit existing one
         message = await leaderboard_channel.send(embed=embed)
         leaderboard_messages[guild_id][leaderboard_type] = message.id
     except Exception as e:
-        print(f"Error updating leaderboard in {guild.name}: {e}")
+        print(f"Error updating {leaderboard_type} leaderboard in {guild.name}: {e}")
 
 async def update_all_leaderboards():
     """Background task to update all leaderboards every minute."""
