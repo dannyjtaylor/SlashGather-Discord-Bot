@@ -1080,11 +1080,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-<<<<<<< HEAD
             name="🌳 running /gather on V0.1.0 :3"
-=======
-            name="🌳 running /gather on V0.0.2 :3"
->>>>>>> 3fd3b851207020725fa328265e33a45fb09bbf1e
         )
     )
     try:
@@ -1288,7 +1284,7 @@ async def harvest(interaction: discord.Interaction):
         # Apply soil upgrade GMO chance boost and check for GMO
         is_gmo = random.choices([True, False], weights=[gmo_chance, 1-gmo_chance], k=1)[0]
         if is_gmo:
-            final_value *= 1.5
+            final_value *= 2
         
         # Apply basket upgrade money multiplier
         final_value *= basket_multiplier
@@ -1443,7 +1439,6 @@ async def almanac(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 
-<<<<<<< HEAD
 # Basket Upgrade View with buttons
 class BasketUpgradeView(discord.ui.View):
     def __init__(self, user_id: int, guild: discord.Guild, timeout=300):
@@ -1533,7 +1528,7 @@ class BasketUpgradeView(discord.ui.View):
             soil_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_soil} (+{current_gmo}% GMO chance)"
         
         embed.add_field(
-        name="🌱 PATH 4: SOIL",
+            name="🌱 PATH 4: SOIL",
             value=soil_text,
             inline=False
         )
@@ -1615,26 +1610,7 @@ async def gear(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed, view=view)
 
 
-# # Temporary admin command for dev - give yourself money
-# @bot.tree.command(name="danny", description="Dev command - Give yourself money")
-# async def danny(interaction: discord.Interaction):
-#     await interaction.response.defer(ephemeral=True)
-    
-#     user_id = interaction.user.id
-#     current_balance = get_user_balance(user_id)
-#     new_balance = current_balance + 1_000_000_000  # 1 billion
-#     update_user_balance(user_id, new_balance)
-    
-#     embed = discord.Embed(
-#         title="💰 Money Added!",
-#         description=f"You've been given **$1,000,000,000**!",
-#         color=discord.Color.gold()
-#     )
-#     embed.add_field(name="💰 New Balance", value=f"${new_balance:,.2f}", inline=False)
-    
-#     await interaction.followup.send(embed=embed, ephemeral=True)
-=======
-# pay command
+# Pay command
 @bot.tree.command(name="pay", description="Pay money to another user!")
 async def pay(interaction: discord.Interaction, amount: float, user: discord.Member):
     await interaction.response.defer(ephemeral=False)
@@ -1667,7 +1643,6 @@ async def pay(interaction: discord.Interaction, amount: float, user: discord.Mem
         color=discord.Color.green()
     )
     await interaction.followup.send(embed=embed)
->>>>>>> 3fd3b851207020725fa328265e33a45fb09bbf1e
 
 
 # Leaderboard pagination view
