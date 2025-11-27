@@ -166,21 +166,21 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
     #gatherer 5 - 500+ items gathered
 
     user_id = member.id
-    total_forage_count = get_forage_count(user_id)
+    total_items = get_user_total_items(user_id)
     planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V"]
 
     # Find the user's current planter role
     previous_role_name = next((role.name for role in member.roles if role.name in planter_roles), None)
     
-    # Determine the target role based on forage count
+    # Determine the target role based on total items gathered
     target_role_name = None
-    if total_forage_count < 50:
+    if total_items < 50:
         target_role_name = "PLANTER I"
-    elif total_forage_count < 150:
+    elif total_items < 150:
         target_role_name = "PLANTER II"
-    elif total_forage_count < 299:
+    elif total_items < 299:
         target_role_name = "PLANTER III"
-    elif total_forage_count < 499:
+    elif total_items < 499:
         target_role_name = "PLANTER IV"
     else: #500+
         target_role_name = "PLANTER V"
@@ -1080,7 +1080,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="🌳 running /gather on V0.1.0 :3"
+            name="🌳 running /gather on V0.0.0 :3"
         )
     )
     try:
@@ -1362,7 +1362,6 @@ async def userstats(interaction: discord.Interaction):
     user_id = interaction.user.id
     user_balance = get_user_balance(user_id)
     total_items = get_user_total_items(user_id)
-    forage_count = get_forage_count(user_id)
     
     # Calculate items needed for next rankup
     # PLANTER I: 0-49 (need 50 for PLANTER II)
@@ -1373,17 +1372,17 @@ async def userstats(interaction: discord.Interaction):
     items_needed = None
     next_rank = None
     
-    if forage_count < 50:
-        items_needed = 50 - forage_count
+    if total_items < 50:
+        items_needed = 50 - total_items
         next_rank = "PLANTER II"
-    elif forage_count < 150:
-        items_needed = 150 - forage_count
+    elif total_items < 150:
+        items_needed = 150 - total_items
         next_rank = "PLANTER III"
-    elif forage_count < 299:
-        items_needed = 299 - forage_count
+    elif total_items < 299:
+        items_needed = 299 - total_items
         next_rank = "PLANTER IV"
-    elif forage_count < 499:
-        items_needed = 499 - forage_count
+    elif total_items < 499:
+        items_needed = 499 - total_items
         next_rank = "PLANTER V"
     else:
         # Max rank achieved
@@ -1396,7 +1395,7 @@ async def userstats(interaction: discord.Interaction):
     )
     
     embed.add_field(name="💰 Balance", value=f"**${user_balance:.2f}**", inline=True)
-    embed.add_field(name="🌱 Plants Gathered", value=f"**{forage_count}** plants", inline=True)
+    embed.add_field(name="🌱 Plants Gathered", value=f"**{total_items}** plants", inline=True)
     
     if items_needed == 0:
         embed.add_field(name="🏆 Rank Status", value=f"**{next_rank}** - You've reached the maximum rank!", inline=False)
@@ -1438,197 +1437,6 @@ async def almanac(interaction: discord.Interaction):
     )
     
     await interaction.followup.send(embed=embed)
-
-
-# Basket Upgrade View with buttons
-class BasketUpgradeView(discord.ui.View):
-    def __init__(self, user_id: int, guild: discord.Guild, timeout=300):
-        super().__init__(timeout=timeout)
-        self.user_id = user_id
-        self.guild = guild
-    
-    def create_embed(self) -> discord.Embed:
-        """Create the basket upgrade embed."""
-        upgrades = get_user_basket_upgrades(self.user_id)
-        balance = get_user_balance(self.user_id)
-        
-        embed = discord.Embed(
-            title="🛒 Gear Upgrade Shop",
-            description=f"💰 Your Balance: **${balance:,.2f}**\n\nChoose an upgrade path to purchase!",
-            color=discord.Color.gold()
-        )
-        
-        # Path 1: Baskets (Money Multiplier)
-        basket_tier = upgrades["basket"]
-        current_basket = "No Basket" if basket_tier == 0 else BASKET_UPGRADES[basket_tier - 1]["name"]
-        current_multiplier = 1.0 if basket_tier == 0 else BASKET_UPGRADES[basket_tier - 1]["multiplier"]
-        if basket_tier < 10:
-            next_basket = BASKET_UPGRADES[basket_tier]["name"]
-            next_multiplier = BASKET_UPGRADES[basket_tier]["multiplier"]
-            next_cost = UPGRADE_PRICES[basket_tier]
-            can_afford = "✅" if balance >= next_cost else "❌"
-            basket_text = f"**Upgrade {basket_tier + 1}/10**\n**Current:** {current_basket} ({current_multiplier}x money)\n**Next:** {next_basket} ({next_multiplier}x money)\n**Cost:** ${next_cost:,.2f} {can_afford}"
-        else:
-            basket_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_basket} ({current_multiplier}x money)"
-        
-        embed.add_field(
-            name="🧺 PATH 1: BASKETS",
-            value=basket_text,
-            inline=False
-        )
-        
-        # Path 2: Shoes (Cooldown Reduction)
-        shoes_tier = upgrades["shoes"]
-        current_shoes = "Bare Feet" if shoes_tier == 0 else SHOES_UPGRADES[shoes_tier - 1]["name"]
-        current_reduction = 0 if shoes_tier == 0 else SHOES_UPGRADES[shoes_tier - 1]["reduction"]
-        if shoes_tier < 10:
-            next_shoes = SHOES_UPGRADES[shoes_tier]["name"]
-            next_reduction = SHOES_UPGRADES[shoes_tier]["reduction"]
-            next_cost = UPGRADE_PRICES[shoes_tier]
-            can_afford = "✅" if balance >= next_cost else "❌"
-            shoes_text = f"**Upgrade {shoes_tier + 1}/10**\n**Current:** {current_shoes} (-{current_reduction}s cooldown)\n**Next:** {next_shoes} (-{next_reduction}s cooldown)\n**Cost:** ${next_cost:,.2f} {can_afford}"
-        else:
-            shoes_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_shoes} (-{current_reduction}s cooldown)"
-        
-        embed.add_field(
-            name="👟 PATH 2: RUNNING SHOES",
-            value=shoes_text,
-            inline=False
-        )
-        
-        # Path 3: Gloves (Chain Chance)
-        gloves_tier = upgrades["gloves"]
-        current_gloves = "Bare Hands" if gloves_tier == 0 else GLOVES_UPGRADES[gloves_tier - 1]["name"]
-        current_chain = 0 if gloves_tier == 0 else GLOVES_UPGRADES[gloves_tier - 1]["chain_chance"] * 100
-        if gloves_tier < 10:
-            next_gloves = GLOVES_UPGRADES[gloves_tier]["name"]
-            next_chain = GLOVES_UPGRADES[gloves_tier]["chain_chance"] * 100
-            next_cost = UPGRADE_PRICES[gloves_tier]
-            can_afford = "✅" if balance >= next_cost else "❌"
-            gloves_text = f"**Upgrade {gloves_tier + 1}/10**\n**Current:** {current_gloves} ({current_chain}% chain chance)\n**Next:** {next_gloves} ({next_chain}% chain chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
-        else:
-            gloves_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_gloves} ({current_chain}% chain chance)"
-        
-        embed.add_field(
-            name="🧤 PATH 3: GLOVES",
-            value=gloves_text,
-            inline=False
-        )
-        
-        # Path 4: Soil (GMO Chance)
-        soil_tier = upgrades["soil"]
-        current_soil = "Regular Soil" if soil_tier == 0 else SOIL_UPGRADES[soil_tier - 1]["name"]
-        current_gmo = 0 if soil_tier == 0 else SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] * 100
-        if soil_tier < 10:
-            next_soil = SOIL_UPGRADES[soil_tier]["name"]
-            next_gmo = SOIL_UPGRADES[soil_tier]["gmo_boost"] * 100
-            next_cost = UPGRADE_PRICES[soil_tier]
-            can_afford = "✅" if balance >= next_cost else "❌"
-            soil_text = f"**Upgrade {soil_tier + 1}/10**\n**Current:** {current_soil} (+{current_gmo}% GMO chance)\n**Next:** {next_soil} (+{next_gmo}% GMO chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
-        else:
-            soil_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_soil} (+{current_gmo}% GMO chance)"
-        
-        embed.add_field(
-        name="🌱 PATH 4: SOIL",
-            value=soil_text,
-            inline=False
-        )
-        
-        embed.set_footer(text="Click a button below to purchase an upgrade!")
-        
-        return embed
-    
-    @discord.ui.button(label="🧺 Buy Basket", style=discord.ButtonStyle.primary, row=0)
-    async def buy_basket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_purchase(interaction, "basket", BASKET_UPGRADES, "Basket")
-    
-    @discord.ui.button(label="👟 Buy Shoes", style=discord.ButtonStyle.primary, row=0)
-    async def buy_shoes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_purchase(interaction, "shoes", SHOES_UPGRADES, "Shoes")
-    
-    @discord.ui.button(label="🧤 Buy Gloves", style=discord.ButtonStyle.primary, row=1)
-    async def buy_gloves(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_purchase(interaction, "gloves", GLOVES_UPGRADES, "Gloves")
-    
-    @discord.ui.button(label="🌱 Buy Soil", style=discord.ButtonStyle.primary, row=1)
-    async def buy_soil(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_purchase(interaction, "soil", SOIL_UPGRADES, "Soil")
-    
-    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=2)
-    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ This is not your gear shop!", ephemeral=True)
-            return
-        
-        embed = self.create_embed()
-        await interaction.response.edit_message(embed=embed, view=self)
-    
-    async def handle_purchase(self, interaction: discord.Interaction, upgrade_type: str, upgrade_list: list, upgrade_name: str):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message(f"❌ This is not your gear shop!", ephemeral=True)
-            return
-        
-        upgrades = get_user_basket_upgrades(self.user_id)
-        current_tier = upgrades[upgrade_type]
-        
-        if current_tier >= 10:
-            await interaction.response.send_message(f"❌ You already have the maximum {upgrade_name} upgrade!", ephemeral=True)
-            return
-        
-        cost = UPGRADE_PRICES[current_tier]
-        balance = get_user_balance(self.user_id)
-        
-        if balance < cost:
-            await interaction.response.send_message(
-                f"❌ You don't have enough money! You need **${cost:,.2f}** but only have **${balance:,.2f}**.", 
-                ephemeral=True
-            )
-            return
-        
-        # Deduct money and upgrade
-        new_balance = balance - cost
-        update_user_balance(self.user_id, new_balance)
-        set_user_basket_upgrade(self.user_id, upgrade_type, current_tier + 1)
-        
-        next_upgrade = upgrade_list[current_tier]
-        
-        # Send quick confirmation and update the main embed
-        await interaction.response.send_message(f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
-        
-        embed = self.create_embed()
-        await interaction.message.edit(embed=embed, view=self)
-
-
-# Gear command
-@bot.tree.command(name="gear", description="Upgrade your gathering equipment!")
-async def gear(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    
-    user_id = interaction.user.id
-    view = BasketUpgradeView(user_id, interaction.guild)
-    embed = view.create_embed()
-    
-    await interaction.followup.send(embed=embed, view=view)
-
-
-# # Temporary admin command for dev - give yourself money
-# @bot.tree.command(name="danny", description="Dev command - Give yourself money")
-# async def danny(interaction: discord.Interaction):
-#     await interaction.response.defer(ephemeral=True)
-    
-#     user_id = interaction.user.id
-#     current_balance = get_user_balance(user_id)
-#     new_balance = current_balance + 1_000_000_000  # 1 billion
-#     update_user_balance(user_id, new_balance)
-    
-#     embed = discord.Embed(
-#         title="💰 Money Added!",
-#         description=f"You've been given **$1,000,000,000**!",
-#         color=discord.Color.gold()
-#     )
-#     embed.add_field(name="💰 New Balance", value=f"${new_balance:,.2f}", inline=False)
-    
-#     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # Leaderboard pagination view
@@ -1682,9 +1490,23 @@ class LeaderboardView(discord.ui.View):
             username = self.get_username(user_id)
             
             if self.leaderboard_type == "plants":
-                leaderboard_text += f"**{rank}.** {username}: **{value}** items\n"
+                # Top 3 get different tree emojis, bottom 7 get plant emoji
+                if rank == 1:
+                    emoji = "🌳"
+                elif rank == 2:
+                    emoji = "🎄"
+                elif rank == 3:
+                    emoji = "🌲"
+                else:
+                    emoji = "🌱"
+                leaderboard_text += f"{emoji} **{rank}.** {username}: **{value}** items\n"
             else:  # money
-                leaderboard_text += f"**{rank}.** {username}: **${value:.2f}**\n"
+                # Top 3 get money bag, bottom 7 get cash emoji
+                if rank <= 3:
+                    emoji = "💰"
+                else:
+                    emoji = "💵"
+                leaderboard_text += f"{emoji} **{rank}.** {username}: **${value:.2f}**\n"
         
         if not leaderboard_text:
             leaderboard_text = "No data available"
@@ -1768,9 +1590,23 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
         username = member.display_name or member.name if member else "Unknown User"
         
         if leaderboard_type == "plants":
-            leaderboard_text += f"**{rank}.** {username}: **{value}** items\n"
+            # Top 3 get different tree emojis, bottom 7 get plant emoji
+            if rank == 1:
+                emoji = "🌳"
+            elif rank == 2:
+                emoji = "🎄"
+            elif rank == 3:
+                emoji = "🌲"
+            else:
+                emoji = "🌱"
+            leaderboard_text += f"{emoji} **{rank}.** {username}: **{value}** items\n"
         else:  # money
-            leaderboard_text += f"**{rank}.** {username}: **${value:.2f}**\n"
+            # Top 3 get money bag, bottom 7 get cash emoji
+            if rank <= 3:
+                emoji = "💰"
+            else:
+                emoji = "💵"
+            leaderboard_text += f"{emoji} **{rank}.** {username}: **${value:.2f}**\n"
     
     if not leaderboard_text:
         leaderboard_text = "No data available"
