@@ -1092,6 +1092,10 @@ async def on_ready():
     # Start the leaderboard update task
     bot.loop.create_task(update_all_leaderboards())
     print("Started automatic leaderboard updates")
+    
+    # Start the marketboard update task
+    bot.loop.create_task(update_all_marketboards())
+    print("Started automatic marketboard updates")
 
 
 @bot.event
@@ -1842,6 +1846,227 @@ async def update_all_leaderboards():
                 await asyncio.sleep(1)
         except Exception as e:
             print(f"Error in leaderboard update task: {e}")
+        
+        # Wait 60 seconds before next update
+        await asyncio.sleep(60)
+
+
+# STALK MARKET - Stock Market System
+# Stock ticker definitions
+STOCK_TICKERS = [
+    {"name": "Maizy's", "symbol": "M", "base_price": 50.0, "max_shares": 10000},
+    {"name": "Meadow", "symbol": "MEDO", "base_price": 75.0, "max_shares": 20000},
+    {"name": "IVBM", "symbol": "IVBM", "base_price": 100.0, "max_shares": 15000},
+    {"name": "CisGrow", "symbol": "CSGO", "base_price": 60.0, "max_shares": 12000},
+    {"name": "Sowny", "symbol": "SWNY", "base_price": 90.0, "max_shares": 11000},
+    {"name": "General Mowers", "symbol": "GM", "base_price": 45.0, "max_shares": 20000},
+    {"name": "Raytheorn", "symbol": "RTH", "base_price": 125.0, "max_shares": 16000},
+    {"name": "Wells Fargrow", "symbol": "WFG", "base_price": 70.0, "max_shares": 18000},
+    {"name": "APPLE", "symbol": "AAPL", "base_price": 150.0, "max_shares": 17000},
+    {"name": "Sproutify", "symbol": "SPRT", "base_price": 55.0, "max_shares": 16000},
+]
+
+# Stock data storage: {guild_id: {ticker_symbol: {"price": float, "price_history": [float], "available_shares": int}}}
+stock_data = {}
+
+def initialize_stocks(guild_id: int):
+    """Initialize stock data for a guild if it doesn't exist."""
+    if guild_id not in stock_data:
+        stock_data[guild_id] = {}
+        for ticker in STOCK_TICKERS:
+            stock_data[guild_id][ticker["symbol"]] = {
+                "price": ticker["base_price"],
+                "price_history": [ticker["base_price"]] * 6,  # Keep last 6 minutes (5 + current)
+                "available_shares": 0  # Start with 0 available shares
+            }
+
+def update_stock_prices(guild_id: int):
+    """Update stock prices with random changes."""
+    if guild_id not in stock_data:
+        initialize_stocks(guild_id)
+    
+    for ticker in STOCK_TICKERS:
+        symbol = ticker["symbol"]
+        if symbol not in stock_data[guild_id]:
+            stock_data[guild_id][symbol] = {
+                "price": ticker["base_price"],
+                "price_history": [ticker["base_price"]] * 6,
+                "available_shares": 0  # Start with 0 available shares
+            }
+        
+        current_price = stock_data[guild_id][symbol]["price"]
+        
+        # Random change: 0.1%, 0.2%, or 0.3% (equal chance for each)
+        change_percent = random.choice([0.001, 0.002, 0.003])
+        
+        # Random direction: increase or decrease (50/50)
+        direction = random.choice([1, -1])
+        
+        # Calculate new price
+        new_price = current_price * (1 + (direction * change_percent))
+        
+        # Update price
+        stock_data[guild_id][symbol]["price"] = new_price
+        
+        # Update price history (keep last 6 minutes)
+        price_history = stock_data[guild_id][symbol]["price_history"]
+        price_history.append(new_price)
+        if len(price_history) > 6:
+            price_history.pop(0)
+
+def get_5min_change(guild_id: int, symbol: str) -> float:
+    """Get the percent change over the last 5 minutes."""
+    if guild_id not in stock_data or symbol not in stock_data[guild_id]:
+        return 0.0
+    
+    price_history = stock_data[guild_id][symbol]["price_history"]
+    if len(price_history) < 6:
+        return 0.0
+    
+    # Price 5 minutes ago is at index -6 (6th from the end), current price is at index -1
+    # We keep 6 prices: [5min_ago, 4min_ago, 3min_ago, 2min_ago, 1min_ago, current]
+    old_price = price_history[-6]
+    current_price = price_history[-1]
+    
+    if old_price == 0:
+        return 0.0
+    
+    change_percent = ((current_price - old_price) / old_price) * 100
+    return change_percent
+
+def get_change_emoji(change_5min: float) -> str:
+    """Get emoji based on 5-minute change."""
+    if change_5min < -0.1:  # Negative (more than -0.1%)
+        return "🔴"
+    elif -0.1 <= change_5min <= 0.1:  # Slightly negative or slightly positive
+        return "🟨"
+    else:  # Positive (more than 0.1%)
+        return "🟢"
+
+async def update_marketboard_message(guild: discord.Guild):
+    """Update or create the marketboard message in #grow-jones channel."""
+    # Find the grow-jones channel
+    market_channel = discord.utils.get(guild.text_channels, name="grow-jones")
+    
+    if not market_channel:
+        return  # Channel doesn't exist, skip
+    
+    # Initialize stocks for this guild
+    initialize_stocks(guild.id)
+    
+    # Update stock prices
+    update_stock_prices(guild.id)
+    
+    # Create embed
+    embed = discord.Embed(
+        title="📈 GROW JONES INDUSTRIAL AVERAGE 📈",
+        description="\n\n",
+        color=discord.Color.green()
+    )
+    
+    # Add each stock to the embed
+    stock_lines = []
+    for ticker in STOCK_TICKERS:
+        symbol = ticker["symbol"]
+        stock_info = stock_data[guild.id][symbol]
+        current_price = stock_info["price"]
+        base_price = ticker["base_price"]
+        available_shares = stock_info["available_shares"]
+        max_shares = ticker["max_shares"]
+        
+        # Calculate percent increase from base
+        percent_from_base = ((current_price - base_price) / base_price) * 100
+        percent_sign = "+" if percent_from_base >= 0 else ""
+        percent_str = f"{percent_sign}{percent_from_base:.2f}%"
+        
+        # Calculate 5-minute change
+        change_5min = get_5min_change(guild.id, symbol)
+        change_emoji = get_change_emoji(change_5min)
+        
+        # Format 5-minute change with sign
+        change_sign = "+" if change_5min >= 0 else ""
+        change_str = f"{change_sign}{change_5min:.2f}%"
+        
+        # Format price
+        price_str = f"${current_price:.2f}"
+        
+        # Format shares as available/max
+        shares_str = f"{available_shares:,}/{max_shares:,}"
+        
+        # Create stock line
+        stock_line = f"{change_emoji} **{ticker['name']} ({symbol})**\n"
+        stock_line += f"   Price: **{price_str}** | Increase: **{percent_str}** | Δ5m: **{change_str}** | Shares: **{shares_str}**\n"
+        
+        stock_lines.append(stock_line)
+    
+    # Combine all stock lines
+    embed.description += "\n".join(stock_lines)
+    embed.set_footer(text="Updates every minute | Last updated")
+    embed.timestamp = discord.utils.utcnow()
+    
+    # Try to edit existing message, or create new one
+    guild_id = guild.id
+    if guild_id not in leaderboard_messages:
+        leaderboard_messages[guild_id] = {}
+    
+    message_id = leaderboard_messages[guild_id].get("marketboard")
+    
+    try:
+        if message_id:
+            # Try to edit existing message
+            try:
+                message = await market_channel.fetch_message(message_id)
+                await message.edit(embed=embed)
+                return
+            except discord.NotFound:
+                # Message was deleted, search for existing one
+                message_id = None
+            except discord.HTTPException as e:
+                # Other error (permissions, etc.), search for existing one
+                print(f"Error editing marketboard in {guild.name}: {e}")
+                message_id = None
+        
+        # If no valid message_id, search for existing marketboard message in channel
+        if not message_id:
+            try:
+                # Search through recent messages to find existing marketboard
+                async for message in market_channel.history(limit=50):
+                    if message.author.id == bot.user.id and message.embeds:
+                        embed_title = message.embeds[0].title if message.embeds[0].title else ""
+                        # Check if this is the marketboard message
+                        if "GROW JONES MARKETBOARD" in embed_title:
+                            # Found existing message, update it
+                            message_id = message.id
+                            leaderboard_messages[guild_id]["marketboard"] = message_id
+                            await message.edit(embed=embed)
+                            return
+            except Exception as e:
+                print(f"Error searching for existing marketboard message: {e}")
+        
+        # Create new message only if we couldn't find or edit existing one
+        message = await market_channel.send(embed=embed)
+        if "marketboard" not in leaderboard_messages[guild_id]:
+            leaderboard_messages[guild_id]["marketboard"] = message.id
+        else:
+            leaderboard_messages[guild_id]["marketboard"] = message.id
+    except Exception as e:
+        print(f"Error updating marketboard in {guild.name}: {e}")
+
+async def update_all_marketboards():
+    """Background task to update all marketboards every minute."""
+    await bot.wait_until_ready()
+    
+    # Wait a bit for guilds to fully load
+    await asyncio.sleep(5)
+    
+    while not bot.is_closed():
+        try:
+            # Update marketboards for all guilds the bot is in
+            for guild in bot.guilds:
+                await update_marketboard_message(guild)
+                await asyncio.sleep(1)  # Small delay between updates
+        except Exception as e:
+            print(f"Error in marketboard update task: {e}")
         
         # Wait 60 seconds before next update
         await asyncio.sleep(60)
