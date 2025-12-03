@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Dict, Optional
 
 from pymongo import MongoClient
@@ -65,6 +66,7 @@ def _ensure_user_document(user_id: int) -> None:
         "balance": _get_default_balance(),
         "last_gather_time": 0.0,
         "last_harvest_time": 0.0,
+        "last_mine_time": 0.0,
         "total_forage_count": 0,
         "items": {},
         "ripeness_stats": {},
@@ -78,7 +80,14 @@ def _ensure_user_document(user_id: int) -> None:
             "shoes": 0,
             "gloves": 0,
             "soil": 0
-        }
+        },
+        "crypto_holdings": {
+            "RTC": 0.0,
+            "TER": 0.0,
+            "CNY": 0.0
+        },
+        "gardeners": [],
+        "notification_channel_id": None
     }
     users.update_one(
         {"_id": int(user_id)},
@@ -285,3 +294,277 @@ def set_user_basket_upgrade(user_id: int, upgrade_type: str, tier: int) -> None:
         {"$set": {f"basket_upgrades.{upgrade_type}": int(tier)}},
         upsert=True,
     )
+
+
+# Cryptocurrency functions
+def get_user_crypto_holdings(user_id: int) -> Dict[str, float]:
+    """Get user's cryptocurrency holdings. Returns dict with keys: RTC, TER, CNY."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"crypto_holdings": 1})
+    if not doc:
+        return {"RTC": 0.0, "TER": 0.0, "CNY": 0.0}
+    holdings = doc.get("crypto_holdings", {})
+    return {
+        "RTC": float(holdings.get("RTC", 0.0)),
+        "TER": float(holdings.get("TER", 0.0)),
+        "CNY": float(holdings.get("CNY", 0.0))
+    }
+
+
+def update_user_crypto_holdings(user_id: int, coin: str, amount: float) -> None:
+    """Update user's cryptocurrency holdings. Adds amount to existing holdings."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$inc": {f"crypto_holdings.{coin}": float(amount)}},
+        upsert=True,
+    )
+
+
+def get_user_last_mine_time(user_id: int) -> float:
+    """Get user's last mine time."""
+    users = _get_users_collection()
+    doc = users.find_one({"_id": int(user_id)}, {"last_mine_time": 1})
+    return float(doc.get("last_mine_time", 0.0)) if doc else 0.0
+
+
+def update_user_last_mine_time(user_id: int, timestamp: float) -> None:
+    """Update user's last mine time."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"last_mine_time": float(timestamp)}},
+        upsert=True,
+    )
+
+
+def get_crypto_prices() -> Dict[str, float]:
+    """Get current cryptocurrency prices from database."""
+    users = _get_users_collection()
+    doc = users.find_one({"_id": 0}, {"crypto_prices": 1})  # Use _id=0 for global data
+    if not doc:
+        # Initialize with default prices
+        default_prices = {"RTC": 100.0, "TER": 100.0, "CNY": 100.0}
+        users.update_one(
+            {"_id": 0},
+            {"$set": {"crypto_prices": default_prices}},
+            upsert=True,
+        )
+        return default_prices
+    prices = doc.get("crypto_prices", {})
+    return {
+        "RTC": float(prices.get("RTC", 100.0)),
+        "TER": float(prices.get("TER", 100.0)),
+        "CNY": float(prices.get("CNY", 100.0))
+    }
+
+
+def update_crypto_prices(prices: Dict[str, float]) -> None:
+    """Update cryptocurrency prices in database."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": 0},
+        {"$set": {"crypto_prices": prices}},
+        upsert=True,
+    )
+
+
+# Gardener functions
+def get_user_gardeners(user_id: int) -> list[Dict]:
+    """Get user's gardeners. Returns list of gardener dicts."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"gardeners": 1})
+    if not doc:
+        return []
+    gardeners = doc.get("gardeners", [])
+    return gardeners if isinstance(gardeners, list) else []
+
+
+def add_gardener(user_id: int, gardener_id: int, price: float) -> bool:
+    """Add a gardener to user's collection and deduct money. Returns True if successful."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    
+    # Check if user has enough balance
+    current_balance = get_user_balance(user_id)
+    if current_balance < price:
+        return False
+    
+    # Check if gardener slot is already taken
+    existing_gardeners = get_user_gardeners(user_id)
+    if any(g.get("id") == gardener_id for g in existing_gardeners):
+        return False
+    
+    # Check if user has reached max gardeners (5)
+    if len(existing_gardeners) >= 5:
+        return False
+    
+    # Deduct money
+    new_balance = current_balance - price
+    update_user_balance(user_id, new_balance)
+    
+    # Add gardener
+    new_gardener = {
+        "id": int(gardener_id),
+        "times_gathered": 0,
+        "total_money_earned": 0.0,
+        "hired_at": time.time()
+    }
+    
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$push": {"gardeners": new_gardener}},
+        upsert=True,
+    )
+    
+    return True
+
+
+def update_gardener_stats(user_id: int, gardener_id: int, money_earned: float) -> None:
+    """Update gardener stats after a successful gather."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id), "gardeners.id": int(gardener_id)},
+        {
+            "$inc": {
+                "gardeners.$.times_gathered": 1,
+                "gardeners.$.total_money_earned": float(money_earned)
+            }
+        }
+    )
+
+
+def get_all_users_with_gardeners() -> list[tuple[int, list[Dict]]]:
+    """Get all users who have gardeners. Returns list of (user_id, gardeners) tuples."""
+    users = _get_users_collection()
+    cursor = users.find({"gardeners": {"$exists": True, "$ne": []}}, {"_id": 1, "gardeners": 1})
+    results = []
+    for doc in cursor:
+        user_id = doc.get("_id")
+        gardeners = doc.get("gardeners", [])
+        if gardeners and isinstance(gardeners, list):
+            results.append((user_id, gardeners))
+    return results
+
+
+def set_user_notification_channel(user_id: int, channel_id: int) -> None:
+    """Store user's preferred notification channel for gardener updates."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"notification_channel_id": int(channel_id)}},
+        upsert=True,
+    )
+
+
+def get_user_notification_channel(user_id: int) -> Optional[int]:
+    """Get user's preferred notification channel ID. Returns None if not set."""
+    users = _get_users_collection()
+    doc = users.find_one({"_id": int(user_id)}, {"notification_channel_id": 1})
+    if not doc:
+        return None
+    channel_id = doc.get("notification_channel_id")
+    return int(channel_id) if channel_id is not None else None
+
+
+# Stock holdings functions
+def get_user_stock_holdings(user_id: int) -> Dict[str, int]:
+    """Get user's stock holdings. Returns dict with stock symbols as keys and share counts as values."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"stock_holdings": 1})
+    if not doc:
+        return {}
+    holdings = doc.get("stock_holdings", {})
+    # Convert all values to int
+    return {symbol: int(amount) for symbol, amount in holdings.items() if amount > 0}
+
+
+def update_user_stock_holdings(user_id: int, symbol: str, amount: int) -> None:
+    """Update user's stock holdings. Adds amount to existing holdings (can be negative to sell)."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$inc": {f"stock_holdings.{symbol}": int(amount)}},
+        upsert=True,
+    )
+
+
+# Event functions
+def _get_events_collection() -> Collection:
+    """Return the MongoDB collection used to store events."""
+    global _client
+    if _client is None:
+        _get_users_collection()  # Initialize client if needed
+    
+    db_name = os.getenv("MONGODB_DB_NAME", "slashgather")
+    return _client[db_name]["events"]
+
+
+def get_active_events() -> list[Dict]:
+    """Get all currently active events. Returns list of event dicts."""
+    events = _get_events_collection()
+    current_time = time.time()
+    cursor = events.find({"end_time": {"$gt": current_time}})
+    results = []
+    for doc in cursor:
+        results.append({
+            "event_id": doc.get("event_id"),
+            "event_type": doc.get("event_type"),  # "hourly" or "daily"
+            "event_name": doc.get("event_name"),
+            "start_time": float(doc.get("start_time", 0)),
+            "end_time": float(doc.get("end_time", 0)),
+            "effects": doc.get("effects", {})
+        })
+    return results
+
+
+def get_active_event_by_type(event_type: str) -> Optional[Dict]:
+    """Get active event of specific type (hourly or daily). Returns None if none active."""
+    events = _get_events_collection()
+    current_time = time.time()
+    doc = events.find_one({
+        "event_type": event_type,
+        "end_time": {"$gt": current_time}
+    })
+    if not doc:
+        return None
+    return {
+        "event_id": doc.get("event_id"),
+        "event_type": doc.get("event_type"),
+        "event_name": doc.get("event_name"),
+        "start_time": float(doc.get("start_time", 0)),
+        "end_time": float(doc.get("end_time", 0)),
+        "effects": doc.get("effects", {})
+    }
+
+
+def set_active_event(event_id: str, event_type: str, event_name: str, start_time: float, end_time: float, effects: Dict) -> None:
+    """Store an active event. Replaces any existing event of the same type."""
+    events = _get_events_collection()
+    # Remove any existing event of the same type
+    events.delete_many({"event_type": event_type})
+    # Insert new event
+    events.insert_one({
+        "event_id": event_id,
+        "event_type": event_type,
+        "event_name": event_name,
+        "start_time": float(start_time),
+        "end_time": float(end_time),
+        "effects": effects
+    })
+
+
+def clear_event(event_id: str) -> None:
+    """Remove an event by its ID."""
+    events = _get_events_collection()
+    events.delete_one({"event_id": event_id})
+
+
+def clear_expired_events() -> None:
+    """Remove all expired events."""
+    events = _get_events_collection()
+    current_time = time.time()
+    events.delete_many({"end_time": {"$lte": current_time}})

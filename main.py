@@ -9,6 +9,7 @@ import time
 import asyncio
 import uuid
 import threading
+import datetime
 
 # Load environment variables FIRST
 load_dotenv(override=True)
@@ -65,6 +66,25 @@ from database import (
     get_user_items,
     get_user_basket_upgrades,
     set_user_basket_upgrade,
+    get_user_crypto_holdings,
+    update_user_crypto_holdings,
+    get_user_last_mine_time,
+    update_user_last_mine_time,
+    get_crypto_prices,
+    update_crypto_prices,
+    get_user_gardeners,
+    add_gardener,
+    update_gardener_stats,
+    get_all_users_with_gardeners,
+    set_user_notification_channel,
+    get_user_notification_channel,
+    get_user_stock_holdings,
+    update_user_stock_holdings,
+    get_active_events,
+    get_active_event_by_type,
+    set_active_event,
+    clear_event,
+    clear_expired_events,
 )
 
 try:
@@ -85,6 +105,10 @@ intents.members = True
 bot = commands.Bot(command_prefix='/', intents=intents)
 GATHER_COOLDOWN = 60 #(seconds)
 HARVEST_COOLDOWN = 60 * 60 #(an hour)
+MINE_COOLDOWN = 5 * 60 #(5 minutes)
+
+# Gardener prices
+GARDENER_PRICES = [1000, 10000, 50000, 100000, 250000]
 
 # BASKET UPGRADE PATHS
 UPGRADE_PRICES = [500, 1500, 4000, 10000, 25000, 60000, 150000, 350000, 700000, 1000000]
@@ -233,6 +257,21 @@ def can_gather(user_id):
     if shoes_tier > 0:
         cooldown_reduction = SHOES_UPGRADES[shoes_tier - 1]["reduction"]
     
+    # Apply event cooldown reductions
+    active_events = get_active_events()
+    hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
+    daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
+    
+    if hourly_event:
+        event_id = hourly_event.get("event_id", "")
+        if event_id == "speed_harvest":
+            cooldown_reduction += 30  # Cooldown reduced by 30 seconds
+    
+    if daily_event:
+        event_id = daily_event.get("event_id", "")
+        if event_id == "speed_day":
+            cooldown_reduction += 15  # Cooldown reduced by 15 seconds
+    
     # Calculate effective cooldown (base cooldown minus reduction, minimum 0)
     effective_cooldown = max(0, GATHER_COOLDOWN - cooldown_reduction)
     cooldown_end = last_gather_time + effective_cooldown
@@ -246,6 +285,187 @@ def can_gather(user_id):
 def set_cooldown(user_id):
     # set cooldown for user, p self explanatory
     update_user_last_gather_time(user_id, time.time())
+
+async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True) -> dict:
+    """
+    Perform a gather action for a user. Returns dict with gathered item info.
+    apply_cooldown: If True, sets cooldown. If False, skips cooldown (for gardeners).
+    """
+    # Get active events
+    active_events = get_active_events()
+    hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
+    daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
+    
+    # Choose a random item, with event modifications
+    items_to_choose = GATHERABLE_ITEMS.copy()
+    weights = None
+    
+    # Apply category-specific event effects (May Flowers, Fruit Festival, Vegetable Boom)
+    if hourly_event:
+        event_id = hourly_event.get("event_id", "")
+        if event_id == "may_flowers":
+            # Increase flower weights by 60%
+            weights = []
+            for item in GATHERABLE_ITEMS:
+                if item["category"] == "Flower":
+                    weights.append(1.6)  # 60% increase
+                else:
+                    weights.append(1.0)
+        elif event_id == "fruit_festival":
+            # Increase fruit weights by 50%
+            weights = []
+            for item in GATHERABLE_ITEMS:
+                if item["category"] == "Fruit":
+                    weights.append(1.5)  # 50% increase
+                else:
+                    weights.append(1.0)
+        elif event_id == "vegetable_boom":
+            # Increase vegetable weights by 50%
+            weights = []
+            for item in GATHERABLE_ITEMS:
+                if item["category"] == "Vegetable":
+                    weights.append(1.5)  # 50% increase
+                else:
+                    weights.append(1.0)
+    
+    if weights:
+        item = random.choices(GATHERABLE_ITEMS, weights=weights, k=1)[0]
+    else:
+        item = random.choice(GATHERABLE_ITEMS)
+    
+    name = item["name"]
+    base_value = item["base_value"]
+    
+    # Apply event base value modifications (May Flowers, Fruit Festival, Vegetable Boom)
+    if hourly_event:
+        event_id = hourly_event.get("event_id", "")
+        if event_id == "may_flowers" and item["category"] == "Flower":
+            base_value *= 3  # Triple flower prices
+        elif event_id == "fruit_festival" and item["category"] == "Fruit":
+            base_value *= 2  # Double fruit prices
+        elif event_id == "vegetable_boom" and item["category"] == "Vegetable":
+            base_value *= 2  # Double vegetable prices
+    
+    if item["category"] == "Fruit":
+        ripeness_list = LEVEL_OF_RIPENESS_FRUITS
+    elif item["category"] == "Vegetable":
+        ripeness_list = LEVEL_OF_RIPENESS_VEGETABLES
+    elif item["category"] == "Flower":
+        ripeness_list = LEVEL_OF_RIPENESS_FLOWERS
+    else:
+        ripeness_list = []
+
+    if ripeness_list:
+        # Use weighted random selection for the chance
+        weights = [r["chance"] for r in ripeness_list]
+        
+        # Apply Perfect Ripeness event (hourly) or Ripeness Rush event (daily)
+        if hourly_event and hourly_event.get("event_id") == "perfect_ripeness":
+            # Increase all ripeness multipliers by 50%
+            ripeness = random.choices(ripeness_list, weights=weights, k=1)[0]
+            ripeness_multiplier = ripeness["multiplier"] * 1.5
+        elif daily_event and daily_event.get("event_id") == "ripeness_rush":
+            # Double perfect ripeness chance
+            weights = []
+            for r in ripeness_list:
+                if "Perfect" in r["name"]:
+                    weights.append(r["chance"] * 2)
+                else:
+                    weights.append(r["chance"])
+            ripeness = random.choices(ripeness_list, weights=weights, k=1)[0]
+            ripeness_multiplier = ripeness["multiplier"]
+        else:
+            ripeness = random.choices(ripeness_list, weights=weights, k=1)[0]
+            ripeness_multiplier = ripeness["multiplier"]
+        
+        final_value = base_value * ripeness_multiplier
+    else:
+        final_value = base_value
+        ripeness = {"name": "Normal"}
+
+    # Get user upgrades
+    user_upgrades = get_user_basket_upgrades(user_id)
+    
+    # Apply soil upgrade GMO chance boost
+    soil_tier = user_upgrades["soil"]
+    base_gmo_chance = 0.05
+    soil_gmo_boost = SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] if soil_tier > 0 else 0
+    gmo_chance = base_gmo_chance + soil_gmo_boost
+    
+    # Apply event GMO chance modifications
+    if hourly_event:
+        event_id = hourly_event.get("event_id", "")
+        if event_id == "radiation_leak":
+            # GMO chance = 50% + current GMO chance
+            gmo_chance = 0.50 + gmo_chance
+    
+    if daily_event:
+        event_id = daily_event.get("event_id", "")
+        if event_id == "gmo_surge":
+            # GMO chance +33%
+            gmo_chance += 0.33
+    
+    # Clamp GMO chance to max 1.0 (100%)
+    gmo_chance = min(gmo_chance, 1.0)
+    
+    # See if the gathered item is a GMO
+    is_gmo = random.choices([True, False], weights=[gmo_chance, 1-gmo_chance], k=1)[0]
+    if is_gmo:
+        final_value *= 2
+    
+    # Apply basket upgrade money multiplier
+    basket_tier = user_upgrades["basket"]
+    basket_multiplier = 1.0
+    if basket_tier > 0:
+        basket_multiplier = BASKET_UPGRADES[basket_tier - 1]["multiplier"]
+    
+    # Apply event basket multiplier modifications
+    if hourly_event:
+        event_id = hourly_event.get("event_id", "")
+        if event_id == "basket_boost":
+            # Basket multiplier +50%
+            basket_multiplier *= 1.5
+    
+    # Apply event value multipliers (Bumper Crop, Harvest Festival, Double Money, Lucky Strike)
+    value_multiplier = 1.0
+    if hourly_event:
+        event_id = hourly_event.get("event_id", "")
+        if event_id == "bumper_crop":
+            value_multiplier *= 2.0  # All item values x2
+        elif event_id == "lucky_strike":
+            value_multiplier *= 1.25  # All multipliers +25%
+    
+    if daily_event:
+        event_id = daily_event.get("event_id", "")
+        if event_id == "double_money":
+            value_multiplier *= 2.0  # All earnings doubled
+        elif event_id == "harvest_festival":
+            value_multiplier *= 1.5  # All item values +50%
+    
+    final_value *= basket_multiplier * value_multiplier
+
+    # Add the value to the balance for the user
+    current_balance = get_user_balance(user_id)
+    new_balance = current_balance + final_value
+    # Save to database
+    update_user_balance(user_id, new_balance)
+
+    add_user_item(user_id, name)
+    add_ripeness_stat(user_id, ripeness["name"])
+    increment_gather_stats(user_id, item["category"], name)
+    
+    # Apply cooldown if requested (for user gathers, not gardeners)
+    if apply_cooldown:
+        set_cooldown(user_id)
+
+    return {
+        "name": name,
+        "value": final_value,
+        "ripeness": ripeness["name"],
+        "is_gmo": is_gmo,
+        "category": item["category"],
+        "new_balance": new_balance
+    }
 
 #gatherable items
 GATHERABLE_ITEMS = [
@@ -341,6 +561,118 @@ LEVEL_OF_RIPENESS_FLOWERS = [
 ]
 
 MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+
+# Event definitions
+HOURLY_EVENTS = [
+    {
+        "id": "radiation_leak",
+        "name": "Radiation Leak!",
+        "emoji": "☢️",
+        "description": "Radiation has leaked into the forest! GMO mutations are more common.",
+        "effect": "GMO chance = 50% + current GMO chance"
+    },
+    {
+        "id": "may_flowers",
+        "name": "May Flowers!",
+        "emoji": "🌸",
+        "description": "Flowers are blooming everywhere! Increased flower gathering and triple prices!",
+        "effect": "Flower gather chance +60%, flower prices x3"
+    },
+    {
+        "id": "bumper_crop",
+        "name": "Bumper Crop!",
+        "emoji": "🌾",
+        "description": "An exceptional harvest season! All items are worth double!",
+        "effect": "All item values x2"
+    },
+    {
+        "id": "speed_harvest",
+        "name": "Speed Harvest!",
+        "emoji": "⚡",
+        "description": "The forest is buzzing with energy! Gather faster!",
+        "effect": "Cooldown reduced by 30 seconds"
+    },
+    {
+        "id": "perfect_ripeness",
+        "name": "Perfect Ripeness!",
+        "emoji": "⭐",
+        "description": "Everything is perfectly ripe! All ripeness multipliers increased!",
+        "effect": "All ripeness multipliers +50%"
+    },
+    {
+        "id": "fruit_festival",
+        "name": "Fruit Festival!",
+        "emoji": "🍎",
+        "description": "A celebration of fruits! More fruits and double prices!",
+        "effect": "Fruit gather chance +50%, fruit prices x2"
+    },
+    {
+        "id": "vegetable_boom",
+        "name": "Vegetable Boom!",
+        "emoji": "🥕",
+        "description": "Vegetables are thriving! More vegetables and double prices!",
+        "effect": "Vegetable gather chance +50%, vegetable prices x2"
+    },
+    {
+        "id": "chain_reaction",
+        "name": "Chain Reaction!",
+        "emoji": "🔗",
+        "description": "The gloves are working overtime! Chain chances doubled!",
+        "effect": "Gloves chain chance doubled"
+    },
+    {
+        "id": "basket_boost",
+        "name": "Basket Boost!",
+        "emoji": "🧺",
+        "description": "Your baskets are enhanced! All basket multipliers increased!",
+        "effect": "Basket multiplier +50%"
+    },
+    {
+        "id": "lucky_strike",
+        "name": "Lucky Strike!",
+        "emoji": "🍀",
+        "description": "Luck is on your side! All multipliers increased!",
+        "effect": "All multipliers +25%"
+    }
+]
+
+DAILY_EVENTS = [
+    {
+        "id": "double_money",
+        "name": "Double Money Day!",
+        "emoji": "💰",
+        "description": "Today is a special day! All earnings are doubled!",
+        "effect": "All earnings doubled for 24 hours"
+    },
+    {
+        "id": "speed_day",
+        "name": "Speed Day!",
+        "emoji": "🏃",
+        "description": "Move faster today! Cooldowns are reduced!",
+        "effect": "Cooldown reduced by 15 seconds for 24 hours"
+    },
+    {
+        "id": "gmo_surge",
+        "name": "GMO Surge!",
+        "emoji": "✨",
+        "description": "GMO mutations are surging! Increased GMO chance all day!",
+        "effect": "GMO chance +33% for 24 hours"
+    },
+    {
+        "id": "harvest_festival",
+        "name": "Harvest Festival!",
+        "emoji": "🎉",
+        "description": "A grand festival! All items are worth more today!",
+        "effect": "All item values +50% for 24 hours"
+    },
+    {
+        "id": "ripeness_rush",
+        "name": "Ripeness Rush!",
+        "emoji": "🌿",
+        "description": "Perfect ripeness is everywhere! Double the chance for perfect ripeness!",
+        "effect": "Perfect ripeness chance doubled for 24 hours"
+    }
+]
 
 active_roulette_games = {}
 user_active_games = {} # user id -> game id
@@ -1096,6 +1428,26 @@ async def on_ready():
     # Start the marketboard update task
     bot.loop.create_task(update_all_marketboards())
     print("Started automatic marketboard updates")
+    
+    # Start the market news task
+    bot.loop.create_task(send_market_news_loop())
+    print("Started automatic market news alerts")
+    
+    # Start the coinbase update task
+    bot.loop.create_task(update_all_coinbase())
+    print("Started automatic coinbase updates")
+    
+    # Start the gardener background task
+    bot.loop.create_task(gardener_background_task())
+    print("Started automatic gardener gathering")
+    
+    # Start the event background tasks
+    bot.loop.create_task(hourly_event_check())
+    print("Started hourly event checking")
+    bot.loop.create_task(daily_event_check())
+    print("Started daily event checking")
+    bot.loop.create_task(event_cleanup_task())
+    print("Started event cleanup task")
 
 
 @bot.event
@@ -1127,7 +1479,6 @@ async def gather(interaction: discord.Interaction):
     #use defer for custom message
     await interaction.response.defer(ephemeral=False)
 
-
     #check if the user is on cooldown (default 1 min), if so let them know how much time they have left
     user_id = interaction.user.id
     can_user_gather, time_left = can_gather(user_id)
@@ -1137,57 +1488,9 @@ async def gather(interaction: discord.Interaction):
             f"You must wait {time_left} seconds before gathering again, {interaction.user.name}.", ephemeral=True
         )
         return
-    set_cooldown(user_id)
 
-    #choose a random item, take its value, name, and ripeness
-    item = random.choice(GATHERABLE_ITEMS)
-    name = item["name"]  
-    if item["category"] == "Fruit":
-        ripeness_list = LEVEL_OF_RIPENESS_FRUITS
-    elif item["category"] == "Vegetable":
-        ripeness_list = LEVEL_OF_RIPENESS_VEGETABLES
-    elif item["category"] == "Flower":
-        ripeness_list = LEVEL_OF_RIPENESS_FLOWERS
-    else:
-        ripeness_list = "Unknown"
-
-    if ripeness_list:
-        #use wiehgted random selection for the chance
-        weights = [item["chance"] for item in ripeness_list]
-        ripeness = random.choices(ripeness_list, weights=weights, k=1)[0]
-        final_value = item["base_value"] * ripeness["multiplier"]
-    else:
-        final_value = item["base_value"]
-
-    # Get user upgrades
-    user_upgrades = get_user_basket_upgrades(user_id)
-    
-    # Apply soil upgrade GMO chance boost
-    soil_tier = user_upgrades["soil"]
-    base_gmo_chance = 0.05
-    soil_gmo_boost = SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] if soil_tier > 0 else 0
-    gmo_chance = base_gmo_chance + soil_gmo_boost
-    
-    # see if the gathered item is a GMO
-    is_gmo = random.choices([True, False], weights=[gmo_chance, 1-gmo_chance], k=1)[0]
-    if is_gmo:
-        final_value *= 2
-    
-    # Apply basket upgrade money multiplier
-    basket_tier = user_upgrades["basket"]
-    if basket_tier > 0:
-        basket_multiplier = BASKET_UPGRADES[basket_tier - 1]["multiplier"]
-        final_value *= basket_multiplier
-
-    #add the value to the balance for the user
-    current_balance = get_user_balance(user_id)
-    new_balance = current_balance + final_value
-    #save to database
-    update_user_balance(user_id, new_balance)
-
-    add_user_item(user_id, name)
-    add_ripeness_stat(user_id, ripeness["name"])
-    increment_gather_stats(user_id, item["category"], name)
+    # Perform the gather
+    gather_result = await perform_gather_for_user(user_id, apply_cooldown=True)
 
     # assign role and check for rank-up
     old_role = None
@@ -1209,22 +1512,30 @@ async def gather(interaction: discord.Interaction):
     #create discord embed
     embed = discord.Embed(
         title= "You Gathered!",
-        description = f"You foraged for a(n) **{name}**!",
+        description = f"You foraged for a(n) **{gather_result['name']}**!",
         color = discord.Color.green()
     )
 
-    embed.add_field(name="Value", value=f"**${final_value:.2f}**", inline=True)
-    embed.add_field(name="Ripeness", value=f"{ripeness['name']}", inline=True)
-    embed.add_field(name="GMO?", value=f"{'Yes ✨' if is_gmo else 'No'}", inline=False)
+    embed.add_field(name="Value", value=f"**${gather_result['value']:.2f}**", inline=True)
+    embed.add_field(name="Ripeness", value=f"{gather_result['ripeness']}", inline=True)
+    embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
     # add a line to show [username] in [month]
     embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
-    embed.add_field(name="new balance: ", value=f"**${new_balance:.2f}**", inline=False)
+    embed.add_field(name="new balance: ", value=f"**${gather_result['new_balance']:.2f}**", inline=False)
     
     # Check for chain chance (gloves upgrade)
+    user_upgrades = get_user_basket_upgrades(user_id)
     gloves_tier = user_upgrades["gloves"]
     chain_triggered = False
     if gloves_tier > 0:
         chain_chance = GLOVES_UPGRADES[gloves_tier - 1]["chain_chance"]
+        
+        # Apply Chain Reaction event (hourly)
+        active_events = get_active_events()
+        hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
+        if hourly_event and hourly_event.get("event_id") == "chain_reaction":
+            chain_chance *= 2  # Double the chain chance
+        
         chain_triggered = random.random() < chain_chance
         if chain_triggered:
             # Reset cooldown by setting last_gather_time to 0 (allows immediate next gather)
@@ -1615,6 +1926,178 @@ async def gear(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed, view=view)
 
 
+# Hire View with buttons
+class HireView(discord.ui.View):
+    def __init__(self, user_id: int, channel_id: int, timeout=300):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.channel_id = channel_id
+    
+    def create_embed(self) -> discord.Embed:
+        """Create the hire gardener embed."""
+        gardeners = get_user_gardeners(self.user_id)
+        balance = get_user_balance(self.user_id)
+        gardener_count = len(gardeners)
+        
+        # Create a dict for quick lookup
+        gardener_dict = {g["id"]: g for g in gardeners}
+        
+        embed = discord.Embed(
+            title="🌱 Gardener Hiring Center",
+            description=f"💰 Your Balance: **${balance:,.2f}**\n\nHire gardeners to automatically gather items for you! Each gardener has a 20% chance to gather every 10 minutes.",
+            color=discord.Color.green()
+        )
+        
+        # Show each gardener slot (1-5)
+        for slot_id in range(1, 6):
+            price = GARDENER_PRICES[slot_id - 1]
+            gardener = gardener_dict.get(slot_id)
+            
+            if gardener:
+                # Gardener is hired - show stats
+                times_gathered = gardener.get("times_gathered", 0)
+                total_money = gardener.get("total_money_earned", 0.0)
+                gardener_text = f"**HIRED** ✅\n**Times Gathered:** {times_gathered}\n**Total Money Earned:** ${total_money:,.2f}"
+            else:
+                # Gardener slot is available
+                can_afford = "✅" if balance >= price else "❌"
+                gardener_text = f"**Available**\n**Price:** ${price:,.2f} {can_afford}"
+            
+            embed.add_field(
+                name=f"🌿 Gardener #{slot_id}",
+                value=gardener_text,
+                inline=True
+            )
+        
+        embed.add_field(
+            name="📊 Summary",
+            value=f"**Gardeners Hired:** {gardener_count}/5",
+            inline=False
+        )
+        
+        embed.set_footer(text="Click a button below to hire a gardener!")
+        
+        return embed
+    
+    def update_buttons(self):
+        """Update button states based on current gardener status and balance."""
+        gardeners = get_user_gardeners(self.user_id)
+        balance = get_user_balance(self.user_id)
+        gardener_dict = {g["id"]: g for g in gardeners}
+        
+        for i, button in enumerate(self.children):
+            if isinstance(button, discord.ui.Button) and button.custom_id and button.custom_id.startswith("hire_"):
+                slot_id = int(button.custom_id.split("_")[1])
+                gardener = gardener_dict.get(slot_id)
+                price = GARDENER_PRICES[slot_id - 1]
+                
+                # Disable if already hired
+                if gardener:
+                    button.disabled = True
+                    button.label = f"Gardener #{slot_id} (Hired)"
+                # Disable if can't afford
+                elif balance < price:
+                    button.disabled = True
+                # Disable if max gardeners reached
+                elif len(gardeners) >= 5:
+                    button.disabled = True
+                else:
+                    button.disabled = False
+    
+    async def handle_hire(self, interaction: discord.Interaction, slot_id: int):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ This is not your hiring center!", ephemeral=True)
+            return
+        
+        gardeners = get_user_gardeners(self.user_id)
+        gardener_dict = {g["id"]: g for g in gardeners}
+        
+        # Check if slot is already taken
+        if slot_id in gardener_dict:
+            await interaction.response.send_message(f"❌ Gardener #{slot_id} is already hired!", ephemeral=True)
+            return
+        
+        # Check if max gardeners reached
+        if len(gardeners) >= 5:
+            await interaction.response.send_message("❌ You already have the maximum of 5 gardeners!", ephemeral=True)
+            return
+        
+        price = GARDENER_PRICES[slot_id - 1]
+        balance = get_user_balance(self.user_id)
+        
+        if balance < price:
+            await interaction.response.send_message(
+                f"❌ You don't have enough money! You need **${price:,.2f}** but only have **${balance:,.2f}**.",
+                ephemeral=True
+            )
+            return
+        
+        # Hire the gardener
+        success = add_gardener(self.user_id, slot_id, price)
+        if not success:
+            await interaction.response.send_message("❌ Failed to hire gardener. Please try again.", ephemeral=True)
+            return
+        
+        # Store notification channel
+        set_user_notification_channel(self.user_id, self.channel_id)
+        
+        # Send confirmation and update embed
+        await interaction.response.send_message(f"✅ Hired **Gardener #{slot_id}** for ${price:,.2f}! They'll start gathering for you automatically.", ephemeral=True)
+        
+        embed = self.create_embed()
+        self.update_buttons()
+        await interaction.message.edit(embed=embed, view=self)
+    
+    @discord.ui.button(label="Hire Gardener #1", style=discord.ButtonStyle.success, row=0, custom_id="hire_1")
+    async def hire_1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_hire(interaction, 1)
+    
+    @discord.ui.button(label="Hire Gardener #2", style=discord.ButtonStyle.success, row=0, custom_id="hire_2")
+    async def hire_2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_hire(interaction, 2)
+    
+    @discord.ui.button(label="Hire Gardener #3", style=discord.ButtonStyle.success, row=0, custom_id="hire_3")
+    async def hire_3(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_hire(interaction, 3)
+    
+    @discord.ui.button(label="Hire Gardener #4", style=discord.ButtonStyle.success, row=1, custom_id="hire_4")
+    async def hire_4(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_hire(interaction, 4)
+    
+    @discord.ui.button(label="Hire Gardener #5", style=discord.ButtonStyle.success, row=1, custom_id="hire_5")
+    async def hire_5(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_hire(interaction, 5)
+    
+    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=2)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ This is not your hiring center!", ephemeral=True)
+            return
+        
+        embed = self.create_embed()
+        self.update_buttons()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+# Hire command
+@bot.tree.command(name="hire", description="Hire gardeners to automatically gather items for you!")
+async def hire(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=False)
+    
+    user_id = interaction.user.id
+    channel_id = interaction.channel.id if interaction.channel else None
+    
+    if not channel_id:
+        await interaction.followup.send("❌ Unable to determine channel. Please try again.", ephemeral=True)
+        return
+    
+    view = HireView(user_id, channel_id)
+    embed = view.create_embed()
+    view.update_buttons()
+    
+    await interaction.followup.send(embed=embed, view=view)
+
+
 # # Temporary admin command for dev - give yourself money
 # @bot.tree.command(name="danny", description="Dev command - Give yourself money")
 # async def danny(interaction: discord.Interaction):
@@ -1862,7 +2345,7 @@ STOCK_TICKERS = [
     {"name": "General Mowers", "symbol": "GM", "base_price": 45.0, "max_shares": 20000},
     {"name": "Raytheorn", "symbol": "RTH", "base_price": 125.0, "max_shares": 16000},
     {"name": "Wells Fargrow", "symbol": "WFG", "base_price": 70.0, "max_shares": 18000},
-    {"name": "APPLE", "symbol": "AAPL", "base_price": 150.0, "max_shares": 17000},
+    {"name": "Apple", "symbol": "AAPL", "base_price": 150.0, "max_shares": 17000},
     {"name": "Sproutify", "symbol": "SPRT", "base_price": 55.0, "max_shares": 16000},
 ]
 
@@ -1964,6 +2447,7 @@ async def update_marketboard_message(guild: discord.Guild):
         color=discord.Color.green()
     )
     
+    
     # Add each stock to the embed
     stock_lines = []
     for ticker in STOCK_TICKERS:
@@ -1994,8 +2478,8 @@ async def update_marketboard_message(guild: discord.Guild):
         shares_str = f"{available_shares:,}/{max_shares:,}"
         
         # Create stock line
-        stock_line = f"{change_emoji} **{ticker['name']} ({symbol})**\n"
-        stock_line += f"   Price: **{price_str}** | Increase: **{percent_str}** | Δ5m: **{change_str}** | Shares: **{shares_str}**\n"
+        stock_line = f"**{ticker['name']} ({symbol})**\n"
+        stock_line += f"   Price: **{price_str}** | Increase: **{percent_str}** | Δ5m: **{change_str}** | Shares: **{shares_str}** {change_emoji}\n"
         
         stock_lines.append(stock_line)
     
@@ -2070,6 +2554,804 @@ async def update_all_marketboards():
         
         # Wait 60 seconds before next update
         await asyncio.sleep(60)
+
+
+# MARKET NEWS - News Alert System
+# News templates (positive and negative)
+POSITIVE_NEWS = [
+    "{company} just signed an exclusive deal with ArborTech, integrating new smart-root sensors!",
+    "{company} announces a new fertilizer that cuts plant growth time in half",
+    "{company} approves the use of new experimental seeds, theorized to increase yield by 30%!",
+    "{company} reports record-breaking harvest season with 40% increase in production",
+    "{company} launches revolutionary vertical farming initiative in major cities",
+    "{company} partners with leading agricultural universities for R&D breakthrough",
+    "{company} stock surges after announcing breakthrough in drought-resistant crops",
+    "{company} expands operations to three new continents, doubling market reach",
+]
+
+NEGATIVE_NEWS = [
+    "{company} faces major recall after contaminated seed batch discovered",
+    "{company} stock plummets following unexpected crop failure in key regions",
+    "{company} under investigation for environmental violations at multiple facilities",
+    "{company} reports significant losses due to unexpected pest infestation",
+    "{company} CEO steps down amid controversy over pesticide usage",
+    "{company} faces lawsuit from farmers over failed crop yields",
+    "{company} announces layoffs after disappointing quarterly earnings",
+    "{company} stock drops after major client terminates partnership agreement",
+]
+
+async def send_market_news(guild: discord.Guild):
+    """Send a random news alert to the #market-news channel and affect stock price."""
+    # Find the market-news channel
+    news_channel = discord.utils.get(guild.text_channels, name="market-news")
+    
+    if not news_channel:
+        return  # Channel doesn't exist, skip
+    
+    # Initialize stocks for this guild if needed
+    initialize_stocks(guild.id)
+    
+    # Pick a random company
+    ticker = random.choice(STOCK_TICKERS)
+    company_name = ticker["name"]
+    symbol = ticker["symbol"]
+    
+    # Pick positive or negative news (50/50 chance)
+    is_positive = random.choice([True, False])
+    
+    # Randomly select price change percentage: 1%, 2%, 3%, or 5%
+    price_change_percent = random.choice([0.01, 0.02, 0.03, 0.05])
+    
+    if is_positive:
+        news_template = random.choice(POSITIVE_NEWS)
+        color = discord.Color.green()
+        emoji = "📈"
+        price_multiplier = 1 + price_change_percent  # Increase price
+    else:
+        news_template = random.choice(NEGATIVE_NEWS)
+        color = discord.Color.red()
+        emoji = "📉"
+        price_multiplier = 1 - price_change_percent  # Decrease price
+    
+    # Apply price change to stock
+    if symbol in stock_data[guild.id]:
+        current_price = stock_data[guild.id][symbol]["price"]
+        new_price = current_price * price_multiplier
+        
+        # Update price
+        stock_data[guild.id][symbol]["price"] = new_price
+        
+        # Update price history (keep last 6 minutes)
+        price_history = stock_data[guild.id][symbol]["price_history"]
+        price_history.append(new_price)
+        if len(price_history) > 6:
+            price_history.pop(0)
+        
+        price_change_display = f"{'+' if is_positive else ''}{price_change_percent * 100:.0f}%"
+        old_price_display = f"${current_price:.2f}"
+        new_price_display = f"${new_price:.2f}"
+    else:
+        # Stock not initialized, skip price update
+        price_change_display = f"{'+' if is_positive else ''}{price_change_percent * 100:.0f}%"
+        old_price_display = "N/A"
+        new_price_display = "N/A"
+    
+    # Format the news message with company name
+    news_message = news_template.format(company=company_name)
+    
+    # Create embed
+    embed = discord.Embed(
+        title=f"{emoji} MARKET ALERT",
+        description=news_message,
+        color=color
+    )
+    embed.add_field(name="Company", value=f"**{company_name} ({symbol})**", inline=True)
+    embed.add_field(name="Price Impact", value=f"**{price_change_display}**", inline=True)
+    if old_price_display != "N/A":
+        embed.add_field(name="Price Change", value=f"{old_price_display} → {new_price_display}", inline=False)
+    embed.timestamp = discord.utils.utcnow()
+    
+    try:
+        await news_channel.send(embed=embed)
+    except Exception as e:
+        print(f"Error sending market news in {guild.name}: {e}")
+
+async def send_market_news_loop():
+    """Background task to send market news alerts at random intervals."""
+    await bot.wait_until_ready()
+    
+    # Wait a bit for guilds to fully load
+    await asyncio.sleep(10)
+    
+    while not bot.is_closed():
+        try:
+            # Send news to all guilds the bot is in
+            for guild in bot.guilds:
+                await send_market_news(guild)
+                await asyncio.sleep(1)  # Small delay between guilds
+        except Exception as e:
+            print(f"Error in market news task: {e}")
+        
+        # Wait random interval between 2-5 minutes (120-300 seconds)
+        wait_time = random.randint(120, 300)
+        await asyncio.sleep(wait_time)
+
+
+# CRYPTOCURRENCY SYSTEM
+# Cryptocurrency definitions
+CRYPTO_COINS = [
+    {"name": "RootCoin", "symbol": "RTC", "base_price": 100.0},
+    {"name": "Terrarium", "symbol": "TER", "base_price": 100.0},
+    {"name": "Canopy", "symbol": "CNY", "base_price": 100.0},
+]
+
+def update_crypto_prices_market():
+    """Update cryptocurrency prices with market fluctuations."""
+    prices = get_crypto_prices()
+    
+    for coin in CRYPTO_COINS:
+        symbol = coin["symbol"]
+        current_price = prices.get(symbol, coin["base_price"])
+        
+        # Determine fluctuation percentage: 50% chance for 1%, 30% for 2%, 20% for 3%
+        fluctuation_weights = [0.5, 0.3, 0.2]
+        fluctuation_percent = random.choices([0.01, 0.02, 0.03], weights=fluctuation_weights, k=1)[0]
+        
+        # Random direction: increase or decrease (50/50)
+        direction = random.choice([1, -1])
+        
+        # Calculate new price
+        new_price = current_price * (1 + (direction * fluctuation_percent))
+        
+        # Ensure price doesn't go below 0.01
+        if new_price < 0.01:
+            new_price = 0.01
+        
+        prices[symbol] = new_price
+    
+    # Update prices in database
+    update_crypto_prices(prices)
+    return prices
+
+async def update_coinbase_message(guild: discord.Guild):
+    """Update or create the coinbase message in #coinbase channel."""
+    # Find the coinbase channel
+    coinbase_channel = discord.utils.get(guild.text_channels, name="coinbase")
+    
+    if not coinbase_channel:
+        return  # Channel doesn't exist, skip
+    
+    try:
+        # Get current prices
+        prices = get_crypto_prices()
+        
+        # Create embed
+        embed = discord.Embed(
+            title="💰 CRYPTO MARKET 💰",
+            description="\n\n",
+            color=discord.Color.blue()
+        )
+        
+        # Add each coin to the embed
+        coin_lines = []
+        for coin in CRYPTO_COINS:
+            symbol = coin["symbol"]
+            current_price = prices.get(symbol, coin["base_price"])
+            base_price = coin["base_price"]
+            
+            # Calculate percent change from base
+            percent_from_base = ((current_price - base_price) / base_price) * 100
+            percent_sign = "+" if percent_from_base >= 0 else ""
+            percent_str = f"{percent_sign}{percent_from_base:.2f}%"
+            
+            # Format price
+            price_str = f"${current_price:.2f}"
+            
+            # Determine emoji based on change
+            if percent_from_base > 0:
+                emoji = "🟢"
+            elif percent_from_base < 0:
+                emoji = "🔴"
+            else:
+                emoji = "🟨"
+            
+            # Create coin line
+            coin_line = f"**{coin['name']} ({symbol})**\n"
+            coin_line += f"   Price: **{price_str}** | Change: **{percent_str}** {emoji}\n"
+            
+            coin_lines.append(coin_line)
+        
+        # Combine all coin lines
+        embed.description += "\n".join(coin_lines)
+        embed.set_footer(text="Updates every minute | Last updated")
+        embed.timestamp = discord.utils.utcnow()
+        
+        # Try to edit existing message, or create new one
+        async for message in coinbase_channel.history(limit=50):
+            if message.author == bot.user and message.embeds and message.embeds[0].title == "💰 CRYPTO MARKET 💰":
+                await message.edit(embed=embed)
+                return
+        
+        # No existing message found, create new one
+        await coinbase_channel.send(embed=embed)
+        
+    except Exception as e:
+        print(f"Error updating coinbase in {guild.name}: {e}")
+
+async def update_all_coinbase():
+    """Background task to update all coinbase channels every minute."""
+    await bot.wait_until_ready()
+    
+    # Wait a bit for guilds to fully load
+    await asyncio.sleep(5)
+    
+    while not bot.is_closed():
+        try:
+            # Update prices first
+            update_crypto_prices_market()
+            
+            # Update coinbase channels for all guilds the bot is in
+            for guild in bot.guilds:
+                await update_coinbase_message(guild)
+                await asyncio.sleep(1)  # Small delay between updates
+        except Exception as e:
+            print(f"Error in coinbase update task: {e}")
+        
+        # Wait 60 seconds before next update
+        await asyncio.sleep(60)
+
+
+async def gardener_background_task():
+    """Background task to check gardener actions every 10 minutes."""
+    await bot.wait_until_ready()
+    
+    # Wait a bit for bot to fully initialize
+    await asyncio.sleep(5)
+    
+    while not bot.is_closed():
+        try:
+            # Get all users with gardeners
+            users_with_gardeners = get_all_users_with_gardeners()
+            
+            for user_id, gardeners in users_with_gardeners:
+                # Process each gardener
+                for gardener in gardeners:
+                    gardener_id = gardener.get("id")
+                    if not gardener_id:
+                        continue
+                    
+                    # 20% chance for each gardener to gather
+                    if random.random() < 0.20:
+                        try:
+                            # Perform gather for this user (without cooldown)
+                            gather_result = await perform_gather_for_user(user_id, apply_cooldown=False)
+                            
+                            # Update gardener stats
+                            update_gardener_stats(user_id, gardener_id, gather_result["value"])
+                            
+                            # Send notification
+                            channel_id = get_user_notification_channel(user_id)
+                            if channel_id:
+                                try:
+                                    channel = bot.get_channel(channel_id)
+                                    if channel:
+                                        # Check if bot has permission to send messages
+                                        if channel.permissions_for(channel.guild.me).send_messages:
+                                            embed = discord.Embed(
+                                                title=f"🌿 Gardener #{gardener_id} Gathered!",
+                                                description=f"Your gardener found a **{gather_result['name']}**!",
+                                                color=discord.Color.green()
+                                            )
+                                            embed.add_field(name="Value", value=f"**${gather_result['value']:.2f}**", inline=True)
+                                            embed.add_field(name="Ripeness", value=gather_result['ripeness'], inline=True)
+                                            embed.add_field(name="GMO?", value="Yes ✨" if gather_result['is_gmo'] else "No", inline=False)
+                                            
+                                            # Get updated gardener stats
+                                            updated_gardeners = get_user_gardeners(user_id)
+                                            updated_gardener = next((g for g in updated_gardeners if g.get("id") == gardener_id), None)
+                                            if updated_gardener:
+                                                embed.add_field(
+                                                    name="Gardener Stats",
+                                                    value=f"**Times Gathered:** {updated_gardener.get('times_gathered', 0)}\n**Total Earned:** ${updated_gardener.get('total_money_earned', 0.0):,.2f}",
+                                                    inline=False
+                                                )
+                                            
+                                            await channel.send(embed=embed)
+                                except Exception as e:
+                                    # Silently skip if channel is unavailable
+                                    print(f"Error sending gardener notification to channel {channel_id} for user {user_id}: {e}")
+                        except Exception as e:
+                            print(f"Error processing gather for gardener {gardener_id} of user {user_id}: {e}")
+            
+            # Small delay to avoid overwhelming the system
+            await asyncio.sleep(1)
+        except Exception as e:
+            print(f"Error in gardener background task: {e}")
+        
+        # Wait 10 minutes (600 seconds) before next check
+        await asyncio.sleep(600)
+
+
+# Event system functions
+async def send_event_start_embed(guild: discord.Guild, event: dict, duration_minutes: int):
+    """Send event start embed to #events channel."""
+    events_channel = discord.utils.get(guild.text_channels, name="events")
+    if not events_channel:
+        return
+    
+    event_info = None
+    if event["event_type"] == "hourly":
+        event_info = next((e for e in HOURLY_EVENTS if e["id"] == event["event_id"]), None)
+    elif event["event_type"] == "daily":
+        event_info = next((e for e in DAILY_EVENTS if e["id"] == event["event_id"]), None)
+    
+    if not event_info:
+        return
+    
+    embed = discord.Embed(
+        title=f"{event_info['emoji']} {event_info['name']} Event Has Started!",
+        description=event_info["description"],
+        color=discord.Color.gold()
+    )
+    embed.add_field(name="Duration", value=f"{duration_minutes} Minutes", inline=False)
+    embed.add_field(name="Effect", value=event_info["effect"], inline=False)
+    embed.set_footer(text="Go /gather!!")
+    
+    try:
+        await events_channel.send("@here", embed=embed)
+    except Exception as e:
+        print(f"Error sending event start embed in {guild.name}: {e}")
+
+
+async def send_event_end_embed(guild: discord.Guild, event: dict):
+    """Send event end embed to #events channel."""
+    events_channel = discord.utils.get(guild.text_channels, name="events")
+    if not events_channel:
+        return
+    
+    event_info = None
+    if event["event_type"] == "hourly":
+        event_info = next((e for e in HOURLY_EVENTS if e["id"] == event["event_id"]), None)
+    elif event["event_type"] == "daily":
+        event_info = next((e for e in DAILY_EVENTS if e["id"] == event["event_id"]), None)
+    
+    if not event_info:
+        return
+    
+    embed = discord.Embed(
+        title=f"{event_info['emoji']} {event_info['name']} Event Has Ended",
+        description="Event has ended! Forest conditions go back to normal.\n\nThe event is over. Stay tuned for any future events..",
+        color=discord.Color.dark_gray()
+    )
+    
+    try:
+        await events_channel.send(embed=embed)
+    except Exception as e:
+        print(f"Error sending event end embed in {guild.name}: {e}")
+
+
+async def hourly_event_check():
+    """Background task to check for hourly events at the start of each hour."""
+    await bot.wait_until_ready()
+    
+    # Wait until the start of the next hour
+    now = datetime.datetime.now()
+    next_hour = (now.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1))
+    wait_seconds = (next_hour - now).total_seconds()
+    await asyncio.sleep(wait_seconds)
+    
+    while not bot.is_closed():
+        try:
+            # Check if there's already an active hourly event
+            existing_event = get_active_event_by_type("hourly")
+            if existing_event:
+                # Event already active, skip this hour
+                print(f"Skipping hourly event - event already active: {existing_event['event_name']}")
+            else:
+                # 50% chance to trigger an event
+                if random.random() < 0.5:
+                    # Select random event
+                    event_info = random.choice(HOURLY_EVENTS)
+                    
+                    # Random duration: 40% = 30min, 35% = 45min, 25% = 60min
+                    rand = random.random()
+                    if rand < 0.40:
+                        duration_minutes = 30
+                    elif rand < 0.75:  # 0.40 + 0.35
+                        duration_minutes = 45
+                    else:
+                        duration_minutes = 60
+                    
+                    duration_seconds = duration_minutes * 60
+                    start_time = time.time()
+                    end_time = start_time + duration_seconds
+                    
+                    # Create event ID
+                    event_id = f"hourly_{int(start_time)}_{event_info['id']}"
+                    
+                    # Store event
+                    set_active_event(
+                        event_id=event_id,
+                        event_type="hourly",
+                        event_name=event_info["name"],
+                        start_time=start_time,
+                        end_time=end_time,
+                        effects={"event_id": event_info["id"]}
+                    )
+                    
+                    # Send announcement to all guilds
+                    for guild in bot.guilds:
+                        await send_event_start_embed(guild, {
+                            "event_type": "hourly",
+                            "event_id": event_info["id"],
+                            "event_name": event_info["name"]
+                        }, duration_minutes)
+                    
+                    print(f"Started hourly event: {event_info['name']} for {duration_minutes} minutes")
+            
+            # Wait until the start of the next hour
+            now = datetime.datetime.now()
+            next_hour = (now.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1))
+            wait_seconds = (next_hour - now).total_seconds()
+            await asyncio.sleep(wait_seconds)
+        except Exception as e:
+            print(f"Error in hourly_event_check: {e}")
+            await asyncio.sleep(60)  # Wait a minute before retrying
+
+
+async def daily_event_check():
+    """Background task to check for daily events once per day."""
+    await bot.wait_until_ready()
+    
+    # Wait until midnight
+    now = datetime.datetime.now()
+    next_midnight = (now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1))
+    wait_seconds = (next_midnight - now).total_seconds()
+    await asyncio.sleep(wait_seconds)
+    
+    while not bot.is_closed():
+        try:
+            # Check if there's already an active daily event
+            existing_event = get_active_event_by_type("daily")
+            if existing_event:
+                # Event already active, skip this day
+                print(f"Skipping daily event - event already active: {existing_event['event_name']}")
+            else:
+                # 10% chance to trigger an event
+                if random.random() < 0.10:
+                    # Select random event
+                    event_info = random.choice(DAILY_EVENTS)
+                    
+                    # Fixed 24 hour duration
+                    duration_minutes = 24 * 60
+                    duration_seconds = duration_minutes * 60
+                    start_time = time.time()
+                    end_time = start_time + duration_seconds
+                    
+                    # Create event ID
+                    event_id = f"daily_{int(start_time)}_{event_info['id']}"
+                    
+                    # Store event
+                    set_active_event(
+                        event_id=event_id,
+                        event_type="daily",
+                        event_name=event_info["name"],
+                        start_time=start_time,
+                        end_time=end_time,
+                        effects={"event_id": event_info["id"]}
+                    )
+                    
+                    # Send announcement to all guilds
+                    for guild in bot.guilds:
+                        await send_event_start_embed(guild, {
+                            "event_type": "daily",
+                            "event_id": event_info["id"],
+                            "event_name": event_info["name"]
+                        }, duration_minutes)
+                    
+                    print(f"Started daily event: {event_info['name']} for 24 hours")
+            
+            # Wait until next midnight
+            now = datetime.datetime.now()
+            next_midnight = (now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1))
+            wait_seconds = (next_midnight - now).total_seconds()
+            await asyncio.sleep(wait_seconds)
+        except Exception as e:
+            print(f"Error in daily_event_check: {e}")
+            await asyncio.sleep(3600)  # Wait an hour before retrying
+
+
+async def event_cleanup_task():
+    """Background task to check for expired events and send end messages."""
+    await bot.wait_until_ready()
+    await asyncio.sleep(5)
+    
+    while not bot.is_closed():
+        try:
+            # Get all active events
+            active_events = get_active_events()
+            current_time = time.time()
+            
+            # Check each event for expiration
+            for event in active_events:
+                if current_time >= event["end_time"]:
+                    # Event has expired
+                    # Send end message to all guilds
+                    for guild in bot.guilds:
+                        await send_event_end_embed(guild, event)
+                    
+                    # Remove event from database
+                    clear_event(event["event_id"])
+                    print(f"Ended event: {event['event_name']}")
+            
+            # Also clean up any expired events in database
+            clear_expired_events()
+            
+            # Check every minute
+            await asyncio.sleep(60)
+        except Exception as e:
+            print(f"Error in event_cleanup_task: {e}")
+            await asyncio.sleep(60)
+
+
+# Mining View with button
+class MiningView(discord.ui.View):
+    def __init__(self, user_id: int, timeout=60):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.mined = False
+    
+    @discord.ui.button(label="Mine", style=discord.ButtonStyle.success, emoji="⛏️")
+    async def mine_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ This is not your mining session!", ephemeral=True)
+            return
+        
+        if self.mined:
+            await interaction.response.send_message("❌ You already mined this session!", ephemeral=True)
+            return
+        
+        await interaction.response.defer()
+        
+        # Randomly select a coin to mine
+        coin = random.choice(CRYPTO_COINS)
+        symbol = coin["symbol"]
+        amount = 0.01
+        
+        # Add crypto to user's holdings
+        update_user_crypto_holdings(interaction.user.id, symbol, amount)
+        
+        # Update last mine time
+        update_user_last_mine_time(interaction.user.id, time.time())
+        
+        # Get current holdings
+        holdings = get_user_crypto_holdings(interaction.user.id)
+        prices = get_crypto_prices()
+        
+        # Calculate total value
+        total_value = sum(holdings[coin["symbol"]] * prices.get(coin["symbol"], 100.0) for coin in CRYPTO_COINS)
+        
+        self.mined = True
+        button.disabled = True
+        
+        # Create success embed
+        success_embed = discord.Embed(
+            title="⛏️ Mining Successful!",
+            description=f"You mined **{amount} {symbol}** ({coin['name']})!",
+            color=discord.Color.green()
+        )
+        success_embed.add_field(name="Your Holdings", value=f"RTC: {holdings['RTC']:.4f}\nTER: {holdings['TER']:.4f}\nCNY: {holdings['CNY']:.4f}", inline=False)
+        success_embed.add_field(name="Total Portfolio Value", value=f"${total_value:.2f}", inline=False)
+        success_embed.set_footer(text="Use /sell to sell your cryptocurrency!")
+        
+        await interaction.followup.edit_message(interaction.message.id, embed=success_embed, view=self)
+    
+    async def on_timeout(self):
+        # Disable the button if timeout
+        for item in self.children:
+            item.disabled = True
+
+
+@bot.tree.command(name="mine", description="Mine cryptocurrency! (5 minute cooldown)")
+async def mine(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=False)
+    
+    user_id = interaction.user.id
+    
+    # Check cooldown
+    last_mine_time = get_user_last_mine_time(user_id)
+    current_time = time.time()
+    
+    if last_mine_time > 0:
+        cooldown_end = last_mine_time + MINE_COOLDOWN
+        if current_time < cooldown_end:
+            time_left = int(cooldown_end - current_time)
+            minutes_left = time_left // 60
+            seconds_left = time_left % 60
+            await interaction.followup.send(
+                f"⏰ You must wait {minutes_left} minutes and {seconds_left} seconds before mining again, {interaction.user.name}.",
+                ephemeral=True
+            )
+            return
+    
+    # Create mining embed with button
+    embed = discord.Embed(
+        title="⛏️ Cryptocurrency Mining",
+        description="Click the **Mine** button below to mine cryptocurrency!\n\nYou have **60 seconds** to click the button.",
+        color=discord.Color.blue()
+    )
+    embed.set_footer(text="You can mine 0.01 of a random cryptocurrency!")
+    
+    view = MiningView(user_id, timeout=60)
+    await interaction.followup.send(embed=embed, view=view)
+
+
+@bot.tree.command(name="sell", description="Sell your cryptocurrency holdings")
+@app_commands.choices(coin=[
+    app_commands.Choice(name="RootCoin (RTC)", value="RTC"),
+    app_commands.Choice(name="Terrarium (TER)", value="TER"),
+    app_commands.Choice(name="Canopy (CNY)", value="CNY"),
+])
+async def sell(interaction: discord.Interaction, coin: str, amount: float = None):
+    await interaction.response.defer(ephemeral=False)
+    
+    user_id = interaction.user.id
+    holdings = get_user_crypto_holdings(user_id)
+    prices = get_crypto_prices()
+    
+    # Check if user has any of this coin
+    user_holding = holdings.get(coin, 0.0)
+    
+    if user_holding <= 0:
+        await interaction.followup.send(
+            f"❌ You don't have any {coin} to sell, {interaction.user.name}!",
+            ephemeral=True
+        )
+        return
+    
+    # If amount not specified, sell all
+    if amount is None:
+        amount = user_holding
+    elif amount > user_holding:
+        await interaction.followup.send(
+            f"❌ You only have {user_holding:.4f} {coin}, but tried to sell {amount:.4f} {coin}!",
+            ephemeral=True
+        )
+        return
+    elif amount <= 0:
+        await interaction.followup.send(
+            f"❌ Invalid amount! Please sell a positive amount.",
+            ephemeral=True
+        )
+        return
+    
+    # Calculate sale value
+    coin_price = prices.get(coin, 100.0)
+    sale_value = amount * coin_price
+    
+    # Update holdings (subtract)
+    update_user_crypto_holdings(user_id, coin, -amount)
+    
+    # Add money to balance
+    current_balance = get_user_balance(user_id)
+    new_balance = current_balance + sale_value
+    update_user_balance(user_id, new_balance)
+    
+    # Get updated holdings
+    updated_holdings = get_user_crypto_holdings(user_id)
+    
+    # Create success embed
+    embed = discord.Embed(
+        title="💰 Sale Successful!",
+        description=f"You sold **{amount:.4f} {coin}** for **${sale_value:.2f}**!",
+        color=discord.Color.green()
+    )
+    embed.add_field(name="Remaining Holdings", value=f"RTC: {updated_holdings['RTC']:.4f}\nTER: {updated_holdings['TER']:.4f}\nCNY: {updated_holdings['CNY']:.4f}", inline=False)
+    embed.add_field(name="New Balance", value=f"${new_balance:.2f}", inline=False)
+    
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="portfolio", description="View your cryptocurrency and stock portfolio")
+async def portfolio(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=False)
+    
+    user_id = interaction.user.id
+    guild_id = interaction.guild.id if interaction.guild else None
+    
+    # Get crypto holdings and prices
+    crypto_holdings = get_user_crypto_holdings(user_id)
+    crypto_prices = get_crypto_prices()
+    
+    # Get stock holdings
+    stock_holdings = get_user_stock_holdings(user_id)
+    
+    # Initialize stocks for guild if needed to get current prices
+    if guild_id:
+        initialize_stocks(guild_id)
+        stock_prices = {}
+        for ticker in STOCK_TICKERS:
+            symbol = ticker["symbol"]
+            if symbol in stock_data.get(guild_id, {}):
+                stock_prices[symbol] = stock_data[guild_id][symbol]["price"]
+            else:
+                stock_prices[symbol] = ticker["base_price"]
+    else:
+        # Fallback to base prices if no guild
+        stock_prices = {ticker["symbol"]: ticker["base_price"] for ticker in STOCK_TICKERS}
+    
+    # Calculate crypto values
+    crypto_values = {}
+    crypto_total = 0.0
+    
+    for coin in CRYPTO_COINS:
+        symbol = coin["symbol"]
+        amount = crypto_holdings.get(symbol, 0.0)
+        price = crypto_prices.get(symbol, 100.0)
+        value = amount * price
+        crypto_values[symbol] = value
+        crypto_total += value
+    
+    # Calculate stock values
+    stock_values = {}
+    stock_total = 0.0
+    
+    for ticker in STOCK_TICKERS:
+        symbol = ticker["symbol"]
+        shares = stock_holdings.get(symbol, 0)
+        price = stock_prices.get(symbol, ticker["base_price"])
+        value = shares * price
+        stock_values[symbol] = value
+        stock_total += value
+    
+    # Total portfolio value
+    total_value = crypto_total + stock_total
+    
+    # Create portfolio embed
+    embed = discord.Embed(
+        title="💼 Your Portfolio",
+        description=f"**Total Portfolio Value: ${total_value:.2f}**\n\n",
+        color=discord.Color.blue()
+    )
+    
+    # Add cryptocurrency section
+    if crypto_total > 0:
+        embed.description += "**💰 Cryptocurrency:**\n"
+        for coin in CRYPTO_COINS:
+            symbol = coin["symbol"]
+            amount = crypto_holdings.get(symbol, 0.0)
+            if amount > 0:
+                price = crypto_prices.get(symbol, 100.0)
+                value = crypto_values.get(symbol, 0.0)
+                embed.add_field(
+                    name=f"{coin['name']} ({symbol})",
+                    value=f"Amount: {amount:.4f}\nPrice: ${price:.2f}\nValue: ${value:.2f}",
+                    inline=True
+                )
+        embed.description += f"\n*Crypto Total: ${crypto_total:.2f}*\n\n"
+    
+    # Add stock section
+    if stock_total > 0:
+        embed.description += "**📈 Stocks:**\n"
+        for ticker in STOCK_TICKERS:
+            symbol = ticker["symbol"]
+            shares = stock_holdings.get(symbol, 0)
+            if shares > 0:
+                price = stock_prices.get(symbol, ticker["base_price"])
+                value = stock_values.get(symbol, 0.0)
+                embed.add_field(
+                    name=f"{ticker['name']} ({symbol})",
+                    value=f"Shares: {shares:,}\nPrice: ${price:.2f}\nValue: ${value:.2f}",
+                    inline=True
+                )
+        embed.description += f"\n*Stocks Total: ${stock_total:.2f}*"
+    
+    if total_value == 0:
+        embed.description = "You don't have any holdings yet!\n\nUse `/mine` to mine cryptocurrency or buy stocks to get started!"
+    
+    embed.set_footer(text="Use /mine to mine cryptocurrency, /sell to sell crypto, or buy/sell stocks")
+    
+    await interaction.followup.send(embed=embed)
 
 
 # gambling commands
