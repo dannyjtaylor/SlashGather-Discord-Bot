@@ -345,7 +345,7 @@ def get_crypto_prices() -> Dict[str, float]:
     doc = users.find_one({"_id": 0}, {"crypto_prices": 1})  # Use _id=0 for global data
     if not doc:
         # Initialize with default prices
-        default_prices = {"RTC": 100.0, "TER": 100.0, "CNY": 100.0}
+        default_prices = {"RTC": 200.0, "TER": 200.0, "CNY": 200.0}
         users.update_one(
             {"_id": 0},
             {"$set": {"crypto_prices": default_prices}},
@@ -354,9 +354,9 @@ def get_crypto_prices() -> Dict[str, float]:
         return default_prices
     prices = doc.get("crypto_prices", {})
     return {
-        "RTC": float(prices.get("RTC", 100.0)),
-        "TER": float(prices.get("TER", 100.0)),
-        "CNY": float(prices.get("CNY", 100.0))
+        "RTC": float(prices.get("RTC", 200.0)),
+        "TER": float(prices.get("TER", 200.0)),
+        "CNY": float(prices.get("CNY", 200.0))
     }
 
 

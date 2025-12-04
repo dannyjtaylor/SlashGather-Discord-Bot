@@ -1926,89 +1926,137 @@ async def gear(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed, view=view)
 
 
-# Hire View with buttons
+# Hire View with pagination
 class HireView(discord.ui.View):
-    def __init__(self, user_id: int, channel_id: int, timeout=300):
+    def __init__(self, user_id: int, timeout=300):
         super().__init__(timeout=timeout)
         self.user_id = user_id
-        self.channel_id = channel_id
+        self.current_page = 0  # 0-4 for gardeners 1-5
+        self.total_pages = 5
     
-    def create_embed(self) -> discord.Embed:
-        """Create the hire gardener embed."""
+    def create_embed(self, page: int) -> discord.Embed:
+        """Create the embed for a specific gardener page."""
+        slot_id = page + 1  # Convert 0-4 to 1-5
         gardeners = get_user_gardeners(self.user_id)
         balance = get_user_balance(self.user_id)
-        gardener_count = len(gardeners)
-        
-        # Create a dict for quick lookup
         gardener_dict = {g["id"]: g for g in gardeners}
+        gardener = gardener_dict.get(slot_id)
+        price = GARDENER_PRICES[slot_id - 1]
         
         embed = discord.Embed(
-            title="🌱 Gardener Hiring Center",
-            description=f"💰 Your Balance: **${balance:,.2f}**\n\nHire gardeners to automatically gather items for you! Each gardener has a 20% chance to gather every 10 minutes.",
+            title=f"🌱 Gardener #{slot_id}",
+            description=f"💰 Your Balance: **${balance:,.2f}**\n\nHire gardeners to automatically gather items for you! Each gardener has a 20% chance to gather every 20 seconds.",
             color=discord.Color.green()
         )
         
-        # Show each gardener slot (1-5)
-        for slot_id in range(1, 6):
-            price = GARDENER_PRICES[slot_id - 1]
-            gardener = gardener_dict.get(slot_id)
-            
-            if gardener:
-                # Gardener is hired - show stats
-                times_gathered = gardener.get("times_gathered", 0)
-                total_money = gardener.get("total_money_earned", 0.0)
-                gardener_text = f"**HIRED** ✅\n**Times Gathered:** {times_gathered}\n**Total Money Earned:** ${total_money:,.2f}"
-            else:
-                # Gardener slot is available
-                can_afford = "✅" if balance >= price else "❌"
-                gardener_text = f"**Available**\n**Price:** ${price:,.2f} {can_afford}"
+        if gardener:
+            # Gardener is hired - show stats
+            times_gathered = gardener.get("times_gathered", 0)
+            total_money = gardener.get("total_money_earned", 0.0)
             
             embed.add_field(
-                name=f"🌿 Gardener #{slot_id}",
-                value=gardener_text,
+                name="Status",
+                value="**HIRED** ✅",
+                inline=False
+            )
+            embed.add_field(
+                name="Times Gathered",
+                value=f"**{times_gathered}**",
+                inline=True
+            )
+            embed.add_field(
+                name="Total Money Earned",
+                value=f"**${total_money:,.2f}**",
+                inline=True
+            )
+        else:
+            # Gardener slot is available
+            can_afford = "✅" if balance >= price else "❌"
+            embed.add_field(
+                name="Status",
+                value="**Available**",
+                inline=False
+            )
+            embed.add_field(
+                name="Price",
+                value=f"**${price:,.2f}** {can_afford}",
                 inline=True
             )
         
-        embed.add_field(
-            name="📊 Summary",
-            value=f"**Gardeners Hired:** {gardener_count}/5",
-            inline=False
-        )
-        
-        embed.set_footer(text="Click a button below to hire a gardener!")
+        embed.set_footer(text=f"Page {page + 1} of {self.total_pages}")
         
         return embed
     
     def update_buttons(self):
-        """Update button states based on current gardener status and balance."""
-        gardeners = get_user_gardeners(self.user_id)
-        balance = get_user_balance(self.user_id)
-        gardener_dict = {g["id"]: g for g in gardeners}
+        """Update button states based on current page and gardener status."""
+        # Update navigation buttons
+        self.previous_button.disabled = self.current_page == 0
+        self.next_button.disabled = self.current_page >= self.total_pages - 1
         
-        for i, button in enumerate(self.children):
-            if isinstance(button, discord.ui.Button) and button.custom_id and button.custom_id.startswith("hire_"):
-                slot_id = int(button.custom_id.split("_")[1])
-                gardener = gardener_dict.get(slot_id)
-                price = GARDENER_PRICES[slot_id - 1]
-                
-                # Disable if already hired
-                if gardener:
-                    button.disabled = True
-                    button.label = f"Gardener #{slot_id} (Hired)"
-                # Disable if can't afford
-                elif balance < price:
-                    button.disabled = True
-                # Disable if max gardeners reached
-                elif len(gardeners) >= 5:
-                    button.disabled = True
-                else:
-                    button.disabled = False
+        # Update hire button
+        slot_id = self.current_page + 1
+        gardeners = get_user_gardeners(self.user_id)
+        gardener_dict = {g["id"]: g for g in gardeners}
+        gardener = gardener_dict.get(slot_id)
+        balance = get_user_balance(self.user_id)
+        price = GARDENER_PRICES[slot_id - 1]
+        
+        if gardener:
+            # Already hired
+            self.hire_button.disabled = True
+            self.hire_button.label = "Already Hired"
+            self.hire_button.style = discord.ButtonStyle.secondary
+        elif balance < price:
+            # Can't afford
+            self.hire_button.disabled = True
+            self.hire_button.label = f"Hire (Need ${price:,.0f})"
+            self.hire_button.style = discord.ButtonStyle.secondary
+        elif len(gardeners) >= 5:
+            # Max gardeners reached
+            self.hire_button.disabled = True
+            self.hire_button.label = "Max Gardeners"
+            self.hire_button.style = discord.ButtonStyle.secondary
+        else:
+            # Can hire
+            self.hire_button.disabled = False
+            self.hire_button.label = f"Hire for ${price:,.0f}"
+            self.hire_button.style = discord.ButtonStyle.success
     
-    async def handle_hire(self, interaction: discord.Interaction, slot_id: int):
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, row=0)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ This is not your hiring center!", ephemeral=True)
             return
         
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            embed = self.create_embed(self.current_page)
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+    
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary, row=0)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ This is not your hiring center!", ephemeral=True)
+            return
+        
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            self.update_buttons()
+            embed = self.create_embed(self.current_page)
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+    
+    @discord.ui.button(label="Hire", style=discord.ButtonStyle.success, row=1)
+    async def hire_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ This is not your hiring center!", ephemeral=True)
+            return
+        
+        slot_id = self.current_page + 1
         gardeners = get_user_gardeners(self.user_id)
         gardener_dict = {g["id"]: g for g in gardeners}
         
@@ -2038,45 +2086,12 @@ class HireView(discord.ui.View):
             await interaction.response.send_message("❌ Failed to hire gardener. Please try again.", ephemeral=True)
             return
         
-        # Store notification channel
-        set_user_notification_channel(self.user_id, self.channel_id)
-        
         # Send confirmation and update embed
         await interaction.response.send_message(f"✅ Hired **Gardener #{slot_id}** for ${price:,.2f}! They'll start gathering for you automatically.", ephemeral=True)
         
-        embed = self.create_embed()
+        embed = self.create_embed(self.current_page)
         self.update_buttons()
         await interaction.message.edit(embed=embed, view=self)
-    
-    @discord.ui.button(label="Hire Gardener #1", style=discord.ButtonStyle.success, row=0, custom_id="hire_1")
-    async def hire_1(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_hire(interaction, 1)
-    
-    @discord.ui.button(label="Hire Gardener #2", style=discord.ButtonStyle.success, row=0, custom_id="hire_2")
-    async def hire_2(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_hire(interaction, 2)
-    
-    @discord.ui.button(label="Hire Gardener #3", style=discord.ButtonStyle.success, row=0, custom_id="hire_3")
-    async def hire_3(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_hire(interaction, 3)
-    
-    @discord.ui.button(label="Hire Gardener #4", style=discord.ButtonStyle.success, row=1, custom_id="hire_4")
-    async def hire_4(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_hire(interaction, 4)
-    
-    @discord.ui.button(label="Hire Gardener #5", style=discord.ButtonStyle.success, row=1, custom_id="hire_5")
-    async def hire_5(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_hire(interaction, 5)
-    
-    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=2)
-    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ This is not your hiring center!", ephemeral=True)
-            return
-        
-        embed = self.create_embed()
-        self.update_buttons()
-        await interaction.response.edit_message(embed=embed, view=self)
 
 
 # Hire command
@@ -2085,14 +2100,9 @@ async def hire(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=False)
     
     user_id = interaction.user.id
-    channel_id = interaction.channel.id if interaction.channel else None
     
-    if not channel_id:
-        await interaction.followup.send("❌ Unable to determine channel. Please try again.", ephemeral=True)
-        return
-    
-    view = HireView(user_id, channel_id)
-    embed = view.create_embed()
+    view = HireView(user_id)
+    embed = view.create_embed(0)  # Start on page 0 (Gardener #1)
     view.update_buttons()
     
     await interaction.followup.send(embed=embed, view=view)
@@ -2379,8 +2389,8 @@ def update_stock_prices(guild_id: int):
         
         current_price = stock_data[guild_id][symbol]["price"]
         
-        # Random change: 0.1%, 0.2%, or 0.3% (equal chance for each)
-        change_percent = random.choice([0.001, 0.002, 0.003])
+        # Random change: 1%, 2%, or 3% (equal chance for each)
+        change_percent = random.choice([0.01, 0.02, 0.03])
         
         # Random direction: increase or decrease (50/50)
         direction = random.choice([1, -1])
@@ -2426,6 +2436,31 @@ def get_change_emoji(change_5min: float) -> str:
     else:  # Positive (more than 0.1%)
         return "🟢"
 
+def calculate_available_shares(guild_id: int, symbol: str) -> int:
+    """Calculate available shares by summing all user holdings and subtracting from max."""
+    from database import _get_users_collection
+    
+    ticker_info = next((t for t in STOCK_TICKERS if t["symbol"] == symbol), None)
+    if not ticker_info:
+        return 0
+    
+    max_shares = ticker_info["max_shares"]
+    
+    # Get all users' stock holdings for this symbol
+    users = _get_users_collection()
+    total_owned = 0
+    
+    # Query all users who have stock holdings
+    cursor = users.find({}, {"stock_holdings": 1})
+    for doc in cursor:
+        holdings = doc.get("stock_holdings", {})
+        user_shares = int(holdings.get(symbol, 0))
+        if user_shares > 0:
+            total_owned += user_shares
+    
+    available = max_shares - total_owned
+    return max(0, available)  # Ensure it doesn't go negative
+
 async def update_marketboard_message(guild: discord.Guild):
     """Update or create the marketboard message in #grow-jones channel."""
     # Find the grow-jones channel
@@ -2455,8 +2490,12 @@ async def update_marketboard_message(guild: discord.Guild):
         stock_info = stock_data[guild.id][symbol]
         current_price = stock_info["price"]
         base_price = ticker["base_price"]
-        available_shares = stock_info["available_shares"]
         max_shares = ticker["max_shares"]
+        
+        # Calculate available shares from database
+        available_shares = calculate_available_shares(guild.id, symbol)
+        # Update stock_data with calculated available_shares
+        stock_info["available_shares"] = available_shares
         
         # Calculate percent increase from base
         percent_from_base = ((current_price - base_price) / base_price) * 100
@@ -2479,13 +2518,13 @@ async def update_marketboard_message(guild: discord.Guild):
         
         # Create stock line
         stock_line = f"**{ticker['name']} ({symbol})**\n"
-        stock_line += f"   Price: **{price_str}** | Increase: **{percent_str}** | Δ5m: **{change_str}** | Shares: **{shares_str}** {change_emoji}\n"
+        stock_line += f"   Price: **{price_str}** | Δ5m: **{change_str}** | Shares: **{shares_str}** {change_emoji}\n"
         
         stock_lines.append(stock_line)
     
     # Combine all stock lines
     embed.description += "\n".join(stock_lines)
-    embed.set_footer(text="Updates every minute | Last updated")
+    embed.set_footer(text="Last updated")
     embed.timestamp = discord.utils.utcnow()
     
     # Try to edit existing message, or create new one
@@ -2518,7 +2557,7 @@ async def update_marketboard_message(guild: discord.Guild):
                     if message.author.id == bot.user.id and message.embeds:
                         embed_title = message.embeds[0].title if message.embeds[0].title else ""
                         # Check if this is the marketboard message
-                        if "GROW JONES MARKETBOARD" in embed_title:
+                        if "GROW JONES INDUSTRIAL AVERAGE" in embed_title:
                             # Found existing message, update it
                             message_id = message.id
                             leaderboard_messages[guild_id]["marketboard"] = message_id
@@ -2548,6 +2587,10 @@ async def update_all_marketboards():
             # Update marketboards for all guilds the bot is in
             for guild in bot.guilds:
                 await update_marketboard_message(guild)
+                # Update leaderboards after stock prices change
+                await update_leaderboard_message(guild, "plants")
+                await asyncio.sleep(1)  # Small delay between updates
+                await update_leaderboard_message(guild, "money")
                 await asyncio.sleep(1)  # Small delay between updates
         except Exception as e:
             print(f"Error in marketboard update task: {e}")
@@ -2599,8 +2642,8 @@ async def send_market_news(guild: discord.Guild):
     # Pick positive or negative news (50/50 chance)
     is_positive = random.choice([True, False])
     
-    # Randomly select price change percentage: 1%, 2%, 3%, or 5%
-    price_change_percent = random.choice([0.01, 0.02, 0.03, 0.05])
+    # Randomly select price change percentage: 1% to 10%
+    price_change_percent = random.randint(1, 10) / 100.0
     
     if is_positive:
         news_template = random.choice(POSITIVE_NEWS)
@@ -2627,28 +2670,22 @@ async def send_market_news(guild: discord.Guild):
         if len(price_history) > 6:
             price_history.pop(0)
         
-        price_change_display = f"{'+' if is_positive else ''}{price_change_percent * 100:.0f}%"
-        old_price_display = f"${current_price:.2f}"
-        new_price_display = f"${new_price:.2f}"
+        price_change_display = f"{'+' if is_positive else '-'}{price_change_percent * 100:.0f}%"
     else:
         # Stock not initialized, skip price update
-        price_change_display = f"{'+' if is_positive else ''}{price_change_percent * 100:.0f}%"
-        old_price_display = "N/A"
-        new_price_display = "N/A"
+        price_change_display = f"{'+' if is_positive else '-'}{price_change_percent * 100:.0f}%"
     
     # Format the news message with company name
     news_message = news_template.format(company=company_name)
     
     # Create embed
     embed = discord.Embed(
-        title=f"{emoji} MARKET ALERT",
+        title=f"{emoji} ***THIS JUST IN!***",
         description=news_message,
         color=color
     )
     embed.add_field(name="Company", value=f"**{company_name} ({symbol})**", inline=True)
     embed.add_field(name="Price Impact", value=f"**{price_change_display}**", inline=True)
-    if old_price_display != "N/A":
-        embed.add_field(name="Price Change", value=f"{old_price_display} → {new_price_display}", inline=False)
     embed.timestamp = discord.utils.utcnow()
     
     try:
@@ -2680,13 +2717,27 @@ async def send_market_news_loop():
 # CRYPTOCURRENCY SYSTEM
 # Cryptocurrency definitions
 CRYPTO_COINS = [
-    {"name": "RootCoin", "symbol": "RTC", "base_price": 100.0},
-    {"name": "Terrarium", "symbol": "TER", "base_price": 100.0},
-    {"name": "Canopy", "symbol": "CNY", "base_price": 100.0},
+    {"name": "RootCoin", "symbol": "RTC", "base_price": 200.0},
+    {"name": "Terrarium", "symbol": "TER", "base_price": 200.0},
+    {"name": "Canopy", "symbol": "CNY", "base_price": 200.0},
 ]
+
+# Crypto price history storage: {symbol: [float]} - keeps last 6 prices (5 minutes + current)
+crypto_price_history = {}
+
+def initialize_crypto_history():
+    """Initialize crypto price history if not already initialized."""
+    global crypto_price_history
+    if not crypto_price_history:
+        for coin in CRYPTO_COINS:
+            base_price = coin["base_price"]
+            crypto_price_history[coin["symbol"]] = [base_price] * 6
 
 def update_crypto_prices_market():
     """Update cryptocurrency prices with market fluctuations."""
+    # Initialize history if needed
+    initialize_crypto_history()
+    
     prices = get_crypto_prices()
     
     for coin in CRYPTO_COINS:
@@ -2708,10 +2759,48 @@ def update_crypto_prices_market():
             new_price = 0.01
         
         prices[symbol] = new_price
+        
+        # Update price history (keep last 6 prices)
+        if symbol not in crypto_price_history:
+            crypto_price_history[symbol] = [coin["base_price"]] * 6
+        price_history = crypto_price_history[symbol]
+        price_history.append(new_price)
+        if len(price_history) > 6:
+            price_history.pop(0)
     
     # Update prices in database
     update_crypto_prices(prices)
     return prices
+
+def get_crypto_5min_change(symbol: str) -> float:
+    """Get the percent change over the last 5 minutes for a crypto coin."""
+    initialize_crypto_history()
+    
+    if symbol not in crypto_price_history:
+        return 0.0
+    
+    price_history = crypto_price_history[symbol]
+    if len(price_history) < 6:
+        return 0.0
+    
+    # Price 5 minutes ago is at index -6 (6th from the end), current price is at index -1
+    old_price = price_history[-6]
+    current_price = price_history[-1]
+    
+    if old_price == 0:
+        return 0.0
+    
+    change_percent = ((current_price - old_price) / old_price) * 100
+    return change_percent
+
+def get_crypto_change_emoji(change_5min: float) -> str:
+    """Get emoji based on 5-minute change for crypto."""
+    if change_5min < -0.1:  # Negative (more than -0.1%)
+        return "🔴"
+    elif -0.1 <= change_5min <= 0.1:  # Slightly negative or slightly positive
+        return "🟨"
+    else:  # Positive (more than 0.1%)
+        return "🟢"
 
 async def update_coinbase_message(guild: discord.Guild):
     """Update or create the coinbase message in #coinbase channel."""
@@ -2722,6 +2811,9 @@ async def update_coinbase_message(guild: discord.Guild):
         return  # Channel doesn't exist, skip
     
     try:
+        # Initialize crypto history if needed
+        initialize_crypto_history()
+        
         # Get current prices
         prices = get_crypto_prices()
         
@@ -2739,31 +2831,31 @@ async def update_coinbase_message(guild: discord.Guild):
             current_price = prices.get(symbol, coin["base_price"])
             base_price = coin["base_price"]
             
-            # Calculate percent change from base
+            # Calculate percent increase from base
             percent_from_base = ((current_price - base_price) / base_price) * 100
             percent_sign = "+" if percent_from_base >= 0 else ""
             percent_str = f"{percent_sign}{percent_from_base:.2f}%"
             
+            # Calculate 5-minute change
+            change_5min = get_crypto_5min_change(symbol)
+            change_emoji = get_crypto_change_emoji(change_5min)
+            
+            # Format 5-minute change with sign
+            change_sign = "+" if change_5min >= 0 else ""
+            change_str = f"{change_sign}{change_5min:.2f}%"
+            
             # Format price
             price_str = f"${current_price:.2f}"
             
-            # Determine emoji based on change
-            if percent_from_base > 0:
-                emoji = "🟢"
-            elif percent_from_base < 0:
-                emoji = "🔴"
-            else:
-                emoji = "🟨"
-            
             # Create coin line
             coin_line = f"**{coin['name']} ({symbol})**\n"
-            coin_line += f"   Price: **{price_str}** | Change: **{percent_str}** {emoji}\n"
+            coin_line += f"   Price: **{price_str}** | Δ5m: **{change_str}** {change_emoji}\n"
             
             coin_lines.append(coin_line)
         
         # Combine all coin lines
         embed.description += "\n".join(coin_lines)
-        embed.set_footer(text="Updates every minute | Last updated")
+        embed.set_footer(text="Last updated")
         embed.timestamp = discord.utils.utcnow()
         
         # Try to edit existing message, or create new one
@@ -2802,7 +2894,7 @@ async def update_all_coinbase():
 
 
 async def gardener_background_task():
-    """Background task to check gardener actions every 10 minutes."""
+    """Background task to check gardener actions every 20 seconds (testing mode)."""
     await bot.wait_until_ready()
     
     # Wait a bit for bot to fully initialize
@@ -2820,8 +2912,8 @@ async def gardener_background_task():
                     if not gardener_id:
                         continue
                     
-                    # 20% chance for each gardener to gather
-                    if random.random() < 0.20:
+                    # 5% chance for each gardener to gather
+                    if random.random() < 0.05:
                         try:
                             # Perform gather for this user (without cooldown)
                             gather_result = await perform_gather_for_user(user_id, apply_cooldown=False)
@@ -2829,37 +2921,38 @@ async def gardener_background_task():
                             # Update gardener stats
                             update_gardener_stats(user_id, gardener_id, gather_result["value"])
                             
-                            # Send notification
-                            channel_id = get_user_notification_channel(user_id)
-                            if channel_id:
-                                try:
-                                    channel = bot.get_channel(channel_id)
-                                    if channel:
-                                        # Check if bot has permission to send messages
-                                        if channel.permissions_for(channel.guild.me).send_messages:
-                                            embed = discord.Embed(
-                                                title=f"🌿 Gardener #{gardener_id} Gathered!",
-                                                description=f"Your gardener found a **{gather_result['name']}**!",
-                                                color=discord.Color.green()
-                                            )
-                                            embed.add_field(name="Value", value=f"**${gather_result['value']:.2f}**", inline=True)
-                                            embed.add_field(name="Ripeness", value=gather_result['ripeness'], inline=True)
-                                            embed.add_field(name="GMO?", value="Yes ✨" if gather_result['is_gmo'] else "No", inline=False)
-                                            
-                                            # Get updated gardener stats
-                                            updated_gardeners = get_user_gardeners(user_id)
-                                            updated_gardener = next((g for g in updated_gardeners if g.get("id") == gardener_id), None)
-                                            if updated_gardener:
-                                                embed.add_field(
-                                                    name="Gardener Stats",
-                                                    value=f"**Times Gathered:** {updated_gardener.get('times_gathered', 0)}\n**Total Earned:** ${updated_gardener.get('total_money_earned', 0.0):,.2f}",
-                                                    inline=False
+                            # Get user's name from guild
+                            user_name = "User"
+                            for guild in bot.guilds:
+                                member = guild.get_member(user_id)
+                                if member:
+                                    user_name = member.display_name or member.name
+                                    break
+                            
+                            # Send notification to #lawn channel in guilds where user is a member
+                            for guild in bot.guilds:
+                                # Check if user is a member of this guild
+                                member = guild.get_member(user_id)
+                                if member:
+                                    lawn_channel = discord.utils.get(guild.text_channels, name="lawn")
+                                    if lawn_channel:
+                                        try:
+                                            # Check if bot has permission to send messages
+                                            if lawn_channel.permissions_for(guild.me).send_messages:
+                                                embed = discord.Embed(
+                                                    title=f"🌿 {user_name}'s Gardener gathered!",
+                                                    description=f"Their gardener found a **{gather_result['name']}**!",
+                                                    color=discord.Color.green()
                                                 )
-                                            
-                                            await channel.send(embed=embed)
-                                except Exception as e:
-                                    # Silently skip if channel is unavailable
-                                    print(f"Error sending gardener notification to channel {channel_id} for user {user_id}: {e}")
+                                                embed.add_field(name="Value", value=f"**${gather_result['value']:.2f}**", inline=True)
+                                                embed.add_field(name="Ripeness", value=gather_result['ripeness'], inline=True)
+                                                embed.add_field(name="GMO?", value="Yes ✨" if gather_result['is_gmo'] else "No", inline=False)
+                                                
+                                                await lawn_channel.send(embed=embed)
+                                                break  # Only send to one #lawn channel (in case user is in multiple guilds)
+                                        except Exception as e:
+                                            # Silently skip if channel is unavailable
+                                            print(f"Error sending gardener notification to #lawn channel in {guild.name} for user {user_id}: {e}")
                         except Exception as e:
                             print(f"Error processing gather for gardener {gardener_id} of user {user_id}: {e}")
             
@@ -2868,8 +2961,8 @@ async def gardener_background_task():
         except Exception as e:
             print(f"Error in gardener background task: {e}")
         
-        # Wait 10 minutes (600 seconds) before next check
-        await asyncio.sleep(600)
+        # Wait 20 seconds before next check (testing mode)
+        await asyncio.sleep(20)
 
 
 # Event system functions
@@ -2888,8 +2981,9 @@ async def send_event_start_embed(guild: discord.Guild, event: dict, duration_min
     if not event_info:
         return
     
+    event_name = event_info['name'].rstrip('!')
     embed = discord.Embed(
-        title=f"{event_info['emoji']} {event_info['name']} Event Has Started!",
+        title=f"{event_info['emoji']} {event_name} Event Has Started!",
         description=event_info["description"],
         color=discord.Color.gold()
     )
@@ -2918,8 +3012,9 @@ async def send_event_end_embed(guild: discord.Guild, event: dict):
     if not event_info:
         return
     
+    event_name = event_info['name'].rstrip('!')
     embed = discord.Embed(
-        title=f"{event_info['emoji']} {event_info['name']} Event Has Ended",
+        title=f"{event_info['emoji']} {event_name} Event Has Ended",
         description="Event has ended! Forest conditions go back to normal.\n\nThe event is over. Stay tuned for any future events..",
         color=discord.Color.dark_gray()
     )
@@ -3096,10 +3191,13 @@ async def event_cleanup_task():
 
 # Mining View with button
 class MiningView(discord.ui.View):
-    def __init__(self, user_id: int, timeout=60):
+    def __init__(self, user_id: int, message=None, timeout=60):
         super().__init__(timeout=timeout)
         self.user_id = user_id
-        self.mined = False
+        self.message = message  # Store message reference for timeout updates
+        self.total_mines = 0
+        self.session_mined = {}  # Track coins mined in this session: {symbol: amount}
+        self.session_value = 0.0  # Total value mined in this session
     
     @discord.ui.button(label="Mine", style=discord.ButtonStyle.success, emoji="⛏️")
     async def mine_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3107,49 +3205,111 @@ class MiningView(discord.ui.View):
             await interaction.response.send_message("❌ This is not your mining session!", ephemeral=True)
             return
         
-        if self.mined:
-            await interaction.response.send_message("❌ You already mined this session!", ephemeral=True)
-            return
-        
         await interaction.response.defer()
         
         # Randomly select a coin to mine
         coin = random.choice(CRYPTO_COINS)
         symbol = coin["symbol"]
-        amount = 0.01
+        # Random amount between 0.0075 and 0.01250 (4 decimal places)
+        # Generate random integer from 75 to 125 (inclusive) representing thousandths
+        # Divide by 10000 to get 4 decimal places (e.g., 75 = 0.0075, 125 = 0.0125)
+        random_thousandths = random.randint(75, 125)
+        amount = round(random_thousandths / 10000, 4)
         
         # Add crypto to user's holdings
         update_user_crypto_holdings(interaction.user.id, symbol, amount)
         
-        # Update last mine time
-        update_user_last_mine_time(interaction.user.id, time.time())
+        # Update session tracking
+        self.total_mines += 1
+        if symbol not in self.session_mined:
+            self.session_mined[symbol] = 0.0
+        self.session_mined[symbol] += amount
+        
+        # Calculate value of this mine
+        prices = get_crypto_prices()
+        coin_price = prices.get(symbol, 200.0)
+        mine_value = amount * coin_price
+        self.session_value += mine_value
         
         # Get current holdings
         holdings = get_user_crypto_holdings(interaction.user.id)
-        prices = get_crypto_prices()
         
-        # Calculate total value
-        total_value = sum(holdings[coin["symbol"]] * prices.get(coin["symbol"], 100.0) for coin in CRYPTO_COINS)
+        # Calculate total portfolio value
+        total_value = sum(holdings[c["symbol"]] * prices.get(c["symbol"], 200.0) for c in CRYPTO_COINS)
         
-        self.mined = True
-        button.disabled = True
+        # Create session summary
+        session_summary = ""
+        for sym, amt in self.session_mined.items():
+            coin_name = next(c["name"] for c in CRYPTO_COINS if c["symbol"] == sym)
+            session_summary += f"{coin_name} ({sym}): {amt:.4f}\n"
         
-        # Create success embed
+        # Create success embed with cumulative results
         success_embed = discord.Embed(
-            title="⛏️ Mining Successful!",
-            description=f"You mined **{amount} {symbol}** ({coin['name']})!",
-            color=discord.Color.green()
+            title="⛏️ Mining Session",
+            description=f"Click the button as many times as you can in 60 seconds!",
+            color=discord.Color.light_grey()
         )
-        success_embed.add_field(name="Your Holdings", value=f"RTC: {holdings['RTC']:.4f}\nTER: {holdings['TER']:.4f}\nCNY: {holdings['CNY']:.4f}", inline=False)
-        success_embed.add_field(name="Total Portfolio Value", value=f"${total_value:.2f}", inline=False)
-        success_embed.set_footer(text="Use /sell to sell your cryptocurrency!")
+        success_embed.add_field(name="This Session", value=f"Total Mines: **{self.total_mines}**\nSession Value: **${self.session_value:.2f}**", inline=True)
+        if session_summary:
+            success_embed.add_field(name="Session Mined", value=session_summary.strip(), inline=False)
+        success_embed.add_field(name="Your Total Holdings", value=f"RTC: {holdings['RTC']:.4f}\nTER: {holdings['TER']:.4f}\nCNY: {holdings['CNY']:.4f}", inline=False)
+        success_embed.add_field(name="Total Portfolio Value", value=f"**${total_value:.2f}**", inline=False)
+        success_embed.set_footer(text="Keep clicking! Use /sell to sell your cryptocurrency!")
         
         await interaction.followup.edit_message(interaction.message.id, embed=success_embed, view=self)
     
     async def on_timeout(self):
+        # Update last mine time only when session ends
+        update_user_last_mine_time(self.user_id, time.time())
+        
         # Disable the button if timeout
         for item in self.children:
             item.disabled = True
+        
+        # Update the embed to show timeout
+        timeout_embed = discord.Embed(
+            title="⏰ Mining Session Expired",
+            description="Time's up! Your mining session has ended.",
+            color=discord.Color.orange()
+        )
+        
+        if self.total_mines > 0:
+            # Get current holdings for final display
+            holdings = get_user_crypto_holdings(self.user_id)
+            prices = get_crypto_prices()
+            total_value = sum(holdings[c["symbol"]] * prices.get(c["symbol"], 200.0) for c in CRYPTO_COINS)
+            
+            timeout_embed.add_field(
+                name="Session Summary",
+                value=f"Total Mines: **{self.total_mines}**\nSession Value: **${self.session_value:.2f}**",
+                inline=False
+            )
+            
+            session_summary = ""
+            for sym, amt in self.session_mined.items():
+                coin_name = next(c["name"] for c in CRYPTO_COINS if c["symbol"] == sym)
+                session_summary += f"{coin_name} ({sym}): {amt:.4f}\n"
+            
+            if session_summary:
+                timeout_embed.add_field(name="Mined This Session", value=session_summary.strip(), inline=False)
+            
+            timeout_embed.add_field(
+                name="Your Total Holdings",
+                value=f"RTC: {holdings['RTC']:.4f}\nTER: {holdings['TER']:.4f}\nCNY: {holdings['CNY']:.4f}",
+                inline=False
+            )
+            timeout_embed.add_field(name="Total Portfolio Value", value=f"**${total_value:.2f}**", inline=False)
+        else:
+            timeout_embed.description = "Time's up! You didn't mine anything this session."
+        
+        timeout_embed.set_footer(text="Use /mine again after your cooldown expires!")
+        
+        # Update the message with timeout embed if we have a reference
+        if self.message:
+            try:
+                await self.message.edit(embed=timeout_embed, view=self)
+            except Exception as e:
+                print(f"Error updating timeout message: {e}")
 
 
 @bot.tree.command(name="mine", description="Mine cryptocurrency! (5 minute cooldown)")
@@ -3177,13 +3337,15 @@ async def mine(interaction: discord.Interaction):
     # Create mining embed with button
     embed = discord.Embed(
         title="⛏️ Cryptocurrency Mining",
-        description="Click the **Mine** button below to mine cryptocurrency!\n\nYou have **60 seconds** to click the button.",
+        description="Click the **Mine** button below to mine cryptocurrency!\n\nYou have **60 seconds** to click as many times as you can!",
         color=discord.Color.blue()
     )
-    embed.set_footer(text="You can mine 0.01 of a random cryptocurrency!")
+    embed.set_footer(text="Each click mines a random amount (0.0075-0.0125) of a random cryptocurrency!")
     
     view = MiningView(user_id, timeout=60)
-    await interaction.followup.send(embed=embed, view=view)
+    message = await interaction.followup.send(embed=embed, view=view)
+    # Store message reference in view for timeout handling
+    view.message = message
 
 
 @bot.tree.command(name="sell", description="Sell your cryptocurrency holdings")
@@ -3226,7 +3388,7 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         return
     
     # Calculate sale value
-    coin_price = prices.get(coin, 100.0)
+    coin_price = prices.get(coin, 200.0)
     sale_value = amount * coin_price
     
     # Update holdings (subtract)
@@ -3287,7 +3449,7 @@ async def portfolio(interaction: discord.Interaction):
     for coin in CRYPTO_COINS:
         symbol = coin["symbol"]
         amount = crypto_holdings.get(symbol, 0.0)
-        price = crypto_prices.get(symbol, 100.0)
+        price = crypto_prices.get(symbol, 200.0)
         value = amount * price
         crypto_values[symbol] = value
         crypto_total += value
@@ -3321,11 +3483,11 @@ async def portfolio(interaction: discord.Interaction):
             symbol = coin["symbol"]
             amount = crypto_holdings.get(symbol, 0.0)
             if amount > 0:
-                price = crypto_prices.get(symbol, 100.0)
+                price = crypto_prices.get(symbol, 200.0)
                 value = crypto_values.get(symbol, 0.0)
                 embed.add_field(
                     name=f"{coin['name']} ({symbol})",
-                    value=f"Amount: {amount:.4f}\nPrice: ${price:.2f}\nValue: ${value:.2f}",
+                    value=f"Amount: {amount:.4f}\nValue: ${value:.2f}",
                     inline=True
                 )
         embed.description += f"\n*Crypto Total: ${crypto_total:.2f}*\n\n"
@@ -3341,7 +3503,7 @@ async def portfolio(interaction: discord.Interaction):
                 value = stock_values.get(symbol, 0.0)
                 embed.add_field(
                     name=f"{ticker['name']} ({symbol})",
-                    value=f"Shares: {shares:,}\nPrice: ${price:.2f}\nValue: ${value:.2f}",
+                    value=f"Shares: {shares:,}\nValue: ${value:.2f}",
                     inline=True
                 )
         embed.description += f"\n*Stocks Total: ${stock_total:.2f}*"
@@ -3351,6 +3513,156 @@ async def portfolio(interaction: discord.Interaction):
     
     embed.set_footer(text="Use /mine to mine cryptocurrency, /sell to sell crypto, or buy/sell stocks")
     
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="stocks", description="Buy or sell stocks")
+@app_commands.choices(action=[
+    app_commands.Choice(name="buy", value="buy"),
+    app_commands.Choice(name="sell", value="sell"),
+])
+@app_commands.choices(ticker=[
+    app_commands.Choice(name="Maizy's (M)", value="M"),
+    app_commands.Choice(name="Meadow (MEDO)", value="MEDO"),
+    app_commands.Choice(name="IVBM (IVBM)", value="IVBM"),
+    app_commands.Choice(name="CisGrow (CSGO)", value="CSGO"),
+    app_commands.Choice(name="Sowny (SWNY)", value="SWNY"),
+    app_commands.Choice(name="General Mowers (GM)", value="GM"),
+    app_commands.Choice(name="Raytheorn (RTH)", value="RTH"),
+    app_commands.Choice(name="Wells Fargrow (WFG)", value="WFG"),
+    app_commands.Choice(name="Apple (AAPL)", value="AAPL"),
+    app_commands.Choice(name="Sproutify (SPRT)", value="SPRT"),
+])
+async def stocks(interaction: discord.Interaction, action: str, ticker: str, amount: int):
+    await interaction.response.defer(ephemeral=False)
+    
+    user_id = interaction.user.id
+    guild_id = interaction.guild.id if interaction.guild else None
+    
+    # Validate amount
+    if amount <= 0:
+        await interaction.followup.send(
+            f"❌ Invalid amount! Please buy or sell a positive number of shares.",
+            ephemeral=True
+        )
+        return
+    
+    # Find the ticker info
+    ticker_info = None
+    for t in STOCK_TICKERS:
+        if t["symbol"] == ticker:
+            ticker_info = t
+            break
+    
+    if not ticker_info:
+        await interaction.followup.send(
+            f"❌ Invalid ticker symbol!",
+            ephemeral=True
+        )
+        return
+    
+    # Initialize stocks for guild if needed to get current prices
+    if not guild_id:
+        await interaction.followup.send(
+            f"❌ This command must be used in a server!",
+            ephemeral=True
+        )
+        return
+    
+    initialize_stocks(guild_id)
+    
+    # Get current stock price
+    if ticker not in stock_data.get(guild_id, {}):
+        current_price = ticker_info["base_price"]
+    else:
+        current_price = stock_data[guild_id][ticker]["price"]
+    
+    # Get user's current stock holdings
+    stock_holdings = get_user_stock_holdings(user_id)
+    current_shares = stock_holdings.get(ticker, 0)
+    
+    if action == "buy":
+        # Calculate total cost
+        total_cost = amount * current_price
+        
+        # Check if user has enough balance
+        user_balance = get_user_balance(user_id)
+        if user_balance < total_cost:
+            await interaction.followup.send(
+                f"❌ You don't have enough balance to buy {amount} share(s) of {ticker_info['name']} ({ticker})!\n\n"
+                f"You need **${total_cost:.2f}** but only have **${user_balance:.2f}**.",
+                ephemeral=True
+            )
+            return
+        
+        # Check if user would exceed max shares (per user limit)
+        max_shares = ticker_info["max_shares"]
+        if (current_shares + amount) > max_shares:
+            await interaction.followup.send(
+                f"❌ You cannot buy {amount:,} share(s)! Maximum shares per user for {ticker_info['name']} is {max_shares:,}.\n\n"
+                f"You currently own {current_shares:,} share(s).",
+                ephemeral=True
+            )
+            return
+        
+        # Deduct money and add shares
+        new_balance = user_balance - total_cost
+        update_user_balance(user_id, new_balance)
+        update_user_stock_holdings(user_id, ticker, amount)
+        
+        # Create success embed
+        embed = discord.Embed(
+            title="✅ Purchase Successful!",
+            description=f"You bought **{amount:,} share(s)** of **{ticker_info['name']} ({ticker})** at **${current_price:.2f}** each.",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Cost", value=f"**${total_cost:.2f}**", inline=True)
+        embed.add_field(name="New Balance", value=f"**${new_balance:.2f}**", inline=True)
+        embed.add_field(name="Total Shares Owned", value=f"**{current_shares + amount:,}**", inline=False)
+        
+        # Update marketboard immediately
+        try:
+            await update_marketboard_message(interaction.guild)
+        except Exception as e:
+            print(f"Error updating marketboard after buy: {e}")
+        
+    else:  # sell
+        # Check if user has enough shares
+        if current_shares < amount:
+            await interaction.followup.send(
+                f"❌ You don't have enough shares to sell!\n\n"
+                f"You only have **{current_shares:,} share(s)** of {ticker_info['name']} ({ticker}), "
+                f"but tried to sell **{amount:,} share(s)**.",
+                ephemeral=True
+            )
+            return
+        
+        # Calculate total value
+        total_value = amount * current_price
+        
+        # Add money and remove shares
+        user_balance = get_user_balance(user_id)
+        new_balance = user_balance + total_value
+        update_user_balance(user_id, new_balance)
+        update_user_stock_holdings(user_id, ticker, -amount)
+        
+        # Create success embed
+        embed = discord.Embed(
+            title="✅ Sale Successful!",
+            description=f"You sold **{amount:,} share(s)** of **{ticker_info['name']} ({ticker})** at **${current_price:.2f}** each.",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Revenue", value=f"**${total_value:.2f}**", inline=True)
+        embed.add_field(name="New Balance", value=f"**${new_balance:.2f}**", inline=True)
+        embed.add_field(name="Remaining Shares", value=f"**{current_shares - amount:,}**", inline=False)
+        
+        # Update marketboard immediately
+        try:
+            await update_marketboard_message(interaction.guild)
+        except Exception as e:
+            print(f"Error updating marketboard after sell: {e}")
+    
+    embed.set_footer(text=f"Use /portfolio to view all your holdings")
     await interaction.followup.send(embed=embed)
 
 
