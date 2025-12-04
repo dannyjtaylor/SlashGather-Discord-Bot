@@ -190,21 +190,21 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
     #gatherer 5 - 500+ items gathered
 
     user_id = member.id
-    total_forage_count = get_forage_count(user_id)
+    total_items = get_user_total_items(user_id)
     planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V"]
 
     # Find the user's current planter role
     previous_role_name = next((role.name for role in member.roles if role.name in planter_roles), None)
     
-    # Determine the target role based on forage count
+    # Determine the target role based on total items gathered
     target_role_name = None
-    if total_forage_count < 50:
+    if total_items < 50:
         target_role_name = "PLANTER I"
-    elif total_forage_count < 150:
+    elif total_items < 150:
         target_role_name = "PLANTER II"
-    elif total_forage_count < 299:
+    elif total_items < 299:
         target_role_name = "PLANTER III"
-    elif total_forage_count < 499:
+    elif total_items < 499:
         target_role_name = "PLANTER IV"
     else: #500+
         target_role_name = "PLANTER V"
@@ -1458,7 +1458,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="🌳 running /gather on V0.1.0 :3"
+            name="running /gather on V0.2.0 :3"
         )
     )
     try:
@@ -1645,7 +1645,7 @@ async def harvest(interaction: discord.Interaction):
         # Apply soil upgrade GMO chance boost and check for GMO
         is_gmo = random.choices([True, False], weights=[gmo_chance, 1-gmo_chance], k=1)[0]
         if is_gmo:
-            final_value *= 1.5
+            final_value *= 2
         
         # Apply basket upgrade money multiplier
         final_value *= basket_multiplier
@@ -1723,7 +1723,6 @@ async def userstats(interaction: discord.Interaction):
     user_id = interaction.user.id
     user_balance = get_user_balance(user_id)
     total_items = get_user_total_items(user_id)
-    forage_count = get_forage_count(user_id)
     
     # Calculate items needed for next rankup
     # PLANTER I: 0-49 (need 50 for PLANTER II)
@@ -1734,17 +1733,17 @@ async def userstats(interaction: discord.Interaction):
     items_needed = None
     next_rank = None
     
-    if forage_count < 50:
-        items_needed = 50 - forage_count
+    if total_items < 50:
+        items_needed = 50 - total_items
         next_rank = "PLANTER II"
-    elif forage_count < 150:
-        items_needed = 150 - forage_count
+    elif total_items < 150:
+        items_needed = 150 - total_items
         next_rank = "PLANTER III"
-    elif forage_count < 299:
-        items_needed = 299 - forage_count
+    elif total_items < 299:
+        items_needed = 299 - total_items
         next_rank = "PLANTER IV"
-    elif forage_count < 499:
-        items_needed = 499 - forage_count
+    elif total_items < 499:
+        items_needed = 499 - total_items
         next_rank = "PLANTER V"
     else:
         # Max rank achieved
@@ -1757,7 +1756,7 @@ async def userstats(interaction: discord.Interaction):
     )
     
     embed.add_field(name="💰 Balance", value=f"**${user_balance:.2f}**", inline=True)
-    embed.add_field(name="🌱 Plants Gathered", value=f"**{forage_count}** plants", inline=True)
+    embed.add_field(name="🌱 Plants Gathered", value=f"**{total_items}** plants", inline=True)
     
     if items_needed == 0:
         embed.add_field(name="🏆 Rank Status", value=f"**{next_rank}** - You've reached the maximum rank!", inline=False)
@@ -1890,7 +1889,7 @@ class BasketUpgradeView(discord.ui.View):
             soil_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_soil} (+{current_gmo}% GMO chance)"
         
         embed.add_field(
-        name="🌱 PATH 4: SOIL",
+            name="🌱 PATH 4: SOIL",
             value=soil_text,
             inline=False
         )
@@ -2154,24 +2153,39 @@ async def hire(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed, view=view)
 
 
-# # Temporary admin command for dev - give yourself money
-# @bot.tree.command(name="danny", description="Dev command - Give yourself money")
-# async def danny(interaction: discord.Interaction):
-#     await interaction.response.defer(ephemeral=True)
+# Pay command
+@bot.tree.command(name="pay", description="Pay money to another user!")
+async def pay(interaction: discord.Interaction, amount: float, user: discord.Member):
+    await interaction.response.defer(ephemeral=False)
     
-#     user_id = interaction.user.id
-#     current_balance = get_user_balance(user_id)
-#     new_balance = current_balance + 1_000_000_000  # 1 billion
-#     update_user_balance(user_id, new_balance)
+    sender_id = interaction.user.id
+    recipient_id = user.id
     
-#     embed = discord.Embed(
-#         title="💰 Money Added!",
-#         description=f"You've been given **$1,000,000,000**!",
-#         color=discord.Color.gold()
-#     )
-#     embed.add_field(name="💰 New Balance", value=f"${new_balance:,.2f}", inline=False)
+    # Can't pay yourself
+    if sender_id == recipient_id:
+        await interaction.followup.send("❌ You can't pay yourself!", ephemeral=True)
+        return
     
-#     await interaction.followup.send(embed=embed, ephemeral=True)
+    # Check sender balance
+    sender_balance = get_user_balance(sender_id)
+    if sender_balance < amount:
+        await interaction.followup.send(f"❌ You don't have enough balance!", ephemeral=True)
+        return
+    
+    # Get recipient balance
+    recipient_balance = get_user_balance(recipient_id)
+    
+    # Transfer money
+    update_user_balance(sender_id, sender_balance - amount)
+    update_user_balance(recipient_id, recipient_balance + amount)
+    
+    # Send confirmation message
+    embed = discord.Embed(
+        title="💰 Payment Successful!",
+        description=f"**{interaction.user.name}** paid **{user.name}** **${amount:.2f}**!",
+        color=discord.Color.green()
+    )
+    await interaction.followup.send(embed=embed)
 
 
 # Leaderboard pagination view
@@ -2225,9 +2239,23 @@ class LeaderboardView(discord.ui.View):
             username = self.get_username(user_id)
             
             if self.leaderboard_type == "plants":
-                leaderboard_text += f"**{rank}.** {username}: **{value}** items\n"
+                # Top 3 get different tree emojis, bottom 7 get plant emoji
+                if rank == 1:
+                    emoji = "🌳"
+                elif rank == 2:
+                    emoji = "🎄"
+                elif rank == 3:
+                    emoji = "🌲"
+                else:
+                    emoji = "🌱"
+                leaderboard_text += f"{emoji} **{rank}.** {username}: **{value}** items\n"
             else:  # money
-                leaderboard_text += f"**{rank}.** {username}: **${value:.2f}**\n"
+                # Top 3 get money bag, bottom 7 get cash emoji
+                if rank <= 3:
+                    emoji = "💰"
+                else:
+                    emoji = "💵"
+                leaderboard_text += f"{emoji} **{rank}.** {username}: **${value:.2f}**\n"
         
         if not leaderboard_text:
             leaderboard_text = "No data available"
@@ -2311,9 +2339,23 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
         username = member.display_name or member.name if member else "Unknown User"
         
         if leaderboard_type == "plants":
-            leaderboard_text += f"**{rank}.** {username}: **{value}** items\n"
+            # Top 3 get different tree emojis, bottom 7 get plant emoji
+            if rank == 1:
+                emoji = "🌳"
+            elif rank == 2:
+                emoji = "🎄"
+            elif rank == 3:
+                emoji = "🌲"
+            else:
+                emoji = "🌱"
+            leaderboard_text += f"{emoji} **{rank}.** {username}: **{value}** items\n"
         else:  # money
-            leaderboard_text += f"**{rank}.** {username}: **${value:.2f}**\n"
+            # Top 3 get money bag, bottom 7 get cash emoji
+            if rank <= 3:
+                emoji = "💰"
+            else:
+                emoji = "💵"
+            leaderboard_text += f"{emoji} **{rank}.** {username}: **${value:.2f}**\n"
     
     if not leaderboard_text:
         leaderboard_text = "No data available"
