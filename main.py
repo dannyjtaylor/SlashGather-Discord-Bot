@@ -478,6 +478,8 @@ GATHERABLE_ITEMS = [
     {"category": "Flower", "name": "Flowey", "base_value": 5},
     {"category": "Flower", "name": "Lotus🪷", "base_value": 6.7},
     {"category": "Flower", "name": "Sakura 🌸", "base_value": 6},
+    {"category": "Flower", "name": "Clover 🍀", "base_value": 7.77},
+    {"category": "Flower", "name": "Herb 🌿", "base_value": 5},
 
 
     {"category": "Fruit","name": "Strawberry 🍓", "base_value": 8},
@@ -488,6 +490,17 @@ GATHERABLE_ITEMS = [
     {"category": "Fruit","name": "Pear 🍐", "base_value": 14},
     {"category": "Fruit","name": "Orange 🍊", "base_value": 6},
     {"category": "Fruit","name": "Grape 🍇", "base_value": 7},
+    {"category": "Fruit","name": "Banana 🍌", "base_value": 5},
+    {"category": "Fruit","name": "Watermelon 🍉", "base_value": 12},
+    {"category": "Fruit","name": "Peach 🍑", "base_value": 8},
+    {"category": "Fruit","name": "Mango 🥭", "base_value": 11},
+    {"category": "Fruit","name": "Pineapple 🍍", "base_value": 13},
+    {"category": "Fruit","name": "Kiwi 🥝", "base_value": 9},
+    {"category": "Fruit","name": "Lemon 🍋", "base_value": 4},
+    {"category": "Fruit","name": "Coconut 🥥", "base_value": 10},
+    {"category": "Fruit","name": "Melon 🍈", "base_value": 7},
+    {"category": "Fruit","name": "Green Apple 🍏", "base_value": 8},
+    {"category": "Fruit","name": "Olive 🫒", "base_value": 6},
 
     {"category": "Vegetable","name": "Carrot 🥕", "base_value": 2},
     {"category": "Vegetable","name": "Potato 🥔", "base_value": 1},
@@ -497,6 +510,16 @@ GATHERABLE_ITEMS = [
     {"category": "Vegetable","name": "Lettuce 🥬", "base_value": 3},
     {"category": "Vegetable","name": "Cabbage 🥬", "base_value": 10},
     {"category": "Vegetable","name": "Broccoli 🥦", "base_value": 5},
+    {"category": "Vegetable","name": "Corn 🌽", "base_value": 6},
+    {"category": "Vegetable","name": "Cucumber 🥒", "base_value": 3},
+    {"category": "Vegetable","name": "Bell Pepper 🫑", "base_value": 5},
+    {"category": "Vegetable","name": "Hot Pepper 🌶️", "base_value": 8},
+    {"category": "Vegetable","name": "Avocado 🥑", "base_value": 11},
+    {"category": "Vegetable","name": "Mushroom 🍄", "base_value": 9},
+    {"category": "Vegetable","name": "Peanuts 🥜", "base_value": 4},
+    {"category": "Vegetable","name": "Beans 🫘", "base_value": 3},
+    {"category": "Vegetable","name": "Pea Pod 🫛", "base_value": 2},
+    {"category": "Vegetable","name": "Eggplant 🍆", "base_value": 6},
 ]   
 
 # Item descriptions for almanac
@@ -510,6 +533,8 @@ ITEM_DESCRIPTIONS = {
     "Flowey": "Your Best Friend!",
     "Lotus🪷": "The Valorant Map, or the Person?",
     "Sakura 🌸": "I really want to go to Japan one day...",
+    "Clover 🍀": "Lucky four-leaf clover brings good fortune!",
+    "Herb 🌿": "Fresh and aromatic, perfect for cooking!",
     "Strawberry 🍓": "Sweet and juicy, nature's candy!",
     "Blueberry 🫐": "Tiny but packed with flavor!",
     "Raspberry": "Tart and tangy, perfect for desserts!",
@@ -518,6 +543,17 @@ ITEM_DESCRIPTIONS = {
     "Pear 🍐": "Sweet and crisp!",
     "Orange 🍊": "Yeah, we're from Florida. Hey Apple!",
     "Grape 🍇": "Not statuatory!",
+    "Banana 🍌": "Ape-approved and potassium-packed!",
+    "Watermelon 🍉": "Perfect for hot summer days!",
+    "Peach 🍑": "Soft, fuzzy, and oh so sweet!",
+    "Mango 🥭": "Tropical treasure with golden flesh!",
+    "Pineapple 🍍": "Spiky on the outside, sweet inside!",
+    "Kiwi 🥝": "Fuzzy brown exterior, emerald green inside!",
+    "Lemon 🍋": "Sour but makes everything better!",
+    "Coconut 🥥": "Tropical treat with refreshing water!",
+    "Melon 🍈": "Sweet and refreshing, a summer favorite!",
+    "Green Apple 🍏": "Crisp and tart, the other apple!",
+    "Olive 🫒": "Mediterranean delight, small but mighty!",
     "Carrot 🥕": "Good for your eyes!",
     "Potato 🥔": "An Irish delight!",
     "Onion 🧅": "Makes you cry...!",
@@ -526,6 +562,16 @@ ITEM_DESCRIPTIONS = {
     "Lettuce 🥬": "THIS is what the Titanic hit?",
     "Cabbage 🥬": "Round and leafy, great for coleslaw!",
     "Broccoli 🥦": "A tiny tree that's super healthy!",
+    "Corn 🌽": "Golden kernels of summer sweetness!",
+    "Cucumber 🥒": "Cool, crisp, and refreshing!",
+    "Bell Pepper 🫑": "Colorful and crunchy, comes in many hues!",
+    "Hot Pepper 🌶️": "Spicy and fiery, handle with care!",
+    "Avocado 🥑": "Creamy green goodness, toast's best friend!",
+    "Mushroom 🍄": "Fungi among us, earthy and savory!",
+    "Peanuts 🥜": "Crunchy legumes, great for snacking!",
+    "Beans 🫘": "Protein-packed pods of goodness!",
+    "Pea Pod 🫛": "Sweet little green pearls in a pod!",
+    "Eggplant 🍆": "Purple and versatile, a kitchen staple!",
 }
 
 #level of ripeness - FRUITS
@@ -2985,48 +3031,66 @@ async def send_event_start_embed(guild: discord.Guild, event: dict, duration_min
     embed = discord.Embed(
         title=f"{event_info['emoji']} {event_name} Event Has Started!",
         description=event_info["description"],
-        color=discord.Color.gold()
+        color=discord.Color.green()
     )
-    embed.add_field(name="Duration", value=f"{duration_minutes} Minutes", inline=False)
+    # Display duration appropriately (seconds if < 1 minute, minutes otherwise)
+    if duration_minutes < 1:
+        duration_seconds = int(duration_minutes * 60)
+        duration_display = f"{duration_seconds} Seconds"
+    else:
+        duration_display = f"{duration_minutes} Minutes"
+    embed.add_field(name="Duration", value=duration_display, inline=False)
     embed.add_field(name="Effect", value=event_info["effect"], inline=False)
     embed.set_footer(text="Go /gather!!")
     
     try:
         await events_channel.send("@here", embed=embed)
+        return True
     except Exception as e:
-        print(f"Error sending event start embed in {guild.name}: {e}")
+        print(f"ERROR sending event start embed in {guild.name}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 
 async def send_event_end_embed(guild: discord.Guild, event: dict):
     """Send event end embed to #events channel."""
     events_channel = discord.utils.get(guild.text_channels, name="events")
     if not events_channel:
+        print(f"#events channel not found in {guild.name}")
+        return
+    
+    # Get the actual event ID from effects (not the database event_id)
+    event_type_id = event.get("effects", {}).get("event_id")
+    if not event_type_id:
+        print(f"No event_id found in effects for event: {event}")
         return
     
     event_info = None
     if event["event_type"] == "hourly":
-        event_info = next((e for e in HOURLY_EVENTS if e["id"] == event["event_id"]), None)
+        event_info = next((e for e in HOURLY_EVENTS if e["id"] == event_type_id), None)
     elif event["event_type"] == "daily":
-        event_info = next((e for e in DAILY_EVENTS if e["id"] == event["event_id"]), None)
+        event_info = next((e for e in DAILY_EVENTS if e["id"] == event_type_id), None)
     
     if not event_info:
+        print(f"Event info not found for {event_type_id} in {event['event_type']} events")
         return
     
     event_name = event_info['name'].rstrip('!')
     embed = discord.Embed(
         title=f"{event_info['emoji']} {event_name} Event Has Ended",
         description="Event has ended! Forest conditions go back to normal.\n\nThe event is over. Stay tuned for any future events..",
-        color=discord.Color.dark_gray()
+        color=discord.Color.red()
     )
     
     try:
-        await events_channel.send(embed=embed)
+        await events_channel.send("@here", embed=embed)
     except Exception as e:
         print(f"Error sending event end embed in {guild.name}: {e}")
 
 
 async def hourly_event_check():
-    """Background task to check for hourly events at the start of each hour."""
+    """Background task to trigger hourly events at the start of each hour with 50% chance."""
     await bot.wait_until_ready()
     
     # Wait until the start of the next hour
@@ -3038,14 +3102,14 @@ async def hourly_event_check():
     while not bot.is_closed():
         try:
             # Check if there's already an active hourly event
-            existing_event = get_active_event_by_type("hourly")
-            if existing_event:
+            existing_hourly = get_active_event_by_type("hourly")
+            if existing_hourly:
                 # Event already active, skip this hour
-                print(f"Skipping hourly event - event already active: {existing_event['event_name']}")
+                print(f"Skipping hourly event - event already active: {existing_hourly['event_name']}")
             else:
                 # 50% chance to trigger an event
                 if random.random() < 0.5:
-                    # Select random event
+                    # Select random hourly event
                     event_info = random.choice(HOURLY_EVENTS)
                     
                     # Random duration: 40% = 30min, 35% = 45min, 25% = 60min
@@ -3076,26 +3140,71 @@ async def hourly_event_check():
                     
                     # Send announcement to all guilds
                     for guild in bot.guilds:
-                        await send_event_start_embed(guild, {
-                            "event_type": "hourly",
-                            "event_id": event_info["id"],
-                            "event_name": event_info["name"]
-                        }, duration_minutes)
+                        try:
+                            await send_event_start_embed(guild, {
+                                "event_type": "hourly",
+                                "event_id": event_info["id"],
+                                "event_name": event_info["name"]
+                            }, duration_minutes)
+                            print(f"Sent start embed to #events channel in {guild.name} for hourly event: {event_info['name']}")
+                        except Exception as e:
+                            print(f"Error sending start embed to {guild.name} for hourly event: {e}")
+                            import traceback
+                            traceback.print_exc()
                     
                     print(f"Started hourly event: {event_info['name']} for {duration_minutes} minutes")
+                    
+                    # Wait until 5 seconds before event ends
+                    wait_seconds = duration_seconds - 5
+                    await asyncio.sleep(wait_seconds)
+                    
+                    # Send end message 5 seconds before event actually ends
+                    event = {
+                        "event_id": event_id,
+                        "event_type": "hourly",
+                        "event_name": event_info["name"],
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "effects": {"event_id": event_info["id"]}
+                    }
+                    
+                    # Send end embed to #events channel in all guilds
+                    for guild in bot.guilds:
+                        try:
+                            await send_event_end_embed(guild, event)
+                            print(f"Sent end embed to #events channel in {guild.name}")
+                        except Exception as e:
+                            print(f"Error sending end embed to {guild.name}: {e}")
+                    
+                    print(f"Sent end message for hourly event: {event_info['name']} (5 seconds remaining)")
+                    
+                    # Wait for remaining 5 seconds until event actually ends
+                    await asyncio.sleep(5)
+                    
+                    # Remove event from database (ensure it's cleared)
+                    clear_event(event_id)
+                    clear_expired_events()  # Double-check cleanup
+                    print(f"Ended hourly event: {event_info['name']} and cleared from database")
             
             # Wait until the start of the next hour
             now = datetime.datetime.now()
             next_hour = (now.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1))
             wait_seconds = (next_hour - now).total_seconds()
             await asyncio.sleep(wait_seconds)
+            
         except Exception as e:
             print(f"Error in hourly_event_check: {e}")
-            await asyncio.sleep(60)  # Wait a minute before retrying
+            import traceback
+            traceback.print_exc()
+            # Wait until next hour on error
+            now = datetime.datetime.now()
+            next_hour = (now.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1))
+            wait_seconds = (next_hour - now).total_seconds()
+            await asyncio.sleep(wait_seconds)
 
 
 async def daily_event_check():
-    """Background task to check for daily events once per day."""
+    """Background task to trigger daily events once per day with 10% chance."""
     await bot.wait_until_ready()
     
     # Wait until midnight
@@ -3107,14 +3216,14 @@ async def daily_event_check():
     while not bot.is_closed():
         try:
             # Check if there's already an active daily event
-            existing_event = get_active_event_by_type("daily")
-            if existing_event:
+            existing_daily = get_active_event_by_type("daily")
+            if existing_daily:
                 # Event already active, skip this day
-                print(f"Skipping daily event - event already active: {existing_event['event_name']}")
+                print(f"Skipping daily event - event already active: {existing_daily['event_name']}")
             else:
                 # 10% chance to trigger an event
                 if random.random() < 0.10:
-                    # Select random event
+                    # Select random daily event
                     event_info = random.choice(DAILY_EVENTS)
                     
                     # Fixed 24 hour duration
@@ -3138,52 +3247,75 @@ async def daily_event_check():
                     
                     # Send announcement to all guilds
                     for guild in bot.guilds:
-                        await send_event_start_embed(guild, {
-                            "event_type": "daily",
-                            "event_id": event_info["id"],
-                            "event_name": event_info["name"]
-                        }, duration_minutes)
+                        try:
+                            await send_event_start_embed(guild, {
+                                "event_type": "daily",
+                                "event_id": event_info["id"],
+                                "event_name": event_info["name"]
+                            }, duration_minutes)
+                            print(f"Sent start embed to #events channel in {guild.name} for daily event: {event_info['name']}")
+                        except Exception as e:
+                            print(f"Error sending start embed to {guild.name} for daily event: {e}")
+                            import traceback
+                            traceback.print_exc()
                     
                     print(f"Started daily event: {event_info['name']} for 24 hours")
+                    
+                    # Wait until 5 seconds before event ends
+                    wait_seconds = duration_seconds - 5
+                    await asyncio.sleep(wait_seconds)
+                    
+                    # Send end message 5 seconds before event actually ends
+                    event = {
+                        "event_id": event_id,
+                        "event_type": "daily",
+                        "event_name": event_info["name"],
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "effects": {"event_id": event_info["id"]}
+                    }
+                    
+                    # Send end embed to #events channel in all guilds
+                    for guild in bot.guilds:
+                        try:
+                            await send_event_end_embed(guild, event)
+                            print(f"Sent end embed to #events channel in {guild.name}")
+                        except Exception as e:
+                            print(f"Error sending end embed to {guild.name}: {e}")
+                    
+                    print(f"Sent end message for daily event: {event_info['name']} (5 seconds remaining)")
+                    
+                    # Wait for remaining 5 seconds until event actually ends
+                    await asyncio.sleep(5)
+                    
+                    # Remove event from database
+                    clear_event(event_id)
+                    clear_expired_events()
+                    print(f"Ended daily event: {event_info['name']} and cleared from database")
             
             # Wait until next midnight
             now = datetime.datetime.now()
             next_midnight = (now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1))
             wait_seconds = (next_midnight - now).total_seconds()
             await asyncio.sleep(wait_seconds)
+            
         except Exception as e:
             print(f"Error in daily_event_check: {e}")
-            await asyncio.sleep(3600)  # Wait an hour before retrying
+            import traceback
+            traceback.print_exc()
+            await asyncio.sleep(30)
 
 
 async def event_cleanup_task():
-    """Background task to check for expired events and send end messages."""
+    """Background task to clean up any orphaned expired events."""
     await bot.wait_until_ready()
     await asyncio.sleep(5)
     
     while not bot.is_closed():
         try:
-            # Get all active events
-            active_events = get_active_events()
-            current_time = time.time()
-            
-            # Check each event for expiration
-            for event in active_events:
-                if current_time >= event["end_time"]:
-                    # Event has expired
-                    # Send end message to all guilds
-                    for guild in bot.guilds:
-                        await send_event_end_embed(guild, event)
-                    
-                    # Remove event from database
-                    clear_event(event["event_id"])
-                    print(f"Ended event: {event['event_name']}")
-            
-            # Also clean up any expired events in database
+            # Clean up any expired events in database (shouldn't be needed with timing-based approach, but safety net)
             clear_expired_events()
-            
-            # Check every minute
-            await asyncio.sleep(60)
+            await asyncio.sleep(60)  # Check every minute
         except Exception as e:
             print(f"Error in event_cleanup_task: {e}")
             await asyncio.sleep(60)
@@ -3195,14 +3327,37 @@ class MiningView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.user_id = user_id
         self.message = message  # Store message reference for timeout updates
+        self.start_time = time.time()  # Track when the view was created
         self.total_mines = 0
         self.session_mined = {}  # Track coins mined in this session: {symbol: amount}
         self.session_value = 0.0  # Total value mined in this session
+        self.timed_out = False  # Track if session has timed out
     
     @discord.ui.button(label="Mine", style=discord.ButtonStyle.success, emoji="⛏️")
     async def mine_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ This is not your mining session!", ephemeral=True)
+            return
+        
+        # Check if session has timed out
+        elapsed_time = time.time() - self.start_time
+        if elapsed_time >= 60 or self.timed_out:
+            # Session has expired
+            self.timed_out = True
+            for item in self.children:
+                item.disabled = True
+            
+            await interaction.response.send_message(
+                "⏰ Your mining session has expired! Use `/mine` again after your cooldown.",
+                ephemeral=True
+            )
+            
+            # Update the message if we have a reference
+            if self.message:
+                try:
+                    await self.message.edit(view=self)
+                except:
+                    pass
             return
         
         await interaction.response.defer()
@@ -3243,10 +3398,14 @@ class MiningView(discord.ui.View):
             coin_name = next(c["name"] for c in CRYPTO_COINS if c["symbol"] == sym)
             session_summary += f"{coin_name} ({sym}): {amt:.4f}\n"
         
+        # Calculate time remaining
+        elapsed_time = time.time() - self.start_time
+        time_remaining = max(0, 60 - int(elapsed_time))
+        
         # Create success embed with cumulative results
         success_embed = discord.Embed(
             title="⛏️ Mining Session",
-            description=f"Click the button as many times as you can in 60 seconds!",
+            description=f"Click the button as many times as you can in 60 seconds!\n\n⏰ **Time Remaining: {time_remaining} seconds**",
             color=discord.Color.light_grey()
         )
         success_embed.add_field(name="This Session", value=f"Total Mines: **{self.total_mines}**\nSession Value: **${self.session_value:.2f}**", inline=True)
@@ -3259,8 +3418,10 @@ class MiningView(discord.ui.View):
         await interaction.followup.edit_message(interaction.message.id, embed=success_embed, view=self)
     
     async def on_timeout(self):
-        # Update last mine time only when session ends
-        update_user_last_mine_time(self.user_id, time.time())
+        # Mark as timed out
+        self.timed_out = True
+        
+        # Cooldown is already set when session starts, no need to set it again
         
         # Disable the button if timeout
         for item in self.children:
@@ -3316,6 +3477,14 @@ class MiningView(discord.ui.View):
 async def mine(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=False)
     
+    # Check if command is being used in the correct channel
+    if not hasattr(interaction.channel, 'name') or interaction.channel.name != "gathercoin":
+        await interaction.followup.send(
+            f"❌ This command can only be used in the #gathercoin channel, {interaction.user.name}!",
+            ephemeral=True
+        )
+        return
+    
     user_id = interaction.user.id
     
     # Check cooldown
@@ -3333,6 +3502,9 @@ async def mine(interaction: discord.Interaction):
                 ephemeral=True
             )
             return
+    
+    # Set cooldown when session starts (not when it ends)
+    update_user_last_mine_time(user_id, current_time)
     
     # Create mining embed with button
     embed = discord.Embed(
@@ -3472,13 +3644,13 @@ async def portfolio(interaction: discord.Interaction):
     # Create portfolio embed
     embed = discord.Embed(
         title="💼 Your Portfolio",
-        description=f"**Total Portfolio Value: ${total_value:.2f}**\n\n",
+        description=f"**Total Portfolio Value: ${total_value:.2f}**",
         color=discord.Color.blue()
     )
     
     # Add cryptocurrency section
     if crypto_total > 0:
-        embed.description += "**💰 Cryptocurrency:**\n"
+        embed.description += "\n**💰 Cryptocurrency:**"
         for coin in CRYPTO_COINS:
             symbol = coin["symbol"]
             amount = crypto_holdings.get(symbol, 0.0)
@@ -3490,11 +3662,16 @@ async def portfolio(interaction: discord.Interaction):
                     value=f"Amount: {amount:.4f}\nValue: ${value:.2f}",
                     inline=True
                 )
-        embed.description += f"\n*Crypto Total: ${crypto_total:.2f}*\n\n"
+        # Add total as a field right after crypto holdings
+        embed.add_field(
+            name="\u200b",
+            value=f"**Total: ${crypto_total:.2f}**",
+            inline=False
+        )
     
     # Add stock section
     if stock_total > 0:
-        embed.description += "**📈 Stocks:**\n"
+        embed.description += "\n**📈 Stocks:**"
         for ticker in STOCK_TICKERS:
             symbol = ticker["symbol"]
             shares = stock_holdings.get(symbol, 0)
@@ -3506,12 +3683,17 @@ async def portfolio(interaction: discord.Interaction):
                     value=f"Shares: {shares:,}\nValue: ${value:.2f}",
                     inline=True
                 )
-        embed.description += f"\n*Stocks Total: ${stock_total:.2f}*"
+        # Add total as a field right after stock holdings
+        embed.add_field(
+            name="\u200b",
+            value=f"**Total: ${stock_total:.2f}**",
+            inline=False
+        )
     
     if total_value == 0:
         embed.description = "You don't have any holdings yet!\n\nUse `/mine` to mine cryptocurrency or buy stocks to get started!"
     
-    embed.set_footer(text="Use /mine to mine cryptocurrency, /sell to sell crypto, or buy/sell stocks")
+    embed.set_footer(text="Do /mine to get crypto, /sell to sell it, and /stocks to buy/sell shares!")
     
     await interaction.followup.send(embed=embed)
 
