@@ -975,7 +975,6 @@ async def play_roulette_round(channel, game_id):
                     value="You won the multiplayer round! Keep playing to increase your multiplier or cash out now!",
                     inline=False
                 )
-            
             await channel.send(f"<@{next_player_id}>", embed=embed, view=view)
         return
     
