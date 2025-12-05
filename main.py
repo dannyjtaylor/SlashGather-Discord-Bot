@@ -1744,6 +1744,21 @@ async def userstats(interaction: discord.Interaction):
     elif total_items < 499:
         items_needed = 499 - total_items
         next_rank = "PLANTER V"
+    elif total_items < 999:
+        items_needed = 999 - total_items
+        next_rank = "PLANTER VI"
+    elif total_items < 1999:
+        items_needed = 1999 - total_items
+        next_rank = "PLANTER VII"
+    elif total_items < 4999:
+        items_needed = 4999 - total_items
+        next_rank = "PLANTER VIII"
+    elif total_items < 9999:
+        items_needed = 9999 - total_items
+        next_rank = "PLANTER IX"
+    elif total_items < 99999:
+        items_needed = 99999 - total_items
+        next_rank = "PLANTER X"
     else:
         # Max rank achieved
         items_needed = 0
