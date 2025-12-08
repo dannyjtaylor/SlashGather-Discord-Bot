@@ -1469,6 +1469,7 @@ async def on_ready():
     bot.loop.create_task(update_all_leaderboards())
     print("Started automatic leaderboard updates")
     
+    
     # Start the marketboard update task
     bot.loop.create_task(update_all_marketboards())
     print("Started automatic marketboard updates")
