@@ -1453,7 +1453,6 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
 @bot.event 
 async def on_ready():
     print(f"Slash Gather, {bot.user.name}")
-
     #set bot status
     await bot.change_presence(
         activity=discord.Activity(
