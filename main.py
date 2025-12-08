@@ -1673,6 +1673,7 @@ async def harvest(interaction: discord.Interaction):
     except Exception as e:
         print(f"Error assigning gatherer role to user {user_id}: {e}")
 
+
     # Send rank-up notification if player advanced
     if new_role:
         rankup_embed = discord.Embed(
