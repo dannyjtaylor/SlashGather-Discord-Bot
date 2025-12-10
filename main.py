@@ -1604,6 +1604,7 @@ async def harvest(interaction: discord.Interaction):
         return
     set_harvest_cooldown(user_id)
     
+    
     # Get user upgrades (same for all 10 gathers)
     user_upgrades = get_user_basket_upgrades(user_id)
     basket_tier = user_upgrades["basket"]
