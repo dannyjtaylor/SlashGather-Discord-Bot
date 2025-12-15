@@ -831,7 +831,6 @@ async def start_roulette_game(channel, game_id):
 async def play_roulette_round(channel, game_id):
     if game_id not in active_roulette_games:
         return
-
     game = active_roulette_games[game_id]
     alive_players = game.get_alive_players()
 
