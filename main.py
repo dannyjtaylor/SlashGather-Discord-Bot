@@ -3013,9 +3013,31 @@ async def gardener_background_task():
 # Event system functions
 async def send_event_start_embed(guild: discord.Guild, event: dict, duration_minutes: int):
     """Send event start embed to #events channel."""
+    # Try exact match first
     events_channel = discord.utils.get(guild.text_channels, name="events")
+    
+    # If not found, try case-insensitive search
     if not events_channel:
-        return
+        for channel in guild.text_channels:
+            if channel.name.lower() == "events":
+                events_channel = channel
+                break
+    
+    # If still not found, try to find any channel with "event" in the name
+    if not events_channel:
+        for channel in guild.text_channels:
+            if "event" in channel.name.lower():
+                events_channel = channel
+                break
+    
+    if not events_channel:
+        print(f"ERROR: #events channel not found in {guild.name}. Available text channels: {[ch.name for ch in guild.text_channels]}")
+        return False
+    
+    # Check if bot has permission to send messages in the channel
+    if not events_channel.permissions_for(guild.me).send_messages:
+        print(f"ERROR: Bot does not have permission to send messages in #events channel in {guild.name}")
+        return False
     
     event_info = None
     if event["event_type"] == "hourly":
@@ -3024,7 +3046,8 @@ async def send_event_start_embed(guild: discord.Guild, event: dict, duration_min
         event_info = next((e for e in DAILY_EVENTS if e["id"] == event["event_id"]), None)
     
     if not event_info:
-        return
+        print(f"ERROR: Event info not found for event_id={event.get('event_id')}, event_type={event.get('event_type')} in {guild.name}")
+        return False
     
     event_name = event_info['name'].rstrip('!')
     embed = discord.Embed(
@@ -3054,10 +3077,31 @@ async def send_event_start_embed(guild: discord.Guild, event: dict, duration_min
 
 async def send_event_end_embed(guild: discord.Guild, event: dict):
     """Send event end embed to #events channel."""
+    # Try exact match first
     events_channel = discord.utils.get(guild.text_channels, name="events")
+    
+    # If not found, try case-insensitive search
     if not events_channel:
-        print(f"#events channel not found in {guild.name}")
-        return
+        for channel in guild.text_channels:
+            if channel.name.lower() == "events":
+                events_channel = channel
+                break
+    
+    # If still not found, try to find any channel with "event" in the name
+    if not events_channel:
+        for channel in guild.text_channels:
+            if "event" in channel.name.lower():
+                events_channel = channel
+                break
+    
+    if not events_channel:
+        print(f"ERROR: #events channel not found in {guild.name}. Available text channels: {[ch.name for ch in guild.text_channels]}")
+        return False
+    
+    # Check if bot has permission to send messages in the channel
+    if not events_channel.permissions_for(guild.me).send_messages:
+        print(f"ERROR: Bot does not have permission to send messages in #events channel in {guild.name}")
+        return False
     
     # Get the actual event ID from effects (not the database event_id)
     event_type_id = event.get("effects", {}).get("event_id")
