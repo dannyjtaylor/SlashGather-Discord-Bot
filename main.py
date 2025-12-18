@@ -1621,6 +1621,7 @@ async def harvest(interaction: discord.Interaction):
     total_value = 0.0
     current_balance = get_user_balance(user_id)
 
+
     for i in range(10):
         item = random.choice(GATHERABLE_ITEMS)
         name = item["name"]
