@@ -54,7 +54,18 @@ def _get_users_collection() -> Collection:
 
     db_name = os.getenv("MONGODB_DB_NAME", "slashgather")
 
-    _client = MongoClient(mongo_uri, server_api=ServerApi("1"))
+    _client = MongoClient(
+        mongo_uri,
+        server_api=ServerApi("1"),
+        maxPoolSize=10,  # Maximum connections in the pool
+        minPoolSize=2,   # Keep minimum connections ready for faster response
+        maxIdleTimeMS=45000,  # Close idle connections after 45 seconds
+        connectTimeoutMS=5000,  # Fail fast if can't connect (5 seconds)
+        serverSelectionTimeoutMS=5000,  # Fast server selection timeout
+        socketTimeoutMS=20000,  # Socket timeout for operations (20 seconds)
+        retryWrites=True,  # Automatically retry write operations
+        retryReads=True  # Automatically retry read operations
+    )
     _users_collection = _client[db_name]["users"]
     return _users_collection
 

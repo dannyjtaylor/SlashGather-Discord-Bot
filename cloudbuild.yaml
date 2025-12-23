@@ -18,7 +18,8 @@ steps:
           --cpu 2 \
           --cpu-boost \
           --concurrency 40 \
-          --timeout 300
+          --timeout 300 \
+          --execution-environment gen2
           
 options:
   logging: CLOUD_LOGGING_ONLY
