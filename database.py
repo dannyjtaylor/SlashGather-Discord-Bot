@@ -137,6 +137,7 @@ def perform_gather_update(user_id: int, balance_increment: float, item_name: str
             "gather_stats.total_items": 1,
             f"gather_stats.categories.{category}": 1,
             f"gather_stats.items.{item_name}": 1,
+            "total_forage_count": 1,  # Keep in sync with gather_stats.total_items for backwards compatibility
         }
     }
     

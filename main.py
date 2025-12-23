@@ -217,12 +217,12 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
     #PLANTER V - 500-999 items gathered
     #PLANTER VI - 1000-1999 items gathered
     #PLANTER VII - 2000-3999 items gathered
-    #PLANTER VIII - 4000-7999 items gathered
-    #PLANTER IX - 8000-14999 items gathered
-    #PLANTER X - 15000+ items gathered
+    #PLANTER VIII - 4000-9999 items gathered
+    #PLANTER IX - 10000-99999 items gathered
+    #PLANTER X - 100000+ items gathered
 
     user_id = member.id
-    total_forage_count = get_forage_count(user_id)
+    total_items = get_user_total_items(user_id)  # Use same counter as userstats to keep them in sync
     planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V", "PLANTER VI", "PLANTER VII", "PLANTER VIII", "PLANTER IX", "PLANTER X"]
 
     # Find the user's current planter role
@@ -230,25 +230,25 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
     
     # Determine the target role based on total items gathered
     target_role_name = None
-    if total_forage_count < 50:
+    if total_items < 50:
         target_role_name = "PLANTER I"
-    elif total_forage_count < 150:
+    elif total_items < 150:
         target_role_name = "PLANTER II"
-    elif total_forage_count < 299:
+    elif total_items < 300:  # Fixed: was 299
         target_role_name = "PLANTER III"
-    elif total_forage_count < 499:
+    elif total_items < 500:  # Fixed: was 499
         target_role_name = "PLANTER IV"
-    elif total_forage_count < 1000:
+    elif total_items < 1000:
         target_role_name = "PLANTER V"
-    elif total_forage_count < 2000:
+    elif total_items < 2000:
         target_role_name = "PLANTER VI"
-    elif total_forage_count < 4000:
+    elif total_items < 4000:
         target_role_name = "PLANTER VII"
-    elif total_forage_count < 8000:
+    elif total_items < 10000:
         target_role_name = "PLANTER VIII"
-    elif total_forage_count < 15000:
+    elif total_items < 100000:
         target_role_name = "PLANTER IX"
-    else: #15000+
+    else: #100000+
         target_role_name = "PLANTER X"
 
     # If the target role is the same as current role, no changes needed
@@ -1872,9 +1872,9 @@ async def userstats(interaction: discord.Interaction):
     # PLANTER V: 500-999 (need 1000 for PLANTER VI)
     # PLANTER VI: 1000-1999 (need 2000 for PLANTER VII)
     # PLANTER VII: 2000-3999 (need 4000 for PLANTER VIII)
-    # PLANTER VIII: 4000-7999 (need 8000 for PLANTER IX)
-    # PLANTER IX: 8000-14999 (need 15000 for PLANTER X)
-    # PLANTER X: 15000+ (max rank)
+    # PLANTER VIII: 4000-9999 (need 10000 for PLANTER IX)
+    # PLANTER IX: 10000-99999 (need 100000 for PLANTER X)
+    # PLANTER X: 100000+ (max rank)
     items_needed = None
     next_rank = None
     
@@ -1884,12 +1884,27 @@ async def userstats(interaction: discord.Interaction):
     elif total_items < 150:
         items_needed = 150 - total_items
         next_rank = "PLANTER III"
-    elif forage_count < 299:
-        items_needed = 299 - forage_count
+    elif total_items < 300:
+        items_needed = 300 - total_items
         next_rank = "PLANTER IV"
-    elif forage_count < 499:
-        items_needed = 499 - forage_count
+    elif total_items < 500:
+        items_needed = 500 - total_items
         next_rank = "PLANTER V"
+    elif total_items < 1000:
+        items_needed = 1000 - total_items
+        next_rank = "PLANTER VI"
+    elif total_items < 2000:
+        items_needed = 2000 - total_items
+        next_rank = "PLANTER VII"
+    elif total_items < 4000:
+        items_needed = 4000 - total_items
+        next_rank = "PLANTER VIII"
+    elif total_items < 10000:
+        items_needed = 10000 - total_items
+        next_rank = "PLANTER IX"
+    elif total_items < 100000:
+        items_needed = 100000 - total_items
+        next_rank = "PLANTER X"
     else:
         # Max rank achieved
         items_needed = 0
