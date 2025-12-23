@@ -126,7 +126,7 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix='/', intents=intents)
 GATHER_COOLDOWN = 60 #(seconds)
-HARVEST_COOLDOWN = 1 #(an hour)
+HARVEST_COOLDOWN = 60 * 60 #(an hour)
 MINE_COOLDOWN = 5 * 60 #(5 minutes)
 
 # Event check intervals (for testing - adjust these values to change how often events are checked)
@@ -1763,7 +1763,7 @@ async def harvest(interaction: discord.Interaction):
     total_value = 0.0
     current_balance = get_user_balance(user_id)
 
-    for i in range(1000):
+    for i in range(10):
         item = random.choice(GATHERABLE_ITEMS)
         name = item["name"]
         if item["category"] == "Fruit":
