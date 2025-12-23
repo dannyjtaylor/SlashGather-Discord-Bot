@@ -223,7 +223,7 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
 
     user_id = member.id
     total_forage_count = get_forage_count(user_id)
-    planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V"]
+    planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V", "PLANTER VI", "PLANTER VII", "PLANTER VIII", "PLANTER IX", "PLANTER X"]
 
     # Find the user's current planter role
     previous_role_name = next((role.name for role in member.roles if role.name in planter_roles), None)
