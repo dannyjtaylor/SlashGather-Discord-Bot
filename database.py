@@ -110,6 +110,46 @@ def increment_gather_stats(userid: int, category: str, item: str) -> None:
         upsert=True,
     )
 
+
+def perform_gather_update(user_id: int, balance_increment: float, item_name: str, 
+                          ripeness_name: str, category: str, apply_cooldown: bool = True) -> None:
+    """
+    Perform all gather-related database updates in a single MongoDB operation.
+    This batches: balance update, item addition, ripeness stat, gather stats, and cooldown.
+    
+    Args:
+        user_id: User ID
+        balance_increment: Amount to add to balance (can be negative)
+        item_name: Name of the item gathered
+        ripeness_name: Name of the ripeness level
+        category: Item category (Fruit, Vegetable, Flower, etc.)
+        apply_cooldown: If True, update last_gather_time to current time
+    """
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    
+    # Build the update operation with all increments and sets
+    update_ops = {
+        "$inc": {
+            "balance": float(balance_increment),
+            f"items.{item_name}": 1,
+            f"ripeness_stats.{ripeness_name}": 1,
+            "gather_stats.total_items": 1,
+            f"gather_stats.categories.{category}": 1,
+            f"gather_stats.items.{item_name}": 1,
+        }
+    }
+    
+    # Add cooldown update if requested
+    if apply_cooldown:
+        update_ops["$set"] = {"last_gather_time": float(time.time())}
+    
+    users.update_one(
+        {"_id": int(user_id)},
+        update_ops,
+        upsert=True,
+    )
+
 def init_database() -> None:
     """Initialise MongoDB indexes and verify connectivity."""
     users = _get_users_collection()
@@ -493,6 +533,11 @@ def update_user_stock_holdings(user_id: int, symbol: str, amount: int) -> None:
 
 
 # Event functions
+_events_cache: Optional[list[Dict]] = None
+_events_cache_time: float = 0.0
+_EVENTS_CACHE_TTL: float = 30.0  # 30 seconds cache TTL
+
+
 def _get_events_collection() -> Collection:
     """Return the MongoDB collection used to store events."""
     global _client
@@ -519,6 +564,40 @@ def get_active_events() -> list[Dict]:
             "effects": doc.get("effects", {})
         })
     return results
+
+
+def get_active_events_cached() -> list[Dict]:
+    """
+    Get all currently active events with caching (30 second TTL).
+    Returns list of event dicts.
+    """
+    global _events_cache, _events_cache_time
+    
+    current_time = time.time()
+    
+    # Check if cache is valid
+    if _events_cache is not None and (current_time - _events_cache_time) < _EVENTS_CACHE_TTL:
+        # Filter out expired events from cache
+        filtered_cache = [e for e in _events_cache if e.get("end_time", 0) > current_time]
+        if len(filtered_cache) == len(_events_cache):
+            # No events expired, return cache as-is
+            return _events_cache
+        # Some events expired, update cache
+        _events_cache = filtered_cache
+        _events_cache_time = current_time
+        return _events_cache
+    
+    # Cache miss or expired, fetch from database
+    _events_cache = get_active_events()
+    _events_cache_time = current_time
+    return _events_cache
+
+
+def _clear_events_cache() -> None:
+    """Clear the events cache. Called when events are modified."""
+    global _events_cache, _events_cache_time
+    _events_cache = None
+    _events_cache_time = 0.0
 
 
 def get_active_event_by_type(event_type: str) -> Optional[Dict]:
@@ -555,12 +634,16 @@ def set_active_event(event_id: str, event_type: str, event_name: str, start_time
         "end_time": float(end_time),
         "effects": effects
     })
+    # Clear cache when events are modified
+    _clear_events_cache()
 
 
 def clear_event(event_id: str) -> None:
     """Remove an event by its ID."""
     events = _get_events_collection()
     events.delete_one({"event_id": event_id})
+    # Clear cache when events are modified
+    _clear_events_cache()
 
 
 def clear_expired_events() -> None:
@@ -568,3 +651,38 @@ def clear_expired_events() -> None:
     events = _get_events_collection()
     current_time = time.time()
     events.delete_many({"end_time": {"$lte": current_time}})
+    # Clear cache when events are modified
+    _clear_events_cache()
+
+
+def get_user_gather_data(user_id: int) -> Dict:
+    """
+    Fetch all user data needed for gather operations in a single query.
+    Returns dict with: balance, basket_upgrades, last_gather_time
+    """
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    
+    doc = users.find_one(
+        {"_id": int(user_id)},
+        {"balance": 1, "basket_upgrades": 1, "last_gather_time": 1}
+    )
+    
+    if not doc:
+        return {
+            "balance": _get_default_balance(),
+            "basket_upgrades": {"basket": 0, "shoes": 0, "gloves": 0, "soil": 0},
+            "last_gather_time": 0.0
+        }
+    
+    upgrades = doc.get("basket_upgrades", {})
+    return {
+        "balance": float(doc.get("balance", _get_default_balance())),
+        "basket_upgrades": {
+            "basket": upgrades.get("basket", 0),
+            "shoes": upgrades.get("shoes", 0),
+            "gloves": upgrades.get("gloves", 0),
+            "soil": upgrades.get("soil", 0)
+        },
+        "last_gather_time": float(doc.get("last_gather_time", 0.0))
+    }

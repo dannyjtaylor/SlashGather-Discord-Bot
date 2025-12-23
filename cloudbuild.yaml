@@ -14,7 +14,10 @@ steps:
           --set-secrets MONGODB_URI=MONGODB_URI:latest \
           --min-instances 1 \
           --max-instances 5 \
-          --memory 512Mi \
+          --memory 1Gi \
+          --cpu 2 \
+          --cpu-boost \
+          --concurrency 40 \
           --timeout 300
           
 options:
