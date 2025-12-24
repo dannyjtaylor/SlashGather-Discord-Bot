@@ -250,7 +250,6 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
         target_role_name = "PLANTER IX"
     else: #100000+
         target_role_name = "PLANTER X"
-
     # If the target role is the same as current role, no changes needed
     if target_role_name == previous_role_name:
         return previous_role_name, None
