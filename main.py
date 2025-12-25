@@ -1635,6 +1635,7 @@ async def on_member_join(member):
     welcome_channel = discord.utils.get(member.guild.text_channels, name="welcome")
     
     if welcome_channel:
+        
         #send welcome message to the welcome channel
         await welcome_channel.send(f"🌿 Welcome to /GATHER, {member.mention}! 🌿")
     # else:
