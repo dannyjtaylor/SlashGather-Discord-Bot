@@ -81,10 +81,13 @@ from database import (
     get_user_stock_holdings,
     update_user_stock_holdings,
     get_active_events,
+    get_active_events_cached,
     get_active_event_by_type,
     set_active_event,
     clear_event,
     clear_expired_events,
+    get_user_gather_data,
+    perform_gather_update,
 )
 
 try:
@@ -98,7 +101,26 @@ except Exception as error:
 token_env_key = 'DISCORD_TOKEN' if is_production else 'DISCORD_DEV_TOKEN'
 token = os.getenv(token_env_key)
 
-handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w')
+# Configure logging properly
+# Set up file handler for all logs
+file_handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w')
+file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(file_formatter)
+file_handler.setLevel(logging.DEBUG)  # Log everything to file
+
+# Configure root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)  # Set root logger to INFO
+root_logger.addHandler(file_handler)
+
+# Set discord.py logger to INFO to reduce terminal clutter (DEBUG is too verbose)
+discord_logger = logging.getLogger('discord')
+discord_logger.setLevel(logging.INFO)
+
+# Set discord gateway/HTTP loggers to WARNING to reduce noise even more
+logging.getLogger('discord.gateway').setLevel(logging.WARNING)
+logging.getLogger('discord.http').setLevel(logging.WARNING)
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -106,6 +128,11 @@ bot = commands.Bot(command_prefix='/', intents=intents)
 GATHER_COOLDOWN = 60 #(seconds)
 HARVEST_COOLDOWN = 60 * 60 #(an hour)
 MINE_COOLDOWN = 5 * 60 #(5 minutes)
+
+# Event check intervals (for testing - adjust these values to change how often events are checked)
+# In production, these should be: HOURLY_EVENT_INTERVAL = 3600, DAILY_EVENT_INTERVAL = 86400
+HOURLY_EVENT_INTERVAL = 3600 # Seconds between hourly event checks (default: 3600 = 1 hour)
+DAILY_EVENT_INTERVAL = 86400 # Seconds between daily event checks (default: 86400 = 24 hours)
 
 # Gardener prices
 GARDENER_PRICES = [1000, 10000, 50000, 100000, 250000]
@@ -183,15 +210,20 @@ def set_harvest_cooldown(user_id):
     
 async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> tuple[str | None, str | None]:
     #assign gatherer role to the user
-    #gatherer 1 - 0-50 items gathered
-    #gatherer 2 - 51-150 items gathered
-    #gatherer 3 - 150-299 items gathered
-    #gatherer 4 - 300-499 items gathered
-    #gatherer 5 - 500+ items gathered
+    #PLANTER I - 0-49 items gathered
+    #PLANTER II - 50-149 items gathered
+    #PLANTER III - 150-299 items gathered
+    #PLANTER IV - 300-499 items gathered
+    #PLANTER V - 500-999 items gathered
+    #PLANTER VI - 1000-1999 items gathered
+    #PLANTER VII - 2000-3999 items gathered
+    #PLANTER VIII - 4000-9999 items gathered
+    #PLANTER IX - 10000-99999 items gathered
+    #PLANTER X - 100000+ items gathered
 
     user_id = member.id
-    total_items = get_user_total_items(user_id)
-    planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V"]
+    total_items = get_user_total_items(user_id)  # Use same counter as userstats to keep them in sync
+    planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V", "PLANTER VI", "PLANTER VII", "PLANTER VIII", "PLANTER IX", "PLANTER X"]
 
     # Find the user's current planter role
     previous_role_name = next((role.name for role in member.roles if role.name in planter_roles), None)
@@ -202,13 +234,22 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
         target_role_name = "PLANTER I"
     elif total_items < 150:
         target_role_name = "PLANTER II"
-    elif total_items < 299:
+    elif total_items < 300:  # Fixed: was 299
         target_role_name = "PLANTER III"
-    elif total_items < 499:
+    elif total_items < 500:  # Fixed: was 499
         target_role_name = "PLANTER IV"
-    else: #500+
+    elif total_items < 1000:
         target_role_name = "PLANTER V"
-
+    elif total_items < 2000:
+        target_role_name = "PLANTER VI"
+    elif total_items < 4000:
+        target_role_name = "PLANTER VII"
+    elif total_items < 10000:
+        target_role_name = "PLANTER VIII"
+    elif total_items < 100000:
+        target_role_name = "PLANTER IX"
+    else: #100000+
+        target_role_name = "PLANTER X"
     # If the target role is the same as current role, no changes needed
     if target_role_name == previous_role_name:
         return previous_role_name, None
@@ -242,8 +283,23 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
 
 
 
-def can_gather(user_id):
-    last_gather_time = get_user_last_gather_time(user_id)
+def can_gather(user_id, user_data=None, active_events=None):
+    """
+    Check if user can gather. Returns (can_gather: bool, time_left: int).
+    
+    Args:
+        user_id: User ID
+        user_data: Optional pre-fetched user data dict (from get_user_gather_data)
+        active_events: Optional pre-fetched active events list
+    """
+    # Fetch data if not provided
+    if user_data is None:
+        user_data = get_user_gather_data(user_id)
+    
+    if active_events is None:
+        active_events = get_active_events_cached()
+    
+    last_gather_time = user_data["last_gather_time"]
     current_time = time.time()
     #check if the user is on cooldown, return true/false and how much time left
     #right off the bat if the user is new they have no cooldown
@@ -251,14 +307,13 @@ def can_gather(user_id):
         return True, 0
     
     # Get shoes upgrade cooldown reduction
-    user_upgrades = get_user_basket_upgrades(user_id)
+    user_upgrades = user_data["basket_upgrades"]
     shoes_tier = user_upgrades["shoes"]
     cooldown_reduction = 0
     if shoes_tier > 0:
         cooldown_reduction = SHOES_UPGRADES[shoes_tier - 1]["reduction"]
     
     # Apply event cooldown reductions
-    active_events = get_active_events()
     hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
     daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
     
@@ -286,13 +341,24 @@ def set_cooldown(user_id):
     # set cooldown for user, p self explanatory
     update_user_last_gather_time(user_id, time.time())
 
-async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True) -> dict:
+async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True, 
+                                  user_data=None, active_events=None) -> dict:
     """
     Perform a gather action for a user. Returns dict with gathered item info.
-    apply_cooldown: If True, sets cooldown. If False, skips cooldown (for gardeners).
+    
+    Args:
+        user_id: User ID
+        apply_cooldown: If True, sets cooldown. If False, skips cooldown (for gardeners).
+        user_data: Optional pre-fetched user data dict (from get_user_gather_data)
+        active_events: Optional pre-fetched active events list
     """
-    # Get active events
-    active_events = get_active_events()
+    # Fetch data if not provided
+    if user_data is None:
+        user_data = get_user_gather_data(user_id)
+    
+    if active_events is None:
+        active_events = get_active_events_cached()
+    
     hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
     daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
     
@@ -383,8 +449,8 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True) -> 
         final_value = base_value
         ripeness = {"name": "Normal"}
 
-    # Get user upgrades
-    user_upgrades = get_user_basket_upgrades(user_id)
+    # Get user upgrades from pre-fetched data
+    user_upgrades = user_data["basket_upgrades"]
     
     # Apply soil upgrade GMO chance boost
     soil_tier = user_upgrades["soil"]
@@ -444,19 +510,19 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True) -> 
     
     final_value *= basket_multiplier * value_multiplier
 
-    # Add the value to the balance for the user
-    current_balance = get_user_balance(user_id)
+    # Calculate new balance from pre-fetched data
+    current_balance = user_data["balance"]
     new_balance = current_balance + final_value
-    # Save to database
-    update_user_balance(user_id, new_balance)
-
-    add_user_item(user_id, name)
-    add_ripeness_stat(user_id, ripeness["name"])
-    increment_gather_stats(user_id, item["category"], name)
     
-    # Apply cooldown if requested (for user gathers, not gardeners)
-    if apply_cooldown:
-        set_cooldown(user_id)
+    # Perform all database updates in a single batched operation
+    perform_gather_update(
+        user_id=user_id,
+        balance_increment=final_value,
+        item_name=name,
+        ripeness_name=ripeness["name"],
+        category=item["category"],
+        apply_cooldown=apply_cooldown
+    )
 
     return {
         "name": name,
@@ -803,8 +869,36 @@ class RouletteGame:
 
 #start rusian roulette
 async def start_roulette_game(channel, game_id):
-    if game_id in active_roulette_games:
+    try:
+        if game_id not in active_roulette_games:
+            print(f"Warning: Game {game_id} not found in active_roulette_games")
+            return
+        
         game = active_roulette_games[game_id]
+        
+        # Check if game is already started (race condition protection)
+        if game.game_started:
+            print(f"Warning: Game {game_id} is already started, ignoring duplicate start request")
+            return
+        
+        # Validate that there are players in the game
+        if len(game.players) == 0:
+            print(f"Error: Game {game_id} has no players, cannot start")
+            # Clean up the game
+            if game_id in active_roulette_games:
+                del active_roulette_games[game_id]
+            for ch_id, tracked_game_id in list(active_roulette_channel_games.items()):
+                if tracked_game_id == game_id:
+                    del active_roulette_channel_games[ch_id]
+            for player_id in list(user_active_games.keys()):
+                if user_active_games[player_id] == game_id:
+                    # Refund the player
+                    user_balance = get_user_balance(player_id)
+                    update_user_balance(player_id, user_balance + game.bet_amount)
+                    del user_active_games[player_id]
+            await channel.send("❌ **Error**: Game could not start because there are no players. All bets have been refunded.")
+            return
+        
         game.game_started = True
         #start on first round
         game.round_number = 1
@@ -812,26 +906,52 @@ async def start_roulette_game(channel, game_id):
         await asyncio.sleep(2)
 
         #start message
-        total_pot = game.bet_amount * len(game.players)
+        # Ensure pot is set (should already be set by button handler, but set it here as fallback)
+        if game.pot == 0:
+            game.pot = game.bet_amount * len(game.players)
+        
         embed = discord.Embed(
             title = "🎲 RUSSIAN ROULETTE 🎲",
             description = f"**{game.host_name}**'s game has started!\n*The cylinder spins.. click.. click.. click.. click..*",
             color = discord.Color.dark_red()
         )
         embed.add_field(name="🔫 Bullets Loaded", value=f"{game.bullets}/6", inline=True)
-        embed.add_field(name="💰 Total Pot", value=f"${game.bet_amount:.2f}", inline=True)
+        embed.add_field(name="💰 Total Pot", value=f"${game.pot:.2f}", inline=True)
         embed.add_field(name="🎮 Players", value=f"{len(game.players)}/{game.max_players}", inline=True)
         await channel.send(embed=embed)
         await asyncio.sleep(2)
 
         #play round!!
         await play_roulette_round(channel, game_id)
+    except Exception as e:
+        print(f"Error starting roulette game {game_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        # Try to refund all players if game fails to start
+        if game_id in active_roulette_games:
+            game = active_roulette_games[game_id]
+            for player_id in game.players.keys():
+                try:
+                    user_balance = get_user_balance(player_id)
+                    update_user_balance(player_id, user_balance + game.bet_amount)
+                    if player_id in user_active_games:
+                        del user_active_games[player_id]
+                except Exception as refund_error:
+                    print(f"Error refunding player {player_id}: {refund_error}")
+            # Clean up game
+            del active_roulette_games[game_id]
+            for ch_id, tracked_game_id in list(active_roulette_channel_games.items()):
+                if tracked_game_id == game_id:
+                    del active_roulette_channel_games[ch_id]
+            try:
+                await channel.send("❌ **Error**: Game failed to start. All bets have been refunded.")
+            except:
+                pass
 
 #play a round of russian roulette
 async def play_roulette_round(channel, game_id):
     if game_id not in active_roulette_games:
         return
-
     game = active_roulette_games[game_id]
     alive_players = game.get_alive_players()
 
@@ -1143,17 +1263,29 @@ class RouletteJoinView(discord.ui.View):
             
         game = active_roulette_games[self.game_id]
         
+        # Check if game already started (race condition protection)
         if game.game_started:
             await interaction.response.send_message("❌ Game already started!", ephemeral=True)
             return
+        
+        # Validate that there are players
+        if len(game.players) == 0:
+            await interaction.response.send_message("❌ Cannot start game: No players in game!", ephemeral=True)
+            return
             
-        # Start the game
-        game.game_started = True
+        # Set pot before starting (start_roulette_game will set game_started)
         game.pot = game.bet_amount * len(game.players)
         
-        await interaction.response.edit_message(content="🎮 **Game Started!**", view=None)
+        try:
+            await interaction.response.edit_message(content="🎮 **Game Started!**", view=None)
+        except discord.errors.InteractionResponded:
+            # Interaction already responded, try followup
+            await interaction.followup.edit_message(interaction.message.id, content="🎮 **Game Started!**", view=None)
+        except Exception as e:
+            print(f"Error editing message: {e}")
+            # Continue anyway - game should still start
         
-        # Start the actual game
+        # Start the actual game (this will set game_started and handle errors)
         await start_roulette_game(interaction.channel, self.game_id)
     
     async def on_timeout(self):
@@ -1161,7 +1293,7 @@ class RouletteJoinView(discord.ui.View):
         if self.game_id in active_roulette_games:
             game = active_roulette_games[self.game_id]
             if not game.game_started and len(game.players) >= 1:  # At least host is in game
-                game.game_started = True
+                # Set pot before starting (start_roulette_game will set game_started and validate)
                 game.pot = game.bet_amount * len(game.players)
                 
                 # Find the channel where this game is running
@@ -1177,6 +1309,8 @@ class RouletteJoinView(discord.ui.View):
                         await start_roulette_game(channel, self.game_id)
                     except Exception as e:
                         print(f"Error auto-starting roulette game: {e}")
+                        import traceback
+                        traceback.print_exc()
 
 
 
@@ -1456,7 +1590,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.2.1 :3"
+            name="running /gather on V0.2.2 :3"
         )
     )
     try:
@@ -1524,9 +1658,13 @@ async def gather(interaction: discord.Interaction):
     #use defer for custom message
     await interaction.response.defer(ephemeral=False)
 
-    #check if the user is on cooldown (default 1 min), if so let them know how much time they have left
+    # Fetch user data and events once at the start
     user_id = interaction.user.id
-    can_user_gather, time_left = can_gather(user_id)
+    user_data = get_user_gather_data(user_id)
+    active_events = get_active_events_cached()
+
+    #check if the user is on cooldown (default 1 min), if so let them know how much time they have left
+    can_user_gather, time_left = can_gather(user_id, user_data=user_data, active_events=active_events)
     if not can_user_gather:
         #then user is on cooldown
         await interaction.followup.send(
@@ -1534,8 +1672,9 @@ async def gather(interaction: discord.Interaction):
         )
         return
 
-    # Perform the gather
-    gather_result = await perform_gather_for_user(user_id, apply_cooldown=True)
+    # Perform the gather with pre-fetched data
+    gather_result = await perform_gather_for_user(user_id, apply_cooldown=True, 
+                                                  user_data=user_data, active_events=active_events)
 
     # assign role and check for rank-up
     old_role = None
@@ -1549,7 +1688,7 @@ async def gather(interaction: discord.Interaction):
     if new_role:
         rankup_embed = discord.Embed(
             title="🌱 Rank Up!",
-            description=f"{interaction.user.mention} advanced from **{old_role or 'New Recruit'}** to **{new_role}**!",
+            description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
             color=discord.Color.gold(),
         )
         await interaction.followup.send(embed=rankup_embed)
@@ -1568,15 +1707,14 @@ async def gather(interaction: discord.Interaction):
     embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
     embed.add_field(name="new balance: ", value=f"**${gather_result['new_balance']:.2f}**", inline=False)
     
-    # Check for chain chance (gloves upgrade)
-    user_upgrades = get_user_basket_upgrades(user_id)
+    # Check for chain chance (gloves upgrade) - use pre-fetched data
+    user_upgrades = user_data["basket_upgrades"]
     gloves_tier = user_upgrades["gloves"]
     chain_triggered = False
     if gloves_tier > 0:
         chain_chance = GLOVES_UPGRADES[gloves_tier - 1]["chain_chance"]
         
-        # Apply Chain Reaction event (hourly)
-        active_events = get_active_events()
+        # Apply Chain Reaction event (hourly) - use pre-fetched events
         hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
         if hourly_event and hourly_event.get("event_id") == "chain_reaction":
             chain_chance *= 2  # Double the chain chance
@@ -1680,7 +1818,7 @@ async def harvest(interaction: discord.Interaction):
     if new_role:
         rankup_embed = discord.Embed(
             title="🌾 Rank Up!",
-            description=f"{interaction.user.mention} advanced from **{old_role or 'New Recruit'}** to **{new_role}**!",
+            description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
             color=discord.Color.gold(),
         )
         await interaction.followup.send(embed=rankup_embed)
@@ -1729,9 +1867,14 @@ async def userstats(interaction: discord.Interaction):
     # Calculate items needed for next rankup
     # PLANTER I: 0-49 (need 50 for PLANTER II)
     # PLANTER II: 50-149 (need 150 for PLANTER III)
-    # PLANTER III: 150-298 (need 299 for PLANTER IV)
-    # PLANTER IV: 300-498 (need 499 for PLANTER V)
-    # PLANTER V: 500+ (max rank)
+    # PLANTER III: 150-299 (need 300 for PLANTER IV)
+    # PLANTER IV: 300-499 (need 500 for PLANTER V)
+    # PLANTER V: 500-999 (need 1000 for PLANTER VI)
+    # PLANTER VI: 1000-1999 (need 2000 for PLANTER VII)
+    # PLANTER VII: 2000-3999 (need 4000 for PLANTER VIII)
+    # PLANTER VIII: 4000-9999 (need 10000 for PLANTER IX)
+    # PLANTER IX: 10000-99999 (need 100000 for PLANTER X)
+    # PLANTER X: 100000+ (max rank)
     items_needed = None
     next_rank = None
     
@@ -1741,26 +1884,26 @@ async def userstats(interaction: discord.Interaction):
     elif total_items < 150:
         items_needed = 150 - total_items
         next_rank = "PLANTER III"
-    elif total_items < 299:
-        items_needed = 299 - total_items
+    elif total_items < 300:
+        items_needed = 300 - total_items
         next_rank = "PLANTER IV"
-    elif total_items < 499:
-        items_needed = 499 - total_items
+    elif total_items < 500:
+        items_needed = 500 - total_items
         next_rank = "PLANTER V"
-    elif total_items < 999:
-        items_needed = 999 - total_items
+    elif total_items < 1000:
+        items_needed = 1000 - total_items
         next_rank = "PLANTER VI"
-    elif total_items < 1999:
-        items_needed = 1999 - total_items
+    elif total_items < 2000:
+        items_needed = 2000 - total_items
         next_rank = "PLANTER VII"
-    elif total_items < 4999:
-        items_needed = 4999 - total_items
+    elif total_items < 4000:
+        items_needed = 4000 - total_items
         next_rank = "PLANTER VIII"
-    elif total_items < 9999:
-        items_needed = 9999 - total_items
+    elif total_items < 10000:
+        items_needed = 10000 - total_items
         next_rank = "PLANTER IX"
-    elif total_items < 99999:
-        items_needed = 99999 - total_items
+    elif total_items < 100000:
+        items_needed = 100000 - total_items
         next_rank = "PLANTER X"
     else:
         # Max rank achieved
@@ -2168,6 +2311,222 @@ async def hire(interaction: discord.Interaction):
     view.update_buttons()
     
     await interaction.followup.send(embed=embed, view=view)
+
+
+# Admin Event Commands
+@bot.tree.command(name="starthourlyevent", description="[ADMIN] Start a specific hourly event manually")
+@app_commands.default_permissions(administrator=True)
+@app_commands.choices(event=[
+    app_commands.Choice(name=f"{e['emoji']} {e['name']}", value=e['id'])
+    for e in HOURLY_EVENTS
+])
+@app_commands.choices(duration=[
+    app_commands.Choice(name="30 minutes", value=30),
+    app_commands.Choice(name="45 minutes", value=45),
+    app_commands.Choice(name="60 minutes", value=60)
+])
+async def starthourlyevent(interaction: discord.Interaction, event: str, duration: int):
+    await interaction.response.defer(ephemeral=True)
+    
+    # Check if user has administrator permissions
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.followup.send("❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+        return
+    
+    # Check if there's already an active hourly event
+    existing_hourly = get_active_event_by_type("hourly")
+    if existing_hourly:
+        current_time = time.time()
+        if existing_hourly.get("end_time", 0) > current_time:
+            await interaction.followup.send(
+                f"❌ **Error**: An hourly event is already active: **{existing_hourly['event_name']}** "
+                f"(ends in {int((existing_hourly.get('end_time', 0) - current_time) / 60)} minutes). "
+                f"Use `/endevent hourly` to end it first.",
+                ephemeral=True
+            )
+            return
+        else:
+            # Clean up expired event
+            clear_event(existing_hourly.get("event_id", ""))
+    
+    # Find the event info
+    event_info = next((e for e in HOURLY_EVENTS if e["id"] == event), None)
+    if not event_info:
+        await interaction.followup.send("❌ **Error**: Event not found.", ephemeral=True)
+        return
+    
+    # Create the event
+    duration_minutes = duration
+    duration_seconds = duration_minutes * 60
+    start_time = time.time()
+    end_time = start_time + duration_seconds
+    
+    event_id = f"hourly_{int(start_time)}_{event_info['id']}"
+    
+    set_active_event(
+        event_id=event_id,
+        event_type="hourly",
+        event_name=event_info["name"],
+        start_time=start_time,
+        end_time=end_time,
+        effects={"event_id": event_info["id"]}
+    )
+    
+    # Send announcement to all guilds
+    guilds_sent = 0
+    for guild in bot.guilds:
+        try:
+            await send_event_start_embed(guild, {
+                "event_type": "hourly",
+                "event_id": event_info["id"],
+                "event_name": event_info["name"]
+            }, duration_minutes)
+            guilds_sent += 1
+        except Exception as e:
+            print(f"Error sending start embed to {guild.name} for hourly event: {e}")
+    
+    embed = discord.Embed(
+        title=f"✅ Event Started Successfully",
+        description=f"**{event_info['emoji']} {event_info['name']}**",
+        color=discord.Color.green()
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+    print(f"Admin {interaction.user.name} started hourly event: {event_info['name']} for {duration_minutes} minutes")
+
+
+@bot.tree.command(name="startdailyevent", description="[ADMIN] Start a specific daily event manually")
+@app_commands.default_permissions(administrator=True)
+@app_commands.choices(event=[
+    app_commands.Choice(name=f"{e['emoji']} {e['name']}", value=e['id'])
+    for e in DAILY_EVENTS
+])
+async def startdailyevent(interaction: discord.Interaction, event: str):
+    await interaction.response.defer(ephemeral=True)
+    
+    # Check if user has administrator permissions
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.followup.send("❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+        return
+    
+    # Check if there's already an active daily event
+    existing_daily = get_active_event_by_type("daily")
+    if existing_daily:
+        current_time = time.time()
+        if existing_daily.get("end_time", 0) > current_time:
+            await interaction.followup.send(
+                f"❌ **Error**: A daily event is already active: **{existing_daily['event_name']}** "
+                f"(ends in {int((existing_daily.get('end_time', 0) - current_time) / 3600)} hours). "
+                f"Use `/endevent daily` to end it first.",
+                ephemeral=True
+            )
+            return
+        else:
+            # Clean up expired event
+            clear_event(existing_daily.get("event_id", ""))
+    
+    # Find the event info
+    event_info = next((e for e in DAILY_EVENTS if e["id"] == event), None)
+    if not event_info:
+        await interaction.followup.send("❌ **Error**: Event not found.", ephemeral=True)
+        return
+    
+    # Create the event (fixed 24 hour duration)
+    duration_minutes = 24 * 60
+    duration_seconds = duration_minutes * 60
+    start_time = time.time()
+    end_time = start_time + duration_seconds
+    
+    event_id = f"daily_{int(start_time)}_{event_info['id']}"
+    
+    set_active_event(
+        event_id=event_id,
+        event_type="daily",
+        event_name=event_info["name"],
+        start_time=start_time,
+        end_time=end_time,
+        effects={"event_id": event_info["id"]}
+    )
+    
+    # Send announcement to all guilds
+    guilds_sent = 0
+    for guild in bot.guilds:
+        try:
+            await send_event_start_embed(guild, {
+                "event_type": "daily",
+                "event_id": event_info["id"],
+                "event_name": event_info["name"]
+            }, duration_minutes)
+            guilds_sent += 1
+        except Exception as e:
+            print(f"Error sending start embed to {guild.name} for daily event: {e}")
+    
+    embed = discord.Embed(
+        title=f"✅ Event Started Successfully",
+        description=f"**{event_info['emoji']} {event_info['name']}**",
+        color=discord.Color.green()
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+    print(f"Admin {interaction.user.name} started daily event: {event_info['name']}")
+
+
+@bot.tree.command(name="endevent", description="[ADMIN] End the currently active hourly or daily event")
+@app_commands.default_permissions(administrator=True)
+@app_commands.choices(event_type=[
+    app_commands.Choice(name="hourly", value="hourly"),
+    app_commands.Choice(name="daily", value="daily")
+])
+async def endevent(interaction: discord.Interaction, event_type: str):
+    await interaction.response.defer(ephemeral=True)
+    
+    # Check if user has administrator permissions
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.followup.send("❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+        return
+    
+    # Get the active event
+    active_event = get_active_event_by_type(event_type)
+    if not active_event:
+        await interaction.followup.send(
+            f"❌ **Error**: No active {event_type} event found.",
+            ephemeral=True
+        )
+        return
+    
+    # Get event info for the embed
+    event_type_id = active_event.get("effects", {}).get("event_id")
+    if not event_type_id:
+        await interaction.followup.send("❌ **Error**: Could not find event information.", ephemeral=True)
+        return
+    
+    event_info = None
+    if event_type == "hourly":
+        event_info = next((e for e in HOURLY_EVENTS if e["id"] == event_type_id), None)
+    elif event_type == "daily":
+        event_info = next((e for e in DAILY_EVENTS if e["id"] == event_type_id), None)
+    
+    if not event_info:
+        await interaction.followup.send("❌ **Error**: Event info not found.", ephemeral=True)
+        return
+    
+    # Clear the event from database
+    clear_event(active_event.get("event_id", ""))
+    
+    # Send end message to all guilds
+    guilds_sent = 0
+    for guild in bot.guilds:
+        try:
+            await send_event_end_embed(guild, active_event)
+            guilds_sent += 1
+        except Exception as e:
+            print(f"Error sending end embed to {guild.name}: {e}")
+    
+    embed = discord.Embed(
+        title=f"✅ Event Ended Successfully",
+        description=f"**{event_info['emoji']} {event_info['name']}**",
+        color=discord.Color.orange()
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+    print(f"Admin {interaction.user.name} ended {event_type} event: {event_info['name']}")
 
 
 # Pay command
@@ -2730,73 +3089,90 @@ NEGATIVE_NEWS = [
 
 async def send_market_news(guild: discord.Guild):
     """Send a random news alert to the #market-news channel and affect stock price."""
-    # Find the market-news channel
-    news_channel = discord.utils.get(guild.text_channels, name="market-news")
-    
-    if not news_channel:
-        return  # Channel doesn't exist, skip
-    
-    # Initialize stocks for this guild if needed
-    initialize_stocks(guild.id)
-    
-    # Pick a random company
-    ticker = random.choice(STOCK_TICKERS)
-    company_name = ticker["name"]
-    symbol = ticker["symbol"]
-    
-    # Pick positive or negative news (50/50 chance)
-    is_positive = random.choice([True, False])
-    
-    # Randomly select price change percentage: 1% to 10%
-    price_change_percent = random.randint(1, 10) / 100.0
-    
-    if is_positive:
-        news_template = random.choice(POSITIVE_NEWS)
-        color = discord.Color.green()
-        emoji = "📈"
-        price_multiplier = 1 + price_change_percent  # Increase price
-    else:
-        news_template = random.choice(NEGATIVE_NEWS)
-        color = discord.Color.red()
-        emoji = "📉"
-        price_multiplier = 1 - price_change_percent  # Decrease price
-    
-    # Apply price change to stock
-    if symbol in stock_data[guild.id]:
-        current_price = stock_data[guild.id][symbol]["price"]
-        new_price = current_price * price_multiplier
-        
-        # Update price
-        stock_data[guild.id][symbol]["price"] = new_price
-        
-        # Update price history (keep last 6 minutes)
-        price_history = stock_data[guild.id][symbol]["price_history"]
-        price_history.append(new_price)
-        if len(price_history) > 6:
-            price_history.pop(0)
-        
-        price_change_display = f"{'+' if is_positive else '-'}{price_change_percent * 100:.0f}%"
-    else:
-        # Stock not initialized, skip price update
-        price_change_display = f"{'+' if is_positive else '-'}{price_change_percent * 100:.0f}%"
-    
-    # Format the news message with company name
-    news_message = news_template.format(company=company_name)
-    
-    # Create embed
-    embed = discord.Embed(
-        title=f"{emoji} ***THIS JUST IN!***",
-        description=news_message,
-        color=color
-    )
-    embed.add_field(name="Company", value=f"**{company_name} ({symbol})**", inline=True)
-    embed.add_field(name="Price Impact", value=f"**{price_change_display}**", inline=True)
-    embed.timestamp = discord.utils.utcnow()
-    
     try:
+        # Find the market-news channel
+        news_channel = discord.utils.get(guild.text_channels, name="market-news")
+        
+        if not news_channel:
+            logging.warning(f"Market news channel not found in guild '{guild.name}' (ID: {guild.id}). Skipping market news.")
+            return  # Channel doesn't exist, skip
+        
+        # Check if bot has permission to send messages
+        if not news_channel.permissions_for(guild.me).send_messages:
+            logging.warning(f"Bot lacks permission to send messages in #market-news channel in guild '{guild.name}' (ID: {guild.id}). Skipping market news.")
+            return
+        
+        # Check if bot can embed links (required for embeds)
+        if not news_channel.permissions_for(guild.me).embed_links:
+            logging.warning(f"Bot lacks permission to embed links in #market-news channel in guild '{guild.name}' (ID: {guild.id}). Skipping market news.")
+            return
+        
+        # Initialize stocks for this guild if needed
+        initialize_stocks(guild.id)
+        
+        # Pick a random company
+        ticker = random.choice(STOCK_TICKERS)
+        company_name = ticker["name"]
+        symbol = ticker["symbol"]
+        
+        # Pick positive or negative news (50/50 chance)
+        is_positive = random.choice([True, False])
+        
+        # Randomly select price change percentage: 1% to 10%
+        price_change_percent = random.randint(1, 10) / 100.0
+        
+        if is_positive:
+            news_template = random.choice(POSITIVE_NEWS)
+            color = discord.Color.green()
+            emoji = "📈"
+            price_multiplier = 1 + price_change_percent  # Increase price
+        else:
+            news_template = random.choice(NEGATIVE_NEWS)
+            color = discord.Color.red()
+            emoji = "📉"
+            price_multiplier = 1 - price_change_percent  # Decrease price
+        
+        # Apply price change to stock
+        if symbol in stock_data[guild.id]:
+            current_price = stock_data[guild.id][symbol]["price"]
+            new_price = current_price * price_multiplier
+            
+            # Update price
+            stock_data[guild.id][symbol]["price"] = new_price
+            
+            # Update price history (keep last 6 minutes)
+            price_history = stock_data[guild.id][symbol]["price_history"]
+            price_history.append(new_price)
+            if len(price_history) > 6:
+                price_history.pop(0)
+            
+            price_change_display = f"{'+' if is_positive else '-'}{price_change_percent * 100:.0f}%"
+        else:
+            # Stock not initialized, skip price update
+            price_change_display = f"{'+' if is_positive else '-'}{price_change_percent * 100:.0f}%"
+        
+        # Format the news message with company name
+        news_message = news_template.format(company=company_name)
+        
+        # Create embed
+        embed = discord.Embed(
+            title=f"{emoji} ***THIS JUST IN!***",
+            description=news_message,
+            color=color
+        )
+        embed.add_field(name="Company", value=f"**{company_name} ({symbol})**", inline=True)
+        embed.add_field(name="Price Impact", value=f"**{price_change_display}**", inline=True)
+        embed.timestamp = discord.utils.utcnow()
+        
         await news_channel.send(embed=embed)
+        logging.info(f"Successfully sent market news for {company_name} ({symbol}) in guild '{guild.name}' (ID: {guild.id})")
+        
+    except discord.Forbidden:
+        logging.error(f"Forbidden error sending market news in guild '{guild.name}' (ID: {guild.id}): Bot lacks permissions")
+    except discord.HTTPException as e:
+        logging.error(f"HTTP error sending market news in guild '{guild.name}' (ID: {guild.id}): {e}")
     except Exception as e:
-        print(f"Error sending market news in {guild.name}: {e}")
+        logging.error(f"Unexpected error sending market news in guild '{guild.name}' (ID: {guild.id}): {e}", exc_info=True)
 
 async def send_market_news_loop():
     """Background task to send market news alerts at random intervals."""
@@ -2805,17 +3181,32 @@ async def send_market_news_loop():
     # Wait a bit for guilds to fully load
     await asyncio.sleep(10)
     
+    logging.info(f"Market news loop started. Bot is in {len(bot.guilds)} guild(s)")
+    
     while not bot.is_closed():
         try:
             # Send news to all guilds the bot is in
+            guilds_processed = 0
             for guild in bot.guilds:
-                await send_market_news(guild)
-                await asyncio.sleep(1)  # Small delay between guilds
+                try:
+                    await send_market_news(guild)
+                    guilds_processed += 1
+                    await asyncio.sleep(1)  # Small delay between guilds
+                except Exception as e:
+                    # Log error but continue with other guilds
+                    logging.error(f"Error processing market news for guild '{guild.name}' (ID: {guild.id}): {e}", exc_info=True)
+            
+            if guilds_processed > 0:
+                logging.info(f"Market news cycle completed. Processed {guilds_processed} guild(s)")
+            else:
+                logging.warning("Market news cycle completed but no guilds were processed (no valid channels found?)")
+                
         except Exception as e:
-            print(f"Error in market news task: {e}")
+            logging.error(f"Critical error in market news task: {e}", exc_info=True)
         
         # Wait random interval between 2-5 minutes (120-300 seconds)
         wait_time = random.randint(120, 300)
+        logging.info(f"Market news loop: Waiting {wait_time} seconds until next cycle")
         await asyncio.sleep(wait_time)
 
 
@@ -3073,9 +3464,31 @@ async def gardener_background_task():
 # Event system functions
 async def send_event_start_embed(guild: discord.Guild, event: dict, duration_minutes: int):
     """Send event start embed to #events channel."""
+    # Try exact match first
     events_channel = discord.utils.get(guild.text_channels, name="events")
+    
+    # If not found, try case-insensitive search
     if not events_channel:
-        return
+        for channel in guild.text_channels:
+            if channel.name.lower() == "events":
+                events_channel = channel
+                break
+    
+    # If still not found, try to find any channel with "event" in the name
+    if not events_channel:
+        for channel in guild.text_channels:
+            if "event" in channel.name.lower():
+                events_channel = channel
+                break
+    
+    if not events_channel:
+        print(f"ERROR: #events channel not found in {guild.name}. Available text channels: {[ch.name for ch in guild.text_channels]}")
+        return False
+    
+    # Check if bot has permission to send messages in the channel
+    if not events_channel.permissions_for(guild.me).send_messages:
+        print(f"ERROR: Bot does not have permission to send messages in #events channel in {guild.name}")
+        return False
     
     event_info = None
     if event["event_type"] == "hourly":
@@ -3084,7 +3497,8 @@ async def send_event_start_embed(guild: discord.Guild, event: dict, duration_min
         event_info = next((e for e in DAILY_EVENTS if e["id"] == event["event_id"]), None)
     
     if not event_info:
-        return
+        print(f"ERROR: Event info not found for event_id={event.get('event_id')}, event_type={event.get('event_type')} in {guild.name}")
+        return False
     
     event_name = event_info['name'].rstrip('!')
     embed = discord.Embed(
@@ -3114,10 +3528,31 @@ async def send_event_start_embed(guild: discord.Guild, event: dict, duration_min
 
 async def send_event_end_embed(guild: discord.Guild, event: dict):
     """Send event end embed to #events channel."""
+    # Try exact match first
     events_channel = discord.utils.get(guild.text_channels, name="events")
+    
+    # If not found, try case-insensitive search
     if not events_channel:
-        print(f"#events channel not found in {guild.name}")
-        return
+        for channel in guild.text_channels:
+            if channel.name.lower() == "events":
+                events_channel = channel
+                break
+    
+    # If still not found, try to find any channel with "event" in the name
+    if not events_channel:
+        for channel in guild.text_channels:
+            if "event" in channel.name.lower():
+                events_channel = channel
+                break
+    
+    if not events_channel:
+        print(f"ERROR: #events channel not found in {guild.name}. Available text channels: {[ch.name for ch in guild.text_channels]}")
+        return False
+    
+    # Check if bot has permission to send messages in the channel
+    if not events_channel.permissions_for(guild.me).send_messages:
+        print(f"ERROR: Bot does not have permission to send messages in #events channel in {guild.name}")
+        return False
     
     # Get the actual event ID from effects (not the database event_id)
     event_type_id = event.get("effects", {}).get("event_id")
@@ -3149,23 +3584,33 @@ async def send_event_end_embed(guild: discord.Guild, event: dict):
 
 
 async def hourly_event_check():
-    """Background task to trigger hourly events at the start of each hour with 50% chance."""
+    """Background task to trigger hourly events at configurable intervals with 50% chance."""
     await bot.wait_until_ready()
     
-    # Wait until the start of the next hour
-    now = datetime.datetime.now()
-    next_hour = (now.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1))
-    wait_seconds = (next_hour - now).total_seconds()
-    await asyncio.sleep(wait_seconds)
+    # Wait a short initial delay before first check
+    await asyncio.sleep(5)
     
     while not bot.is_closed():
         try:
+            # CRITICAL: Clean up expired events BEFORE checking for existing events
+            # This prevents stuck/expired events from blocking new events
+            clear_expired_events()
+            
             # Check if there's already an active hourly event
             existing_hourly = get_active_event_by_type("hourly")
             if existing_hourly:
-                # Event already active, skip this hour
-                print(f"Skipping hourly event - event already active: {existing_hourly['event_name']}")
-            else:
+                # Verify the event is actually still valid (double-check)
+                current_time = time.time()
+                if existing_hourly.get("end_time", 0) > current_time:
+                    # Event already active and valid, skip this hour
+                    print(f"Skipping hourly event - event already active: {existing_hourly['event_name']} (ends at {existing_hourly.get('end_time', 0)})")
+                else:
+                    # Event found but expired, clean it up and proceed
+                    print(f"Found expired hourly event: {existing_hourly['event_name']}, cleaning up and proceeding")
+                    clear_event(existing_hourly.get("event_id", ""))
+                    existing_hourly = None
+            
+            if not existing_hourly:
                 # 50% chance to trigger an event
                 if random.random() < 0.5:
                     # Select random hourly event
@@ -3245,41 +3690,46 @@ async def hourly_event_check():
                     clear_expired_events()  # Double-check cleanup
                     print(f"Ended hourly event: {event_info['name']} and cleared from database")
             
-            # Wait until the start of the next hour
-            now = datetime.datetime.now()
-            next_hour = (now.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1))
-            wait_seconds = (next_hour - now).total_seconds()
-            await asyncio.sleep(wait_seconds)
+            # Wait for the configured interval before next check
+            print(f"Hourly event check completed. Waiting {HOURLY_EVENT_INTERVAL} seconds until next check...")
+            await asyncio.sleep(HOURLY_EVENT_INTERVAL)
             
         except Exception as e:
             print(f"Error in hourly_event_check: {e}")
             import traceback
             traceback.print_exc()
-            # Wait until next hour on error
-            now = datetime.datetime.now()
-            next_hour = (now.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1))
-            wait_seconds = (next_hour - now).total_seconds()
-            await asyncio.sleep(wait_seconds)
+            # Wait for the configured interval on error
+            await asyncio.sleep(HOURLY_EVENT_INTERVAL)
 
 
 async def daily_event_check():
-    """Background task to trigger daily events once per day with 10% chance."""
+    """Background task to trigger daily events at configurable intervals with 10% chance."""
     await bot.wait_until_ready()
     
-    # Wait until midnight
-    now = datetime.datetime.now()
-    next_midnight = (now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1))
-    wait_seconds = (next_midnight - now).total_seconds()
-    await asyncio.sleep(wait_seconds)
+    # Wait a short initial delay before first check
+    await asyncio.sleep(10)
     
     while not bot.is_closed():
         try:
+            # CRITICAL: Clean up expired events BEFORE checking for existing events
+            # This prevents stuck/expired events from blocking new events
+            clear_expired_events()
+            
             # Check if there's already an active daily event
             existing_daily = get_active_event_by_type("daily")
             if existing_daily:
-                # Event already active, skip this day
-                print(f"Skipping daily event - event already active: {existing_daily['event_name']}")
-            else:
+                # Verify the event is actually still valid (double-check)
+                current_time = time.time()
+                if existing_daily.get("end_time", 0) > current_time:
+                    # Event already active and valid, skip this day
+                    print(f"Skipping daily event - event already active: {existing_daily['event_name']} (ends at {existing_daily.get('end_time', 0)})")
+                else:
+                    # Event found but expired, clean it up and proceed
+                    print(f"Found expired daily event: {existing_daily['event_name']}, cleaning up and proceeding")
+                    clear_event(existing_daily.get("event_id", ""))
+                    existing_daily = None
+            
+            if not existing_daily:
                 # 10% chance to trigger an event
                 if random.random() < 0.10:
                     # Select random daily event
@@ -3352,17 +3802,16 @@ async def daily_event_check():
                     clear_expired_events()
                     print(f"Ended daily event: {event_info['name']} and cleared from database")
             
-            # Wait until next midnight
-            now = datetime.datetime.now()
-            next_midnight = (now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1))
-            wait_seconds = (next_midnight - now).total_seconds()
-            await asyncio.sleep(wait_seconds)
+            # Wait for the configured interval before next check
+            print(f"Daily event check completed. Waiting {DAILY_EVENT_INTERVAL} seconds until next check...")
+            await asyncio.sleep(DAILY_EVENT_INTERVAL)
             
         except Exception as e:
             print(f"Error in daily_event_check: {e}")
             import traceback
             traceback.print_exc()
-            await asyncio.sleep(30)
+            # Wait for the configured interval on error
+            await asyncio.sleep(DAILY_EVENT_INTERVAL)
 
 
 async def event_cleanup_task():
@@ -3945,7 +4394,6 @@ async def russian(
         else:
             #clean up orphaned ref
             del user_active_games[user_id]
-        return
 
 
     if bullets < 1 or bullets > 5:
@@ -4098,7 +4546,9 @@ def start_discord_bot():
         print(f"Token length: {len(token) if token else 'None'}")
         print("About to call bot.run()...")
         
-        bot.run(token, log_handler=handler, log_level=logging.DEBUG)
+        # Use INFO level for discord.py to reduce terminal clutter
+        # All logs still go to discord.log file via the configured handler
+        bot.run(token, log_handler=None, log_level=logging.INFO)
     except Exception as e:
         print(f"Discord bot error: {e}")
         import traceback
