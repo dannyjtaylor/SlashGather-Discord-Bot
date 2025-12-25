@@ -1633,6 +1633,7 @@ async def harvest(interaction: discord.Interaction):
             ripeness_list = LEVEL_OF_RIPENESS_FLOWERS
         else:
             ripeness_list = []
+            
         #calcualte value w/ ripeness
         if ripeness_list:
             weights = [r["chance"] for r in ripeness_list]
