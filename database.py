@@ -347,7 +347,6 @@ def set_user_basket_upgrade(user_id: int, upgrade_type: str, tier: int) -> None:
         upsert=True,
     )
 
-
 # Cryptocurrency functions
 def get_user_crypto_holdings(user_id: int) -> Dict[str, float]:
     """Get user's cryptocurrency holdings. Returns dict with keys: RTC, TER, CNY."""
