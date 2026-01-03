@@ -254,6 +254,7 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
     if target_role_name == previous_role_name:
         return previous_role_name, None
 
+
     # Remove the old planter role if they had one
     if previous_role_name:
         old_role = discord.utils.get(guild.roles, name=previous_role_name)
