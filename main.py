@@ -76,6 +76,8 @@ from database import (
     add_gardener,
     update_gardener_stats,
     get_all_users_with_gardeners,
+    get_user_gpus,
+    add_gpu,
     set_user_notification_channel,
     get_user_notification_channel,
     get_user_stock_holdings,
@@ -88,6 +90,10 @@ from database import (
     clear_expired_events,
     get_user_gather_data,
     perform_gather_update,
+    reset_user_cooldowns,
+    wipe_user_money,
+    wipe_user_plants,
+    wipe_user_all,
 )
 
 try:
@@ -136,6 +142,20 @@ DAILY_EVENT_INTERVAL = 86400 # Seconds between daily event checks (default: 8640
 
 # Gardener prices
 GARDENER_PRICES = [1000, 10000, 50000, 100000, 250000]
+
+# GPU shop definitions
+GPU_SHOP = [
+    {"name": "NATIVIDIA RooTX 3050", "percent_increase": 10, "seconds_increase": 3, "price": 600},
+    {"name": "NATIVIDIA RooTX 2060", "percent_increase": 14, "seconds_increase": 4, "price": 1500},
+    {"name": "Chlorophell Barc 580", "percent_increase": 20, "seconds_increase": 5, "price": 4000},
+    {"name": "NATIVIDIA RooTX 3070", "percent_increase": 30, "seconds_increase": 8, "price": 10000},
+    {"name": "RayMD RX 5700XT", "percent_increase": 60, "seconds_increase": 12, "price": 50000},
+    {"name": "NATIVIDIA GrowTX 1080-Ti", "percent_increase": 100, "seconds_increase": 20, "price": 110000},
+    {"name": "RayMD RX 9060-XT", "percent_increase": 180, "seconds_increase": 30, "price": 200000},
+    {"name": "NATIVIDIA RooTX 4070 Ti Super", "percent_increase": 300, "seconds_increase": 45, "price": 400000},
+    {"name": "NATIVIDIA RooTX 4090", "percent_increase": 500, "seconds_increase": 60, "price": 1000000},
+    {"name": "NATIVIDIA RooTX 5090", "percent_increase": 1554, "seconds_increase": 100, "price": 2000000},
+]
 
 # BASKET UPGRADE PATHS
 UPGRADE_PRICES = [500, 1500, 4000, 10000, 25000, 60000, 150000, 350000, 700000, 1000000]
@@ -1591,7 +1611,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.2.2 :3"
+            name="running /gather on V0.2.3 :3"
         )
     )
     try:
@@ -2152,7 +2172,7 @@ class HireView(discord.ui.View):
         
         embed = discord.Embed(
             title=f"🌱 Gardener #{slot_id}",
-            description=f"💰 Your Balance: **${balance:,.2f}**\n\nHire gardeners to automatically gather items for you! Each gardener has a 20% chance to gather every 20 seconds.",
+            description=f"💰 Your Balance: **${balance:,.2f}**\n\nHire gardeners to automatically gather items for you! Each gardener has a 5% chance to gather every minute.",
             color=discord.Color.green()
         )
         
@@ -2310,6 +2330,165 @@ async def hire(interaction: discord.Interaction):
     
     view = HireView(user_id)
     embed = view.create_embed(0)  # Start on page 0 (Gardener #1)
+    view.update_buttons()
+    
+    await interaction.followup.send(embed=embed, view=view)
+
+
+# GPU View with pagination
+class GpuView(discord.ui.View):
+    def __init__(self, user_id: int, timeout=300):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.current_page = 0  # 0-9 for GPUs 1-10
+        self.total_pages = 10
+    
+    def create_embed(self, page: int) -> discord.Embed:
+        """Create the embed for a specific GPU page."""
+        gpu_info = GPU_SHOP[page]
+        gpu_name = gpu_info["name"]
+        balance = get_user_balance(self.user_id)
+        user_gpus = get_user_gpus(self.user_id)
+        
+        # Check if user owns this GPU
+        already_owned = gpu_name in user_gpus
+        
+        embed = discord.Embed(
+            title=f"🖥️ {gpu_name}",
+            description=f"💰 Your Balance: **${balance:,.2f}**\n\nBuy GPUs to boost your mining! You can own one of each GPU.",
+            color=discord.Color.blue()
+        )
+        
+        embed.add_field(
+            name="Mining Boost",
+            value=f"**+{gpu_info['percent_increase']}%** amount gained",
+            inline=True
+        )
+        embed.add_field(
+            name="Time Boost",
+            value=f"**+{gpu_info['seconds_increase']}** seconds",
+            inline=True
+        )
+        embed.add_field(
+            name="Price",
+            value=f"**${gpu_info['price']:,.2f}** {'✅' if balance >= gpu_info['price'] else '❌'}",
+            inline=True
+        )
+        embed.add_field(
+            name="Status",
+            value="**OWNED** ✅" if already_owned else "**Available**",
+            inline=False
+        )
+        
+        embed.set_footer(text=f"Page {page + 1} of {self.total_pages}")
+        
+        return embed
+    
+    def update_buttons(self):
+        """Update button states based on current page and user balance."""
+        # Update navigation buttons
+        self.previous_button.disabled = self.current_page == 0
+        self.next_button.disabled = self.current_page >= self.total_pages - 1
+        
+        # Update buy button
+        gpu_info = GPU_SHOP[self.current_page]
+        gpu_name = gpu_info["name"]
+        balance = get_user_balance(self.user_id)
+        price = gpu_info["price"]
+        user_gpus = get_user_gpus(self.user_id)
+        already_owned = gpu_name in user_gpus
+        
+        if already_owned:
+            # Already owned
+            self.buy_button.disabled = True
+            self.buy_button.label = "Already Owned"
+            self.buy_button.style = discord.ButtonStyle.secondary
+        elif balance < price:
+            # Can't afford
+            self.buy_button.disabled = True
+            self.buy_button.label = f"Buy (Need ${price:,.0f})"
+            self.buy_button.style = discord.ButtonStyle.secondary
+        else:
+            # Can buy
+            self.buy_button.disabled = False
+            self.buy_button.label = f"Buy for ${price:,.0f}"
+            self.buy_button.style = discord.ButtonStyle.success
+    
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, row=0)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ This is not your GPU shop!", ephemeral=True)
+            return
+        
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            embed = self.create_embed(self.current_page)
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+    
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary, row=0)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ This is not your GPU shop!", ephemeral=True)
+            return
+        
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            self.update_buttons()
+            embed = self.create_embed(self.current_page)
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+    
+    @discord.ui.button(label="Buy", style=discord.ButtonStyle.success, row=1)
+    async def buy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ This is not your GPU shop!", ephemeral=True)
+            return
+        
+        gpu_info = GPU_SHOP[self.current_page]
+        gpu_name = gpu_info["name"]
+        price = gpu_info["price"]
+        balance = get_user_balance(self.user_id)
+        user_gpus = get_user_gpus(self.user_id)
+        
+        # Check if already owned
+        if gpu_name in user_gpus:
+            await interaction.response.send_message(f"❌ You already own **{gpu_name}**!", ephemeral=True)
+            return
+        
+        if balance < price:
+            await interaction.response.send_message(
+                f"❌ You don't have enough money! You need **${price:,.2f}** but only have **${balance:,.2f}**.",
+                ephemeral=True
+            )
+            return
+        
+        # Buy the GPU
+        success = add_gpu(self.user_id, gpu_name, price)
+        if not success:
+            await interaction.response.send_message("❌ Failed to buy GPU. Please try again.", ephemeral=True)
+            return
+        
+        # Send confirmation and update embed
+        await interaction.response.send_message(f"✅ Purchased **{gpu_name}** for ${price:,.2f}! It will boost your mining!", ephemeral=True)
+        
+        embed = self.create_embed(self.current_page)
+        self.update_buttons()
+        await interaction.message.edit(embed=embed, view=self)
+
+
+# GPU command
+@bot.tree.command(name="gpu", description="Buy GPUs to boost your cryptocurrency mining!")
+async def gpu(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=False)
+    
+    user_id = interaction.user.id
+    
+    view = GpuView(user_id)
+    embed = view.create_embed(0)  # Start on page 0 (GPU 1)
     view.update_buttons()
     
     await interaction.followup.send(embed=embed, view=view)
@@ -2529,6 +2708,171 @@ async def endevent(interaction: discord.Interaction, event_type: str):
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
     print(f"Admin {interaction.user.name} ended {event_type} event: {event_info['name']}")
+
+
+# Reset command - Admin only, #hidden channel
+@bot.tree.command(name="reset", description="[ADMIN] Reset all cooldowns for /gather, /harvest, and /mine")
+@app_commands.default_permissions(administrator=True)
+async def reset(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
+    # Check if user has administrator permissions
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.followup.send("❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+        return
+    
+    # Check if command is being used in the #hidden channel
+    if not hasattr(interaction.channel, 'name') or interaction.channel.name != "hidden":
+        await interaction.followup.send(
+            f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
+            ephemeral=True
+        )
+        return
+    
+    # Get all members in the guild
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send("❌ **Error**: Could not get guild information.", ephemeral=True)
+        return
+    
+    members = guild.members
+    reset_count = 0
+    
+    # Reset cooldowns for all members
+    for member in members:
+        if not member.bot:  # Skip bots
+            reset_user_cooldowns(member.id)
+            reset_count += 1
+    
+    embed = discord.Embed(
+        title="✅ Cooldowns Reset",
+        color=discord.Color.green()
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+    #print(f"Admin {interaction.user.name} reset cooldowns for {reset_count} users")
+
+
+# Wipe command - Admin only, #hidden channel
+@bot.tree.command(name="wipe", description="[ADMIN] Wipe user data (money or all)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.choices(type=[
+    app_commands.Choice(name="money", value="money"),
+    app_commands.Choice(name="plants", value="plants"),
+    app_commands.Choice(name="all", value="all")
+])
+async def wipe(interaction: discord.Interaction, type: str):
+    await interaction.response.defer(ephemeral=True)
+    
+    # Check if user has administrator permissions
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.followup.send("❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+        return
+    
+    # Check if command is being used in the #hidden channel
+    if not hasattr(interaction.channel, 'name') or interaction.channel.name != "hidden":
+        await interaction.followup.send(
+            f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
+            ephemeral=True
+        )
+        return
+    
+    # Get all members in the guild
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send("❌ **Error**: Could not get guild information.", ephemeral=True)
+        return
+    
+    members = guild.members
+    wiped_count = 0
+    
+    if type == "money":
+        # Reset money to default, keep upgrades
+        for member in members:
+            if not member.bot:  # Skip bots
+                wipe_user_money(member.id)
+                wiped_count += 1
+        
+        embed = discord.Embed(
+            title="✅ Money Wiped",
+            description=f"Reset money to default for **{wiped_count}** users in this server.",
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="What was reset", value="• Money (balance)", inline=False)
+        embed.add_field(name="What was kept", value="• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Gardeners\n• GPUs\n• Plants", inline=False)
+    elif type == "plants":
+        # Reset plants and update ranks
+        for member in members:
+            if not member.bot:  # Skip bots
+                wipe_user_plants(member.id)
+                # Update their rank to PLANTER I
+                try:
+                    await assign_gatherer_role(member, guild)
+                except Exception as e:
+                    print(f"Error updating role for user {member.id}: {e}")
+                wiped_count += 1
+        
+        embed = discord.Embed(
+            title="✅ Plants Wiped",
+            description=f"Reset collected plants for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank.",
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="What was reset", value="• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)", inline=False)
+        embed.add_field(name="What was kept", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Gardeners\n• GPUs", inline=False)
+    else:  # type == "all"
+        # Reset money, all upgrades, and plants
+        for member in members:
+            if not member.bot:  # Skip bots
+                wipe_user_all(member.id)
+                # Update their rank to PLANTER I
+                try:
+                    await assign_gatherer_role(member, guild)
+                except Exception as e:
+                    print(f"Error updating role for user {member.id}: {e}")
+                wiped_count += 1
+        
+        embed = discord.Embed(
+            title="✅ All Data Wiped",
+            description=f"Reset money, all upgrades, and plants for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank.",
+            color=discord.Color.red()
+        )
+        embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Gardeners\n• GPUs\n• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)", inline=False)
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
+    print(f"Admin {interaction.user.name} wiped {type} data for {wiped_count} users")
+
+
+# Billion command - Admin only, #hidden channel
+@bot.tree.command(name="billion", description="[ADMIN] Give yourself 1 billion dollars")
+@app_commands.default_permissions(administrator=True)
+async def billion(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
+    # Check if user has administrator permissions
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.followup.send("❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+        return
+    
+    # Check if command is being used in the #hidden channel
+    if not hasattr(interaction.channel, 'name') or interaction.channel.name != "hidden":
+        await interaction.followup.send(
+            f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
+            ephemeral=True
+        )
+        return
+    
+    user_id = interaction.user.id
+    billion = 1000000000.0
+    
+    # Set balance to 1 billion
+    update_user_balance(user_id, billion)
+    
+    embed = discord.Embed(
+        title="✅ Balance Updated",
+        description=f"Your balance has been set to **${billion:,.2f}**!",
+        color=discord.Color.green()
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+    print(f"Admin {interaction.user.name} used /billion to set balance to ${billion:,.2f}")
 
 
 # Pay command
@@ -2815,7 +3159,7 @@ async def update_all_leaderboards():
 STOCK_TICKERS = [
     {"name": "Maizy's", "symbol": "M", "base_price": 50.0, "max_shares": 10000},
     {"name": "Meadow", "symbol": "MEDO", "base_price": 75.0, "max_shares": 20000},
-    {"name": "IVBM", "symbol": "IVBM", "base_price": 100.0, "max_shares": 15000},
+    {"name": "IVM", "symbol": "IVM", "base_price": 100.0, "max_shares": 15000},
     {"name": "CisGrow", "symbol": "CSGO", "base_price": 60.0, "max_shares": 12000},
     {"name": "Sowny", "symbol": "SWNY", "base_price": 90.0, "max_shares": 11000},
     {"name": "General Mowers", "symbol": "GM", "base_price": 45.0, "max_shares": 20000},
@@ -3059,7 +3403,9 @@ async def update_all_marketboards():
                 await update_leaderboard_message(guild, "money")
                 await asyncio.sleep(1)  # Small delay between updates
         except Exception as e:
+            import traceback
             print(f"Error in marketboard update task: {e}")
+            traceback.print_exc()
         
         # Wait 60 seconds before next update
         await asyncio.sleep(60)
@@ -3392,7 +3738,7 @@ async def update_all_coinbase():
 
 
 async def gardener_background_task():
-    """Background task to check gardener actions every 20 seconds (testing mode)."""
+    """Background task to check gardener actions every minute."""
     await bot.wait_until_ready()
     
     # Wait a bit for bot to fully initialize
@@ -3459,8 +3805,8 @@ async def gardener_background_task():
         except Exception as e:
             print(f"Error in gardener background task: {e}")
         
-        # Wait 20 seconds before next check (testing mode)
-        await asyncio.sleep(20)
+        # Wait 60 seconds (1 minute) before next check
+        await asyncio.sleep(60)
 
 
 # Event system functions
@@ -3580,7 +3926,7 @@ async def send_event_end_embed(guild: discord.Guild, event: dict):
     )
     
     try:
-        await events_channel.send("@here", embed=embed)
+        await events_channel.send(embed=embed)
     except Exception as e:
         print(f"Error sending event end embed in {guild.name}: {e}")
 
@@ -3833,7 +4179,7 @@ async def event_cleanup_task():
 
 # Mining View with button
 class MiningView(discord.ui.View):
-    def __init__(self, user_id: int, message=None, timeout=60):
+    def __init__(self, user_id: int, message=None, timeout=60, gpu_percent_boost=0, gpu_seconds_boost=0, gpus_used=None):
         super().__init__(timeout=timeout)
         self.user_id = user_id
         self.message = message  # Store message reference for timeout updates
@@ -3842,6 +4188,9 @@ class MiningView(discord.ui.View):
         self.session_mined = {}  # Track coins mined in this session: {symbol: amount}
         self.session_value = 0.0  # Total value mined in this session
         self.timed_out = False  # Track if session has timed out
+        self.gpu_percent_boost = gpu_percent_boost  # Total percent increase from GPUs
+        self.gpu_seconds_boost = gpu_seconds_boost  # Total seconds increase from GPUs
+        self.gpus_used = gpus_used if gpus_used else []  # List of GPU names being used
     
     @discord.ui.button(label="Mine", style=discord.ButtonStyle.success, emoji="⛏️")
     async def mine_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3851,7 +4200,8 @@ class MiningView(discord.ui.View):
         
         # Check if session has timed out
         elapsed_time = time.time() - self.start_time
-        if elapsed_time >= 60 or self.timed_out:
+        max_time = 60 + self.gpu_seconds_boost
+        if elapsed_time >= max_time or self.timed_out:
             # Session has expired
             self.timed_out = True
             for item in self.children:
@@ -3879,7 +4229,11 @@ class MiningView(discord.ui.View):
         # Generate random integer from 75 to 125 (inclusive) representing thousandths
         # Divide by 10000 to get 4 decimal places (e.g., 75 = 0.0075, 125 = 0.0125)
         random_thousandths = random.randint(75, 125)
-        amount = round(random_thousandths / 10000, 4)
+        base_amount = round(random_thousandths / 10000, 4)
+        
+        # Apply GPU percent boost (e.g., 5% = 0.05, so multiply by 1.05)
+        percent_multiplier = 1.0 + (self.gpu_percent_boost / 100.0)
+        amount = round(base_amount * percent_multiplier, 4)
         
         # Add crypto to user's holdings
         update_user_crypto_holdings(interaction.user.id, symbol, amount)
@@ -3910,15 +4264,29 @@ class MiningView(discord.ui.View):
         
         # Calculate time remaining
         elapsed_time = time.time() - self.start_time
-        time_remaining = max(0, 60 - int(elapsed_time))
+        max_time = 60 + self.gpu_seconds_boost
+        time_remaining = max(0, max_time - int(elapsed_time))
+        
+        # Create GPU info text
+        gpu_text = ""
+        if self.gpus_used:
+            gpu_text = "\n".join(self.gpus_used)
         
         # Create success embed with cumulative results
+        max_time = 60 + self.gpu_seconds_boost
+        description_text = f"Click the button as many times as you can in {max_time} seconds!"
+        if self.gpu_percent_boost > 0:
+            description_text += f"\n💰 **GPU Boost: +{self.gpu_percent_boost}%**"
+        description_text += f"\n\n⏰ **Time Remaining: {time_remaining} seconds**"
+        
         success_embed = discord.Embed(
             title="⛏️ Mining Session",
-            description=f"Click the button as many times as you can in 60 seconds!\n\n⏰ **Time Remaining: {time_remaining} seconds**",
+            description=description_text,
             color=discord.Color.light_grey()
         )
         success_embed.add_field(name="This Session", value=f"Total Mines: **{self.total_mines}**\nSession Value: **${self.session_value:.2f}**", inline=True)
+        if gpu_text:
+            success_embed.add_field(name="GPUs Active", value=gpu_text, inline=False)
         if session_summary:
             success_embed.add_field(name="Session Mined", value=session_summary.strip(), inline=False)
         success_embed.add_field(name="Your Total Holdings", value=f"RTC: {holdings['RTC']:.4f}\nTER: {holdings['TER']:.4f}\nCNY: {holdings['CNY']:.4f}", inline=False)
@@ -3955,6 +4323,10 @@ class MiningView(discord.ui.View):
                 value=f"Total Mines: **{self.total_mines}**\nSession Value: **${self.session_value:.2f}**",
                 inline=False
             )
+            
+            # Add GPU info if GPUs were used
+            if self.gpus_used:
+                timeout_embed.add_field(name="GPUs Used", value="\n".join(self.gpus_used), inline=False)
             
             session_summary = ""
             for sym, amt in self.session_mined.items():
@@ -4016,15 +4388,42 @@ async def mine(interaction: discord.Interaction):
     # Set cooldown when session starts (not when it ends)
     update_user_last_mine_time(user_id, current_time)
     
+    # Get user's GPUs and calculate bonuses
+    user_gpus = get_user_gpus(user_id)
+    total_percent_boost = 0
+    total_seconds_boost = 0
+    gpus_used = []
+    
+    for gpu_name in user_gpus:
+        # Find GPU info in shop
+        gpu_info = next((gpu for gpu in GPU_SHOP if gpu["name"] == gpu_name), None)
+        if gpu_info:
+            total_percent_boost += gpu_info["percent_increase"]
+            total_seconds_boost += gpu_info["seconds_increase"]
+            gpus_used.append(gpu_name)
+    
     # Create mining embed with button
+    base_time = 60
+    total_time = base_time + total_seconds_boost
+    description_text = f"Click the **Mine** button below to mine cryptocurrency!\n\nYou have **{total_time} seconds** to click as many times as you can!"
+    if total_percent_boost > 0:
+        description_text += f"\n💰 **GPU Boost: +{total_percent_boost}%**"
+    if total_seconds_boost > 0:
+        description_text += f"\n⏱️ **Time Boost: +{total_seconds_boost} seconds**"
+    
     embed = discord.Embed(
         title="⛏️ Cryptocurrency Mining",
-        description="Click the **Mine** button below to mine cryptocurrency!\n\nYou have **60 seconds** to click as many times as you can!",
+        description=description_text,
         color=discord.Color.blue()
     )
+    
+    # Add GPU info if user has GPUs
+    if gpus_used:
+        embed.add_field(name="GPUs Active", value="\n".join(gpus_used), inline=False)
+    
     embed.set_footer(text="Each click mines a random amount (0.0075-0.0125) of a random cryptocurrency!")
     
-    view = MiningView(user_id, timeout=60)
+    view = MiningView(user_id, timeout=total_time, gpu_percent_boost=total_percent_boost, gpu_seconds_boost=total_seconds_boost, gpus_used=gpus_used)
     message = await interaction.followup.send(embed=embed, view=view)
     # Store message reference in view for timeout handling
     view.message = message
@@ -4216,7 +4615,7 @@ async def portfolio(interaction: discord.Interaction):
 @app_commands.choices(ticker=[
     app_commands.Choice(name="Maizy's (M)", value="M"),
     app_commands.Choice(name="Meadow (MEDO)", value="MEDO"),
-    app_commands.Choice(name="IVBM (IVBM)", value="IVBM"),
+    app_commands.Choice(name="IVM (IVM)", value="IVM"),
     app_commands.Choice(name="CisGrow (CSGO)", value="CSGO"),
     app_commands.Choice(name="Sowny (SWNY)", value="SWNY"),
     app_commands.Choice(name="General Mowers (GM)", value="GM"),

@@ -98,6 +98,7 @@ def _ensure_user_document(user_id: int) -> None:
             "CNY": 0.0
         },
         "gardeners": [],
+        "gpus": [],
         "notification_channel_id": None
     }
     users.update_one(
@@ -501,6 +502,47 @@ def get_all_users_with_gardeners() -> list[tuple[int, list[Dict]]]:
     return results
 
 
+# GPU functions
+def get_user_gpus(user_id: int) -> list[str]:
+    """Get user's GPUs. Returns list of GPU names (allows duplicates for stacking)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"gpus": 1})
+    if not doc:
+        return []
+    gpus = doc.get("gpus", [])
+    return gpus if isinstance(gpus, list) else []
+
+
+def add_gpu(user_id: int, gpu_name: str, price: float) -> bool:
+    """Add a GPU to user's collection and deduct money. Returns True if successful. Users can only have 1 of each GPU."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    
+    # Check if user already has this GPU
+    existing_gpus = get_user_gpus(user_id)
+    if gpu_name in existing_gpus:
+        return False
+    
+    # Check if user has enough balance
+    current_balance = get_user_balance(user_id)
+    if current_balance < price:
+        return False
+    
+    # Deduct money
+    new_balance = current_balance - price
+    update_user_balance(user_id, new_balance)
+    
+    # Add GPU (only one of each type allowed)
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$push": {"gpus": str(gpu_name)}},
+        upsert=True,
+    )
+    
+    return True
+
+
 def set_user_notification_channel(user_id: int, channel_id: int) -> None:
     """Store user's preferred notification channel for gardener updates."""
     users = _get_users_collection()
@@ -698,3 +740,76 @@ def get_user_gather_data(user_id: int) -> Dict:
         },
         "last_gather_time": float(doc.get("last_gather_time", 0.0))
     }
+
+
+def reset_user_cooldowns(user_id: int) -> None:
+    """Reset all cooldowns for a user (gather, harvest, mine)."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {
+            "last_gather_time": 0.0,
+            "last_harvest_time": 0.0,
+            "last_mine_time": 0.0
+        }},
+        upsert=True,
+    )
+
+
+def wipe_user_money(user_id: int) -> None:
+    """Reset user's money to default balance, keeping all upgrades."""
+    users = _get_users_collection()
+    default_balance = _get_default_balance()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"balance": float(default_balance)}},
+        upsert=True,
+    )
+
+
+def wipe_user_plants(user_id: int) -> None:
+    """Reset user's collected plants (items, gather_stats, ripeness_stats)."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {
+            "items": {},
+            "ripeness_stats": {},
+            "gather_stats": {
+                "total_items": 0,
+                "categories": {},
+                "items": {}
+            },
+            "total_forage_count": 0
+        }},
+        upsert=True,
+    )
+
+
+def wipe_user_all(user_id: int) -> None:
+    """Reset user's money and all upgrades (basket, shoes, gloves, soil, gardeners, GPUs, plants)."""
+    users = _get_users_collection()
+    default_balance = _get_default_balance()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {
+            "balance": float(default_balance),
+            "basket_upgrades": {
+                "basket": 0,
+                "shoes": 0,
+                "gloves": 0,
+                "soil": 0
+            },
+            "gardeners": [],
+            "gpus": [],
+            "items": {},
+            "ripeness_stats": {},
+            "gather_stats": {
+                "total_items": 0,
+                "categories": {},
+                "items": {}
+            },
+            "total_forage_count": 0
+        }},
+        upsert=True,
+    )
