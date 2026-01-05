@@ -1566,6 +1566,12 @@ async def end_roulette_game(channel, game_id):
 async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
     await interaction.response.defer(ephemeral=False)
     user_id = interaction.user.id
+    
+    # Validate bet amount is positive
+    if bet <= 0:
+        await interaction.followup.send("❌ Bet amount must be greater than $0.00!", ephemeral=True)
+        return
+    
     current_balance = get_user_balance(user_id)
     if current_balance < bet:
         await interaction.followup.send(f"You do not have enough balance to bet **${bet:.2f}**, {interaction.user.name}.", ephemeral=False)
@@ -1611,7 +1617,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.2.5! :3"
+            name="running /gather on V0.2.5 :3"
         )
     )
     try:
@@ -2886,6 +2892,11 @@ async def pay(interaction: discord.Interaction, amount: float, user: discord.Mem
     # Can't pay yourself
     if sender_id == recipient_id:
         await interaction.followup.send("❌ You can't pay yourself!", ephemeral=True)
+        return
+    
+    # Can't pay the bot
+    if recipient_id == bot.user.id:
+        await interaction.followup.send("❌ You can't pay the bot!", ephemeral=True)
         return
     
     # Validate amount is positive
@@ -4812,8 +4823,8 @@ async def russian(
     if players < 1 or players > 6:
         await interaction.followup.send(f"Invalid number of players", ephemeral=True)
         return
-    if bet < 0:
-        await interaction.followup.send(f"Invalid bet", ephemeral=True)
+    if bet <= 0:
+        await interaction.followup.send(f"❌ Bet amount must be greater than $0.00!", ephemeral=True)
         return
 
     # get user balance
