@@ -2832,10 +2832,10 @@ async def wipe(interaction: discord.Interaction, type: str):
         
         embed = discord.Embed(
             title="✅ All Data Wiped",
-            description=f"Reset money, all upgrades, and plants for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank.",
+            description=f"Reset everything for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank.\n\n**Market has been reset** - all shares returned, making all stocks available at max capacity.",
             color=discord.Color.red()
         )
-        embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Gardeners\n• GPUs\n• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)", inline=False)
+        embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Gardeners\n• GPUs\n• Stock holdings (shares)\n• Crypto holdings (portfolio)\n• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)", inline=False)
     
     await interaction.followup.send(embed=embed, ephemeral=True)
     print(f"Admin {interaction.user.name} wiped {type} data for {wiped_count} users")

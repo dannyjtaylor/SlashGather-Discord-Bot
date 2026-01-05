@@ -787,7 +787,7 @@ def wipe_user_plants(user_id: int) -> None:
 
 
 def wipe_user_all(user_id: int) -> None:
-    """Reset user's money and all upgrades (basket, shoes, gloves, soil, gardeners, GPUs, plants)."""
+    """Reset user's money and all upgrades (basket, shoes, gloves, soil, gardeners, GPUs, plants, stocks, crypto)."""
     users = _get_users_collection()
     default_balance = _get_default_balance()
     users.update_one(
@@ -809,7 +809,13 @@ def wipe_user_all(user_id: int) -> None:
                 "categories": {},
                 "items": {}
             },
-            "total_forage_count": 0
+            "total_forage_count": 0,
+            "stock_holdings": {},
+            "crypto_holdings": {
+                "RTC": 0.0,
+                "TER": 0.0,
+                "CNY": 0.0
+            }
         }},
         upsert=True,
     )
