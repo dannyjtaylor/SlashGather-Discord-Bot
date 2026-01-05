@@ -4188,8 +4188,9 @@ class MiningView(discord.ui.View):
         self.session_mined = {}  # Track coins mined in this session: {symbol: amount}
         self.session_value = 0.0  # Total value mined in this session
         self.timed_out = False  # Track if session has timed out
-        self.gpu_percent_boost = gpu_percent_boost  # Total percent increase from GPUs
-        self.gpu_seconds_boost = gpu_seconds_boost  # Total seconds increase from GPUs
+        # Ensure GPU boosts are numbers (convert to float/int if needed)
+        self.gpu_percent_boost = float(gpu_percent_boost) if gpu_percent_boost else 0.0  # Total percent increase from GPUs
+        self.gpu_seconds_boost = int(gpu_seconds_boost) if gpu_seconds_boost else 0  # Total seconds increase from GPUs
         self.gpus_used = gpus_used if gpus_used else []  # List of GPU names being used
     
     @discord.ui.button(label="Mine", style=discord.ButtonStyle.success, emoji="⛏️")
@@ -4232,7 +4233,9 @@ class MiningView(discord.ui.View):
         base_amount = round(random_thousandths / 10000, 4)
         
         # Apply GPU percent boost (e.g., 5% = 0.05, so multiply by 1.05)
-        percent_multiplier = 1.0 + (self.gpu_percent_boost / 100.0)
+        # Ensure gpu_percent_boost is a number (convert to float if needed)
+        gpu_boost = float(self.gpu_percent_boost) if self.gpu_percent_boost else 0.0
+        percent_multiplier = 1.0 + (gpu_boost / 100.0)
         amount = round(base_amount * percent_multiplier, 4)
         
         # Add crypto to user's holdings
