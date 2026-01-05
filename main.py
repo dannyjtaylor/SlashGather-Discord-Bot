@@ -132,7 +132,7 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix='/', intents=intents)
 GATHER_COOLDOWN = 60 #(seconds)
-HARVEST_COOLDOWN = 60 * 60 #(an hour)
+HARVEST_COOLDOWN = 60 * 30 #(30 minutes)
 MINE_COOLDOWN = 5 * 60 #(5 minutes)
 
 # Event check intervals (for testing - adjust these values to change how often events are checked)
@@ -1611,7 +1611,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.2.3! :3"
+            name="running /gather on V0.2.4! :3"
         )
     )
     try:
