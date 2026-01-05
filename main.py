@@ -2888,6 +2888,11 @@ async def pay(interaction: discord.Interaction, amount: float, user: discord.Mem
         await interaction.followup.send("❌ You can't pay yourself!", ephemeral=True)
         return
     
+    # Validate amount is positive
+    if amount <= 0:
+        await interaction.followup.send("❌ Payment amount must be greater than $0.00!", ephemeral=True)
+        return
+    
     # Check sender balance
     sender_balance = get_user_balance(sender_id)
     if sender_balance < amount:
