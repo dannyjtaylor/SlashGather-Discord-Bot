@@ -80,6 +80,7 @@ from database import (
     get_all_users_with_gardeners,
     get_user_gpus,
     add_gpu,
+    get_all_users_with_gpus,
     set_user_notification_channel,
     get_user_notification_channel,
     get_user_stock_holdings,
@@ -159,7 +160,7 @@ GARDENER_CHANCES = {
 GPU_SHOP = [
     {"name": "NATIVIDIA RooTX 3050", "percent_increase": 10, "seconds_increase": 3, "price": 600},
     {"name": "NATIVIDIA RooTX 2060", "percent_increase": 14, "seconds_increase": 4, "price": 1500},
-    {"name": "Chlorophell Barc 580", "percent_increase": 20, "seconds_increase": 5, "price": 4000},
+    {"name": "Plantel Barc B580", "percent_increase": 20, "seconds_increase": 5, "price": 4000},
     {"name": "NATIVIDIA RooTX 3070", "percent_increase": 30, "seconds_increase": 8, "price": 10000},
     {"name": "RayMD RX 5700XT", "percent_increase": 60, "seconds_increase": 12, "price": 50000},
     {"name": "NATIVIDIA GrowTX 1080-Ti", "percent_increase": 100, "seconds_increase": 20, "price": 110000},
@@ -2025,7 +2026,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.2.6 :3"
+            name="running /gather on V0.2.6 :33"
         )
     )
     try:
@@ -2054,6 +2055,10 @@ async def on_ready():
     # Start the gardener background task
     bot.loop.create_task(gardener_background_task())
     print("Started automatic gardener gathering")
+    
+    # Start the GPU background task
+    bot.loop.create_task(gpu_background_task())
+    print("Started automatic GPU mining")
     
     # Start the event background tasks
     bot.loop.create_task(hourly_event_check())
@@ -3244,10 +3249,10 @@ async def wipe(interaction: discord.Interaction, type: str):
         
         embed = discord.Embed(
             title="✅ Money Wiped",
-            description=f"Reset money to default for **{wiped_count}** users in this server.",
+            description=f"Reset money to default for **{wiped_count}** users in this server.\n\n**Stock market has been reset** - all shares returned, making all stocks available at max capacity.",
             color=discord.Color.orange()
         )
-        embed.add_field(name="What was reset", value="• Money (balance)", inline=False)
+        embed.add_field(name="What was reset", value="• Money (balance)\n• Stock holdings (shares)\n• Crypto holdings (portfolio)", inline=False)
         embed.add_field(name="What was kept", value="• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Gardeners\n• GPUs\n• Plants", inline=False)
     elif type == "plants":
         # Reset plants and update ranks
@@ -4278,6 +4283,71 @@ async def gardener_background_task():
         await asyncio.sleep(60)
 
 
+async def gpu_background_task():
+    """Background task to check GPU mining actions every minute."""
+    await bot.wait_until_ready()
+    
+    # Wait a bit for bot to fully initialize
+    await asyncio.sleep(5)
+    
+    while not bot.is_closed():
+        try:
+            # Get all users with GPUs
+            users_with_gpus = get_all_users_with_gpus()
+            
+            for user_id, gpus in users_with_gpus:
+                # Process each GPU
+                for gpu_name in gpus:
+                    # Find GPU info in shop to get tier index and percent_increase
+                    gpu_info = None
+                    tier_index = 0
+                    for idx, gpu in enumerate(GPU_SHOP):
+                        if gpu["name"] == gpu_name:
+                            gpu_info = gpu
+                            tier_index = idx
+                            break
+                    
+                    if not gpu_info:
+                        continue  # Skip if GPU not found in shop
+                    
+                    # Calculate mining chance based on GPU tier
+                    # Formula: base_chance * (1 + tier_index * 0.5) where base_chance = 0.03 (3%)
+                    base_chance = 0.03
+                    mining_chance = base_chance * (1 + tier_index * 0.5)
+                    
+                    if random.random() < mining_chance:
+                        try:
+                            # Randomly select a coin to mine
+                            coin = random.choice(CRYPTO_COINS)
+                            symbol = coin["symbol"]
+                            
+                            # Random amount between 0.0075 and 0.0125 (4 decimal places)
+                            random_thousandths = random.randint(75, 125)
+                            base_amount = round(random_thousandths / 10000, 4)
+                            
+                            # Apply GPU percent boost
+                            percent_increase = gpu_info["percent_increase"]
+                            percent_multiplier = 1.0 + (percent_increase / 100.0)
+                            amount = round(base_amount * percent_multiplier, 4)
+                            
+                            # Add crypto to user's holdings
+                            update_user_crypto_holdings(user_id, symbol, amount)
+                            
+                            # Optional: Could send notification to #gathercoin channel
+                            # (Skipping for now to reduce spam, similar to plan note)
+                            
+                        except Exception as e:
+                            print(f"Error processing GPU mining for {gpu_name} of user {user_id}: {e}")
+            
+            # Small delay to avoid overwhelming the system
+            await asyncio.sleep(1)
+        except Exception as e:
+            print(f"Error in GPU background task: {e}")
+        
+        # Wait 60 seconds (1 minute) before next check
+        await asyncio.sleep(60)
+
+
 # Event system functions
 async def send_event_start_embed(guild: discord.Guild, event: dict, duration_minutes: int):
     """Send event start embed to #events channel."""
@@ -4662,7 +4732,7 @@ class MiningView(discord.ui.View):
         self.gpu_seconds_boost = int(gpu_seconds_boost) if gpu_seconds_boost else 0  # Total seconds increase from GPUs
         self.gpus_used = gpus_used if gpus_used else []  # List of GPU names being used
     
-    @discord.ui.button(label="Mine", style=discord.ButtonStyle.success, emoji="⛏️")
+    @discord.ui.button(label="MINE!", style=discord.ButtonStyle.success, emoji="⛏️")
     async def mine_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ This is not your mining session!", ephemeral=True)
@@ -4752,7 +4822,7 @@ class MiningView(discord.ui.View):
         description_text += f"\n\n⏰ **Time Remaining: {time_remaining} seconds**"
         
         success_embed = discord.Embed(
-            title="⛏️ Mining Session",
+            title="⛏️ /mine",
             description=description_text,
             color=discord.Color.light_grey()
         )
@@ -4836,10 +4906,17 @@ async def mine(interaction: discord.Interaction):
     # Check if user is on Russian Roulette elimination cooldown (dead)
     is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
     if is_roulette_cooldown:
-        minutes_left = roulette_time_left // 60
-        await interaction.followup.send(
-            f"Sorry, {interaction.user.name}, you're dead. You cannot mine for {minutes_left} minute(s)", ephemeral=True
-        )
+        if roulette_time_left < 60:
+            # Show seconds when less than 1 minute left
+            await interaction.followup.send(
+                f"Sorry, {interaction.user.name}, you're dead. You cannot mine for {roulette_time_left} second(s)", ephemeral=True
+            )
+        else:
+            # Show minutes when 1 minute or more left
+            minutes_left = roulette_time_left // 60
+            await interaction.followup.send(
+                f"Sorry, {interaction.user.name}, you're dead. You cannot mine for {minutes_left} minute(s)", ephemeral=True
+            )
         return
     
     # Check if command is being used in the correct channel
@@ -4904,7 +4981,11 @@ async def mine(interaction: discord.Interaction):
     if gpus_used:
         embed.add_field(name="GPUs Active", value="\n".join(gpus_used), inline=False)
     
-    embed.set_footer(text="Each click mines a random amount (0.0075-0.0125) of a random cryptocurrency!")
+    # Set footer text
+    footer_text = "Each click mines a random amount (0.0075-0.0125) of a random cryptocurrency!"
+    if total_percent_boost > 0:
+        footer_text += f" GPUs boost your mining by +{total_percent_boost}%!"
+    embed.set_footer(text=footer_text)
     
     view = MiningView(user_id, timeout=total_time, gpu_percent_boost=total_percent_boost, gpu_seconds_boost=total_seconds_boost, gpus_used=gpus_used)
     message = await interaction.followup.send(embed=embed, view=view)

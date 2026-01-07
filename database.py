@@ -520,6 +520,19 @@ def get_all_users_with_gardeners() -> list[tuple[int, list[Dict]]]:
     return results
 
 
+def get_all_users_with_gpus() -> list[tuple[int, list[str]]]:
+    """Get all users who have GPUs. Returns list of (user_id, gpus) tuples."""
+    users = _get_users_collection()
+    cursor = users.find({"gpus": {"$exists": True, "$ne": []}}, {"_id": 1, "gpus": 1})
+    results = []
+    for doc in cursor:
+        user_id = doc.get("_id")
+        gpus = doc.get("gpus", [])
+        if gpus and isinstance(gpus, list):
+            results.append((user_id, gpus))
+    return results
+
+
 # GPU functions
 def get_user_gpus(user_id: int) -> list[str]:
     """Get user's GPUs. Returns list of GPU names (allows duplicates for stacking)."""
@@ -775,12 +788,20 @@ def reset_user_cooldowns(user_id: int) -> None:
 
 
 def wipe_user_money(user_id: int) -> None:
-    """Reset user's money to default balance, keeping all upgrades."""
+    """Reset user's money to default balance, stock holdings, and crypto holdings, keeping all upgrades."""
     users = _get_users_collection()
     default_balance = _get_default_balance()
     users.update_one(
         {"_id": int(user_id)},
-        {"$set": {"balance": float(default_balance)}},
+        {"$set": {
+            "balance": float(default_balance),
+            "stock_holdings": {},
+            "crypto_holdings": {
+                "RTC": 0.0,
+                "TER": 0.0,
+                "CNY": 0.0
+            }
+        }},
         upsert=True,
     )
 
