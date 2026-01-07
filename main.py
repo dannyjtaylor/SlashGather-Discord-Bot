@@ -55,6 +55,8 @@ from database import (
     update_user_last_gather_time,
     get_user_last_harvest_time,
     update_user_last_harvest_time,
+    get_user_last_roulette_elimination_time,
+    update_user_last_roulette_elimination_time,
     increment_forage_count,
     get_forage_count,
     increment_gather_stats,
@@ -134,6 +136,7 @@ bot = commands.Bot(command_prefix='/', intents=intents)
 GATHER_COOLDOWN = 60 #(seconds)
 HARVEST_COOLDOWN = 60 * 30 #(30 minutes)
 MINE_COOLDOWN = 5 * 60 #(5 minutes)
+ROULETTE_ELIMINATION_COOLDOWN = 60 * 30 #(30 minutes)
 
 # Event check intervals (for testing - adjust these values to change how often events are checked)
 # In production, these should be: HOURLY_EVENT_INTERVAL = 3600, DAILY_EVENT_INTERVAL = 86400
@@ -142,6 +145,15 @@ DAILY_EVENT_INTERVAL = 86400 # Seconds between daily event checks (default: 8640
 
 # Gardener prices
 GARDENER_PRICES = [1000, 10000, 50000, 100000, 250000]
+
+# Gardener gather chances (by gardener ID: 1-5)
+GARDENER_CHANCES = {
+    1: 0.05,   # 5%
+    2: 0.08,   # 8%
+    3: 0.10,   # 10%
+    4: 0.15,   # 15%
+    5: 0.20    # 20%
+}
 
 # GPU shop definitions
 GPU_SHOP = [
@@ -212,17 +224,53 @@ SOIL_UPGRADES = [
     {"name": "The Best Soil In The Entire Universe", "gmo_boost": 0.10},
 ]
 
+# Money handling helper functions to fix floating point precision issues
+def normalize_money(amount: float) -> float:
+    """Round money to exactly 2 decimal places to avoid floating point precision issues."""
+    return round(amount, 2)
+
+def validate_money_precision(amount: float) -> bool:
+    """Check if a money amount has at most 2 decimal places (no fractional cents)."""
+    # Multiply by 100 to convert to cents, then check if it's an integer
+    cents = amount * 100
+    return abs(cents - round(cents)) < 0.0001  # Small epsilon for floating point comparison
+
+def can_afford_rounded(balance: float, amount: float) -> bool:
+    """Check if balance is sufficient for amount, accounting for floating point precision.
+    Allows spending entire balance (within 0.01 tolerance)."""
+    normalized_balance = normalize_money(balance)
+    normalized_amount = normalize_money(amount)
+    # Use small epsilon to allow spending entire balance despite floating point errors
+    return normalized_balance >= normalized_amount - 0.001
+
+def check_roulette_elimination_cooldown(user_id):
+    """Check if user is on Russian Roulette elimination cooldown. Returns (is_on_cooldown: bool, time_left_seconds: int)."""
+    roulette_elimination_time = get_user_last_roulette_elimination_time(user_id)
+    if roulette_elimination_time > 0:
+        current_time = time.time()
+        cooldown_end = roulette_elimination_time + ROULETTE_ELIMINATION_COOLDOWN
+        if current_time < cooldown_end:
+            time_left = int(cooldown_end - current_time)
+            return True, time_left
+    return False, 0
+
 def can_harvest(user_id):
     last_harvest_time = get_user_last_harvest_time(user_id)
     current_time = time.time()
+    
+    # Check Russian Roulette elimination cooldown first
+    is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+    if is_roulette_cooldown:
+        return False, roulette_time_left, True  # Return True as third param to indicate it's a roulette cooldown
+    
     if last_harvest_time == 0:
-        return True, 0
+        return True, 0, False
     cooldown_end = last_harvest_time + HARVEST_COOLDOWN
     if current_time >= cooldown_end:
-        return True, 0
+        return True, 0, False
     else:
         time_left = int(cooldown_end - current_time)
-        return False, time_left
+        return False, time_left, False
 
 def set_harvest_cooldown(user_id):
     update_user_last_harvest_time(user_id, time.time())
@@ -306,13 +354,18 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
 
 def can_gather(user_id, user_data=None, active_events=None):
     """
-    Check if user can gather. Returns (can_gather: bool, time_left: int).
+    Check if user can gather. Returns (can_gather: bool, time_left: int, is_roulette_cooldown: bool).
     
     Args:
         user_id: User ID
         user_data: Optional pre-fetched user data dict (from get_user_gather_data)
         active_events: Optional pre-fetched active events list
     """
+    # Check Russian Roulette elimination cooldown first
+    is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+    if is_roulette_cooldown:
+        return False, roulette_time_left, True  # Return True as third param to indicate it's a roulette cooldown
+    
     # Fetch data if not provided
     if user_data is None:
         user_data = get_user_gather_data(user_id)
@@ -325,7 +378,7 @@ def can_gather(user_id, user_data=None, active_events=None):
     #check if the user is on cooldown, return true/false and how much time left
     #right off the bat if the user is new they have no cooldown
     if last_gather_time == 0:
-        return True, 0
+        return True, 0, False
     
     # Get shoes upgrade cooldown reduction
     user_upgrades = user_data["basket_upgrades"]
@@ -353,10 +406,10 @@ def can_gather(user_id, user_data=None, active_events=None):
     cooldown_end = last_gather_time + effective_cooldown
     
     if current_time >= cooldown_end:
-        return True, 0
+        return True, 0, False
     else:
         time_left = int(cooldown_end - current_time)
-        return False, time_left
+        return False, time_left, False
 
 def set_cooldown(user_id):
     # set cooldown for user, p self explanatory
@@ -863,15 +916,24 @@ class RouletteGame:
 
     #calculate the total multiplier
     def calculate_total_multiplier(self, rounds_survived):
+        # Base multiplier from bullets (keep this as is for now, or remove if not needed)
         bullet_multiplier = 1.3 ** self.initial_bullets
-        round_multiplier = 1.3 ** rounds_survived
-        return bullet_multiplier * round_multiplier
+        # 1.6x per round survived
+        round_multiplier = 1.6 ** rounds_survived
+        # 1.6x per ADDITIONAL player (not counting yourself if solo)
+        # If solo (max_players == 1), additional_players = 0
+        # If 2 players, additional_players = 1, etc.
+        additional_players = max(0, len(self.players) - 1)
+        player_multiplier = 1.6 ** additional_players
+        return bullet_multiplier * round_multiplier * player_multiplier
 
     #if a player loses, get them out and add their money to the pot
     def eliminate(self, player_id):
         if player_id in self.players:
             self.players[player_id]["alive"] = False
             self.pot += self.players[player_id]["current_stake"]
+            # Set 30-minute cooldown on /gather and /harvest for eliminated player
+            update_user_last_roulette_elimination_time(player_id, time.time())
         #print the player out
         # print(f"{self.players[player_id]['name']} has been eliminated!")
 
@@ -881,7 +943,7 @@ class RouletteGame:
             self.players[player_id]["rounds_survived"] += 1
             # update stack w/ new multiplier
             multiplier = self.calculate_total_multiplier(self.players[player_id]["rounds_survived"])
-            self.players[player_id]["current_stake"] = self.bet_amount * multiplier
+            self.players[player_id]["current_stake"] = normalize_money(self.bet_amount * multiplier)
 
 
 
@@ -915,7 +977,10 @@ async def start_roulette_game(channel, game_id):
                 if user_active_games[player_id] == game_id:
                     # Refund the player
                     user_balance = get_user_balance(player_id)
-                    update_user_balance(player_id, user_balance + game.bet_amount)
+                    user_balance = normalize_money(user_balance)
+                    refund_amount = normalize_money(game.bet_amount)
+                    new_balance = normalize_money(user_balance + refund_amount)
+                    update_user_balance(player_id, new_balance)
                     del user_active_games[player_id]
             await channel.send("❌ **Error**: Game could not start because there are no players. All bets have been refunded.")
             return
@@ -929,7 +994,7 @@ async def start_roulette_game(channel, game_id):
         #start message
         # Ensure pot is set (should already be set by button handler, but set it here as fallback)
         if game.pot == 0:
-            game.pot = game.bet_amount * len(game.players)
+            game.pot = normalize_money(game.bet_amount * len(game.players))
         
         embed = discord.Embed(
             title = "🎲 RUSSIAN ROULETTE 🎲",
@@ -954,7 +1019,10 @@ async def start_roulette_game(channel, game_id):
             for player_id in game.players.keys():
                 try:
                     user_balance = get_user_balance(player_id)
-                    update_user_balance(player_id, user_balance + game.bet_amount)
+                    user_balance = normalize_money(user_balance)
+                    refund_amount = normalize_money(game.bet_amount)
+                    new_balance = normalize_money(user_balance + refund_amount)
+                    update_user_balance(player_id, new_balance)
                     if player_id in user_active_games:
                         del user_active_games[player_id]
                 except Exception as refund_error:
@@ -1227,6 +1295,15 @@ class RouletteJoinView(discord.ui.View):
             
         game = active_roulette_games[self.game_id]
         
+        # Check if user is on Russian Roulette elimination cooldown (dead)
+        is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+        if is_roulette_cooldown:
+            minutes_left = roulette_time_left // 60
+            await interaction.response.send_message(
+                f"Sorry, {interaction.user.name}, you're dead. You cannot join Russian Roulette for {minutes_left} minute(s)", ephemeral=True
+            )
+            return
+        
         # Check if user is already in this game
         if user_id in game.players:
             await interaction.response.send_message("❌ You're already in this game!", ephemeral=True)
@@ -1249,7 +1326,10 @@ class RouletteJoinView(discord.ui.View):
             
         # Check user balance
         user_balance = get_user_balance(user_id)
-        if user_balance < game.bet_amount:
+        user_balance = normalize_money(user_balance)
+        bet_amount = normalize_money(game.bet_amount)
+        
+        if not can_afford_rounded(user_balance, bet_amount):
             await interaction.response.send_message("❌ You don't have enough balance to join!", ephemeral=True)
             return
             
@@ -1258,7 +1338,8 @@ class RouletteJoinView(discord.ui.View):
         user_active_games[user_id] = self.game_id
         
         # Deduct bet
-        update_user_balance(user_id, user_balance - game.bet_amount)
+        new_balance = normalize_money(user_balance - bet_amount)
+        update_user_balance(user_id, new_balance)
         
         # Update the embed
         embed = interaction.message.embeds[0]
@@ -1295,7 +1376,7 @@ class RouletteJoinView(discord.ui.View):
             return
             
         # Set pot before starting (start_roulette_game will set game_started)
-        game.pot = game.bet_amount * len(game.players)
+        game.pot = normalize_money(game.bet_amount * len(game.players))
         
         try:
             await interaction.response.edit_message(content="🎮 **Game Started!**", view=None)
@@ -1309,13 +1390,69 @@ class RouletteJoinView(discord.ui.View):
         # Start the actual game (this will set game_started and handle errors)
         await start_roulette_game(interaction.channel, self.game_id)
     
+    @discord.ui.button(label="Cancel Game", style=discord.ButtonStyle.red, emoji="❌")
+    async def cancel_game(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Only host can cancel
+        if interaction.user.id != self.host_id:
+            await interaction.response.send_message("❌ Only the game host can cancel the game!", ephemeral=True)
+            return
+        
+        if self.game_id not in active_roulette_games:
+            await interaction.response.send_message("❌ Game no longer exists!", ephemeral=True)
+            return
+        
+        game = active_roulette_games[self.game_id]
+        
+        # Check if game already started
+        if game.game_started:
+            await interaction.response.send_message("❌ Cannot cancel a game that has already started!", ephemeral=True)
+            return
+        
+        # Refund all players
+        refunded_count = 0
+        for player_id in list(game.players.keys()):
+            try:
+                user_balance = get_user_balance(player_id)
+                user_balance = normalize_money(user_balance)
+                refund_amount = normalize_money(game.bet_amount)
+                new_balance = normalize_money(user_balance + refund_amount)
+                update_user_balance(player_id, new_balance)
+                refunded_count += 1
+            except Exception as e:
+                print(f"Error refunding player {player_id}: {e}")
+        
+        # Clean up game from all dictionaries
+        if self.game_id in active_roulette_games:
+            del active_roulette_games[self.game_id]
+        
+        for ch_id, tracked_game_id in list(active_roulette_channel_games.items()):
+            if tracked_game_id == self.game_id:
+                del active_roulette_channel_games[ch_id]
+        
+        for player_id in list(user_active_games.keys()):
+            if user_active_games[player_id] == self.game_id:
+                del user_active_games[player_id]
+        
+        # Update the message to show cancellation
+        embed = discord.Embed(
+            title="❌ Game Cancelled",
+            description=f"**{game.host_name}** cancelled the game.\n\nAll bets have been refunded.",
+            color=discord.Color.red()
+        )
+        embed.add_field(name="💰 Refunded", value=f"${game.bet_amount:.2f} to {refunded_count} player(s)", inline=True)
+        
+        try:
+            await interaction.response.edit_message(embed=embed, view=None)
+        except discord.errors.InteractionResponded:
+            await interaction.followup.edit_message(interaction.message.id, embed=embed, view=None)
+    
     async def on_timeout(self):
         # Auto-start the game after 5 minutes if host hasn't started it
         if self.game_id in active_roulette_games:
             game = active_roulette_games[self.game_id]
             if not game.game_started and len(game.players) >= 1:  # At least host is in game
                 # Set pot before starting (start_roulette_game will set game_started and validate)
-                game.pot = game.bet_amount * len(game.players)
+                game.pot = normalize_money(game.bet_amount * len(game.players))
                 
                 # Find the channel where this game is running
                 channel = None
@@ -1382,11 +1519,13 @@ class RouletteContinueView(discord.ui.View):
         
         # Cash out - player gets their stake back
         player = game.players[current_player_id]
-        winnings = player['current_stake']
+        winnings = normalize_money(player['current_stake'])
         
         # Add winnings to player balance
         current_balance = get_user_balance(current_player_id)
-        update_user_balance(current_player_id, current_balance + winnings)
+        current_balance = normalize_money(current_balance)
+        new_balance = normalize_money(current_balance + winnings)
+        update_user_balance(current_player_id, new_balance)
         
         # Remove from active games
         if current_player_id in user_active_games:
@@ -1401,7 +1540,7 @@ class RouletteContinueView(discord.ui.View):
             color=discord.Color.gold()
         )
         embed.add_field(name="💵 Winnings", value=f"${winnings:.2f}", inline=True)
-        embed.add_field(name="💸 Profit", value=f"${winnings - game.bet_amount:.2f}", inline=True)
+        embed.add_field(name="💸 Profit", value=f"${normalize_money(winnings - normalize_money(game.bet_amount)):.2f}", inline=True)
         embed.add_field(name="📈 Multiplier Achieved", value=f"{game.calculate_total_multiplier(player['rounds_survived']):.2f}x", inline=True)
         embed.add_field(name="🎯 Rounds Survived", value=f"{player['rounds_survived']}", inline=True)
         
@@ -1445,11 +1584,13 @@ class RouletteContinueView(discord.ui.View):
         
         # Cash out - player gets their stake back
         player = game.players[current_player_id]
-        winnings = player['current_stake']
+        winnings = normalize_money(player['current_stake'])
         
         # Add winnings to player balance
         current_balance = get_user_balance(current_player_id)
-        update_user_balance(current_player_id, current_balance + winnings)
+        current_balance = normalize_money(current_balance)
+        new_balance = normalize_money(current_balance + winnings)
+        update_user_balance(current_player_id, new_balance)
         
         # Remove from active games
         if current_player_id in user_active_games:
@@ -1464,7 +1605,7 @@ class RouletteContinueView(discord.ui.View):
             color=discord.Color.orange()
         )
         embed.add_field(name="💵 Winnings", value=f"${winnings:.2f}", inline=True)
-        embed.add_field(name="💸 Profit", value=f"${winnings - game.bet_amount:.2f}", inline=True)
+        embed.add_field(name="💸 Profit", value=f"${normalize_money(winnings - normalize_money(game.bet_amount)):.2f}", inline=True)
         embed.add_field(name="📈 Multiplier Achieved", value=f"{game.calculate_total_multiplier(player['rounds_survived']):.2f}x", inline=True)
         embed.add_field(name="🎯 Rounds Survived", value=f"{player['rounds_survived']}", inline=True)
         
@@ -1572,13 +1713,24 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
         await interaction.followup.send("❌ Bet amount must be greater than $0.00!", ephemeral=True)
         return
     
+    # Validate bet has at most 2 decimal places (no fractional cents)
+    if not validate_money_precision(bet):
+        await interaction.followup.send("❌ Bet amount must be in dollars and cents (maximum 2 decimal places)!", ephemeral=True)
+        return
+    
+    # Normalize bet to exactly 2 decimal places
+    bet = normalize_money(bet)
+    
     current_balance = get_user_balance(user_id)
-    if current_balance < bet:
+    current_balance = normalize_money(current_balance)
+    
+    if not can_afford_rounded(current_balance, bet):
         await interaction.followup.send(f"You do not have enough balance to bet **${bet:.2f}**, {interaction.user.name}.", ephemeral=False)
         return
     
     # Deduct bet first
-    update_user_balance(user_id, current_balance - bet)
+    new_balance_after_bet = normalize_money(current_balance - bet)
+    update_user_balance(user_id, new_balance_after_bet)
     
     # Flip the coin - randomly choose heads or tails (lowercase)
     coin_result = random.choice(["heads", "tails"])
@@ -1589,17 +1741,273 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
     # Calculate new balance
     if won:
         # They win - get double their bet back (bet was already deducted, so add 2*bet)
-        new_balance = current_balance - bet + (bet * 2)
+        new_balance = normalize_money(new_balance_after_bet + (bet * 2))
         update_user_balance(user_id, new_balance)
         message = f"You placed **${bet:.2f}** on **{choice}**!\nThe coin landed on **{coin_result}**! You doubled your bet!!\nYour new balance is **${new_balance:.2f}**."
     else:
         # They lose - bet was already deducted
-        new_balance = current_balance - bet
+        new_balance = new_balance_after_bet
         # Get the opposite choice for display (lowercase)
         opposite = "tails" if choice.lower() == "heads" else "heads"
         message = f"You placed **${bet:.2f}** on **{choice}**!\nOuch {interaction.user.name}, the coin landed on **{opposite}**. You lost **${bet:.2f}**.\nYour new balance is **${new_balance:.2f}**."
     
     await interaction.followup.send(message, ephemeral=False)
+
+
+# Slots game implementation
+def generate_slot_emoji():
+    """Generate a random slot emoji based on probability distribution."""
+    rand = random.random() * 100  # 0-100
+    
+    if rand < 1.0:  # 1% chance
+        return "💎"  # JACKPOT (diamond)
+    elif rand < 8.5:  # 7.5% chance (1% + 7.5% = 8.5%)
+        return "📊"  # BAR (bar chart emoji)
+    elif rand < 18.5:  # 10% chance (8.5% + 10% = 18.5%)
+        return "7️⃣"  # SEVEN
+    elif rand < 33.5:  # 15% chance (18.5% + 15% = 33.5%)
+        return "⭐"  # STAR
+    elif rand < 58.5:  # 25% chance (33.5% + 25% = 58.5%)
+        return "💰"  # MONEY BAG
+    else:  # Remaining ~41.5% split evenly among cherry, lemon, orange
+        return random.choice(["🍒", "🍋", "🍊"])  # 33% each of remaining
+
+
+def generate_slot_grid():
+    """Generate a 3x3 grid of slot emojis."""
+    return [
+        [generate_slot_emoji() for _ in range(3)] for _ in range(3)
+    ]
+
+
+def format_slot_grid(grid, locked_columns=None):
+    """Format the slot grid as a string, highlighting the middle row."""
+    if locked_columns is None:
+        locked_columns = set()
+    
+    # Format as a clean grid with consistent cell width
+    # Each cell is 5 characters wide (including borders)
+    # Top border
+    top_row = "┌─────┬─────┬─────┐\n"
+    
+    # First row - center emojis with consistent spacing
+    row1 = f"│ {grid[0][0]}  │ {grid[0][1]}  │ {grid[0][2]}  │\n"
+    row1_sep = "├─────┼─────┼─────┤\n"
+    
+    # Middle row (the winning row) - highlighted
+    row2 = f"│ {grid[1][0]}  │ {grid[1][1]}  │ {grid[1][2]}  │ ⬅️\n"
+    row2_sep = "├─────┼─────┼─────┤\n"
+    
+    # Bottom row
+    row3 = f"│ {grid[2][0]}  │ {grid[2][1]}  │ {grid[2][2]}  │\n"
+    bottom_row = "└─────┴─────┴─────┘"
+    
+    # Use code block for monospace font - this helps with alignment
+    return f"```\n{top_row}{row1}{row1_sep}{row2}{row2_sep}{row3}{bottom_row}\n```"
+
+
+def check_win(grid):
+    """Check if the middle row has matching emojis."""
+    middle_row = grid[1]  # Middle row (index 1)
+    return len(set(middle_row)) == 1  # All emojis are the same
+
+
+class SlotsView(discord.ui.View):
+    def __init__(self, user_id: int, bet: float, timeout: float = 300):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.bet = bet
+        self.grid = generate_slot_grid()
+        self.spinning = False
+        self.spun = False
+        self.locked_columns = set()  # Track which columns have stopped
+        self.final_grid = None  # Store final result
+        
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Only allow the user who started the game to interact."""
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ This is not your slots game!", ephemeral=True)
+            return False
+        return True
+    
+    def update_embed(self, is_spinning=False, status_text=""):
+        """Create or update the embed with current slot state."""
+        title = "🎰 SLOTS - SPINNING... 🎰" if is_spinning else "🎰 SLOTS 🎰"
+        embed = discord.Embed(
+            title=title,
+            description=f"Bet: **${self.bet:.2f}**\n\n{format_slot_grid(self.grid, self.locked_columns)}",
+            color=discord.Color.gold() if not is_spinning else discord.Color.orange()
+        )
+        
+        if not self.spun:
+            embed.set_footer(text="Click SPIN to play!")
+        elif is_spinning:
+            footer_text = status_text if status_text else "🎰 Spinning... 🎰"
+            embed.set_footer(text=footer_text)
+        else:
+            embed.set_footer(text="Spin complete!")
+        
+        return embed
+    
+    async def animate_spin(self, interaction: discord.Interaction):
+        """Animate the slots spinning with columns stopping one at a time."""
+        # Disable the button during spin
+        for item in self.children:
+            item.disabled = True
+        
+        # Generate final result first
+        self.final_grid = generate_slot_grid()
+        
+        # Update embed to show spinning state
+        embed = self.update_embed(is_spinning=True, status_text="🎰 All columns spinning... 🎰")
+        
+        # Respond to the button interaction by editing the message
+        await interaction.response.edit_message(embed=embed, view=self)
+        
+        # Phase 1: All columns spinning (fast)
+        for frame in range(8):
+            # Randomize all columns
+            for row in range(3):
+                for col in range(3):
+                    self.grid[row][col] = generate_slot_emoji()
+            
+            embed = self.update_embed(is_spinning=True, status_text="🎰 All columns spinning... 🎰")
+            await interaction.message.edit(embed=embed, view=self)
+        
+        # Lock column 1 - set it to final values
+        for row in range(3):
+            self.grid[row][0] = self.final_grid[row][0]
+        self.locked_columns.add(0)
+        
+        embed = self.update_embed(is_spinning=True, status_text="✅ Column 1 stopped! 🎰 Columns 2 & 3 spinning...")
+        await interaction.message.edit(embed=embed, view=self)
+        
+        # Phase 2: Columns 2 and 3 spinning
+        for frame in range(6):
+            # Randomize only columns 2 and 3
+            for row in range(3):
+                self.grid[row][1] = generate_slot_emoji()
+                self.grid[row][2] = generate_slot_emoji()
+            
+            embed = self.update_embed(is_spinning=True, status_text="✅ Column 1 stopped! 🎰 Columns 2 & 3 spinning...")
+            await interaction.message.edit(embed=embed, view=self)
+        
+        # Lock column 2
+        for row in range(3):
+            self.grid[row][1] = self.final_grid[row][1]
+        self.locked_columns.add(1)
+        
+        embed = self.update_embed(is_spinning=True, status_text="✅ Columns 1 & 2 stopped! 🎰 Column 3 spinning...")
+        await interaction.message.edit(embed=embed, view=self)
+        
+        # Phase 3: Only column 3 spinning (slower, building suspense)
+        for frame in range(5):
+            # Randomize only column 3
+            for row in range(3):
+                self.grid[row][2] = generate_slot_emoji()
+            
+            embed = self.update_embed(is_spinning=True, status_text="✅ Columns 1 & 2 stopped! 🎰 Column 3 spinning...")
+            await interaction.message.edit(embed=embed, view=self)
+        
+        # Lock column 3 - final result
+        for row in range(3):
+            self.grid[row][2] = self.final_grid[row][2]
+        self.locked_columns.add(2)
+        
+        # Check for win
+        won = check_win(self.grid)
+        self.spinning = False
+        self.spun = True
+        
+        # Show final result
+        embed = discord.Embed(
+            title="🎰 SLOTS - FINAL RESULT 🎰",
+            description=f"Bet: **${self.bet:.2f}**\n\n\n\n{format_slot_grid(self.grid, self.locked_columns)}",
+            color=discord.Color.green() if won else discord.Color.red()
+        )
+        
+        if won:
+            middle_emoji = self.grid[1][0]
+            winnings = self.bet * 3  # Triple the bet
+            current_balance = get_user_balance(self.user_id)
+            current_balance = normalize_money(current_balance)
+            new_balance = normalize_money(current_balance + winnings)
+            update_user_balance(self.user_id, new_balance)
+            
+            embed.add_field(
+                name="🎉 YOU WON! 🎉",
+                value=f"All three **{middle_emoji}** in the middle row!\nYou won **${winnings:.2f}**!\nYour new balance is **${new_balance:.2f}**.",
+                inline=False
+            )
+        else:
+            current_balance = get_user_balance(self.user_id)
+            current_balance = normalize_money(current_balance)
+            
+            embed.add_field(
+                name="❌ You Lost",
+                value=f"No match in the middle row. You lost **${self.bet:.2f}**.\nYour balance is **${current_balance:.2f}**.",
+                inline=False
+            )
+        
+        await interaction.message.edit(embed=embed, view=self)
+        self.stop()
+    
+    @discord.ui.button(label="🎰 SPIN 🎰", style=discord.ButtonStyle.success, emoji="🎲", row=0)
+    async def spin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Spin the slots!"""
+        if self.spinning or self.spun:
+            await interaction.response.send_message("❌ You already spun!", ephemeral=True)
+            return
+        
+        self.spinning = True
+        # Start animation in a task so we don't block
+        await self.animate_spin(interaction)
+
+
+@bot.tree.command(name="slots", description="Play slots! Match 3 in the middle row to win!")
+@app_commands.describe(bet="The amount to bet")
+async def slots(interaction: discord.Interaction, bet: float):
+    await interaction.response.defer(ephemeral=False)
+    user_id = interaction.user.id
+    
+    # Check if user is on Russian Roulette elimination cooldown (dead)
+    is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+    if is_roulette_cooldown:
+        minutes_left = roulette_time_left // 60
+        await interaction.followup.send(
+            f"Sorry, {interaction.user.name}, you're dead. You cannot play slots for {minutes_left} minute(s)", ephemeral=True
+        )
+        return
+    
+    # Validate bet amount is positive
+    if bet <= 0:
+        await interaction.followup.send("❌ Invalid bet amount!", ephemeral=True)
+        return
+    
+    # Validate bet has at most 2 decimal places (no fractional cents)
+    if not validate_money_precision(bet):
+        await interaction.followup.send("❌ Invalid bet amount!", ephemeral=True)
+        return
+    
+    # Normalize bet to exactly 2 decimal places
+    bet = normalize_money(bet)
+    
+    current_balance = get_user_balance(user_id)
+    current_balance = normalize_money(current_balance)
+    
+    if not can_afford_rounded(current_balance, bet):
+        await interaction.followup.send(f"You do not have enough balance to bet **${bet:.2f}**, {interaction.user.name}.", ephemeral=False)
+        return
+    
+    # Deduct bet first
+    new_balance_after_bet = normalize_money(current_balance - bet)
+    update_user_balance(user_id, new_balance_after_bet)
+    
+    # Create slots view
+    view = SlotsView(user_id, bet)
+    embed = view.update_embed()
+    
+    await interaction.followup.send(embed=embed, view=view)
 
 
 # user_balances = {}
@@ -1617,7 +2025,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.2.5 :3"
+            name="running /gather on V0.2.6 :3"
         )
     )
     try:
@@ -1688,16 +2096,24 @@ async def gather(interaction: discord.Interaction):
 
     # Fetch user data and events once at the start
     user_id = interaction.user.id
-    user_data = get_user_gather_data(user_id)
+    user_data = get_user_gather_data(user_id)   
     active_events = get_active_events_cached()
 
     #check if the user is on cooldown (default 1 min), if so let them know how much time they have left
-    can_user_gather, time_left = can_gather(user_id, user_data=user_data, active_events=active_events)
+    can_user_gather, time_left, is_roulette_cooldown = can_gather(user_id, user_data=user_data, active_events=active_events)
     if not can_user_gather:
         #then user is on cooldown
-        await interaction.followup.send(
-            f"You must wait {time_left} seconds before gathering again, {interaction.user.name}.", ephemeral=True
-        )
+        if is_roulette_cooldown:
+            # Russian Roulette elimination cooldown
+            minutes_left = time_left // 60
+            await interaction.followup.send(
+                f"Sorry, {interaction.user.name}, you're dead. You cannot /gather for {minutes_left} minute(s)", ephemeral=True
+            )
+        else:
+            # Normal gather cooldown
+            await interaction.followup.send(
+                f"You must wait {time_left} seconds before gathering again, {interaction.user.name}.", ephemeral=True
+            )
         return
 
     # Perform the gather with pre-fetched data
@@ -1714,11 +2130,19 @@ async def gather(interaction: discord.Interaction):
 
     # Send rank-up notification if player advanced
     if new_role:
-        rankup_embed = discord.Embed(
-            title="🌱 Rank Up!",
-            description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
-            color=discord.Color.gold(),
-        )
+        # Special message for Planter I advancement (when old_role is None)
+        if new_role == "PLANTER I" and old_role is None:
+            rankup_embed = discord.Embed(
+                title="🌱 Rank Up!",
+                description=f"{interaction.user.mention} advanced to **PLANTER I**!",
+                color=discord.Color.gold(),
+            )
+        else:
+            rankup_embed = discord.Embed(
+                title="🌱 Rank Up!",
+                description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
+                color=discord.Color.gold(),
+            )
         await interaction.followup.send(embed=rankup_embed)
 
     #create discord embed
@@ -1760,13 +2184,21 @@ async def gather(interaction: discord.Interaction):
 async def harvest(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=False)
     user_id = interaction.user.id
-    can_user_harvest, time_left = can_harvest(user_id)
+    can_user_harvest, time_left, is_roulette_cooldown = can_harvest(user_id)
     if not can_user_harvest:
-        minutes_left = time_left // 60
-        seconds_left = time_left % 60   
-        await interaction.followup.send(
-            f"You must wait {minutes_left} minutes and {seconds_left} seconds before harvesting again, {interaction.user.name}.", ephemeral=True
-        )
+        if is_roulette_cooldown:
+            # Russian Roulette elimination cooldown
+            minutes_left = time_left // 60
+            await interaction.followup.send(
+                f"Sorry, {interaction.user.name}, you're dead. You cannot /harvest for {minutes_left} minute(s)", ephemeral=True
+            )
+        else:
+            # Normal harvest cooldown
+            minutes_left = time_left // 60
+            seconds_left = time_left % 60   
+            await interaction.followup.send(
+                f"You must wait {minutes_left} minutes and {seconds_left} seconds before harvesting again, {interaction.user.name}.", ephemeral=True
+            )
         return
     set_harvest_cooldown(user_id)
     
@@ -1844,11 +2276,19 @@ async def harvest(interaction: discord.Interaction):
 
     # Send rank-up notification if player advanced
     if new_role:
-        rankup_embed = discord.Embed(
-            title="🌾 Rank Up!",
-            description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
-            color=discord.Color.gold(),
-        )
+        # Special message for Planter I advancement (when old_role is None)
+        if new_role == "PLANTER I" and old_role is None:
+            rankup_embed = discord.Embed(
+                title="🌾 Rank Up!",
+                description=f"{interaction.user.mention} advanced to **PLANTER I**!",
+                color=discord.Color.gold(),
+            )
+        else:
+            rankup_embed = discord.Embed(
+                title="🌾 Rank Up!",
+                description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
+                color=discord.Color.gold(),
+            )
         await interaction.followup.send(embed=rankup_embed)
 
     #create harvest embed
@@ -2176,9 +2616,13 @@ class HireView(discord.ui.View):
         gardener = gardener_dict.get(slot_id)
         price = GARDENER_PRICES[slot_id - 1]
         
+        # Get the chance for this gardener level
+        gardener_chance = GARDENER_CHANCES.get(slot_id, 0.05) * 100  # Convert to percentage
+        description_text = f"💰 Your Balance: **${balance:,.2f}**\n\nHire gardeners to automatically gather items for you! This gardener has a **{gardener_chance:.0f}%** chance to gather every minute."
+        
         embed = discord.Embed(
             title=f"🌱 Gardener #{slot_id}",
-            description=f"💰 Your Balance: **${balance:,.2f}**\n\nHire gardeners to automatically gather items for you! Each gardener has a 5% chance to gather every minute.",
+            description=description_text,
             color=discord.Color.green()
         )
         
@@ -2901,29 +3345,37 @@ async def pay(interaction: discord.Interaction, amount: float, user: discord.Mem
     
     # Validate amount is positive
     if amount <= 0:
-        await interaction.followup.send("❌ Payment amount must be greater than $0.00!", ephemeral=True)
+        await interaction.followup.send("❌ Payment amount must be greater than $0!", ephemeral=True)
         return
+    
+    # Validate amount has at most 2 decimal places (no fractional cents)
+    if not validate_money_precision(amount):
+        await interaction.followup.send("❌ Invalid payment amount!", ephemeral=True)
+        return
+    
+    # Normalize amount to exactly 2 decimal places
+    amount = normalize_money(amount)
     
     # Check sender balance
     sender_balance = get_user_balance(sender_id)
-    if sender_balance < amount:
+    sender_balance = normalize_money(sender_balance)
+    
+    if not can_afford_rounded(sender_balance, amount):
         await interaction.followup.send(f"❌ You don't have enough balance!", ephemeral=True)
         return
     
     # Get recipient balance
     recipient_balance = get_user_balance(recipient_id)
+    recipient_balance = normalize_money(recipient_balance)
     
     # Transfer money
-    update_user_balance(sender_id, sender_balance - amount)
-    update_user_balance(recipient_id, recipient_balance + amount)
+    new_sender_balance = normalize_money(sender_balance - amount)
+    new_recipient_balance = normalize_money(recipient_balance + amount)
+    update_user_balance(sender_id, new_sender_balance)
+    update_user_balance(recipient_id, new_recipient_balance)
     
     # Send confirmation message
-    embed = discord.Embed(
-        title="💰 Payment Successful!",
-        description=f"**{interaction.user.name}** paid **{user.name}** **${amount:.2f}**!",
-        color=discord.Color.green()
-    )
-    await interaction.followup.send(embed=embed)
+    await interaction.followup.send(f"{interaction.user.mention} has paid {user.mention} **${amount:.2f}**! 💰")
 
 
 # Leaderboard pagination view
@@ -3772,8 +4224,9 @@ async def gardener_background_task():
                     if not gardener_id:
                         continue
                     
-                    # 5% chance for each gardener to gather
-                    if random.random() < 0.05:
+                    # Get chance based on gardener level
+                    gardener_chance = GARDENER_CHANCES.get(gardener_id, 0.05)  # Default to 5% if invalid ID
+                    if random.random() < gardener_chance:
                         try:
                             # Perform gather for this user (without cooldown)
                             gather_result = await perform_gather_for_user(user_id, apply_cooldown=False)
@@ -4378,6 +4831,17 @@ class MiningView(discord.ui.View):
 async def mine(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=False)
     
+    user_id = interaction.user.id
+    
+    # Check if user is on Russian Roulette elimination cooldown (dead)
+    is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+    if is_roulette_cooldown:
+        minutes_left = roulette_time_left // 60
+        await interaction.followup.send(
+            f"Sorry, {interaction.user.name}, you're dead. You cannot mine for {minutes_left} minute(s)", ephemeral=True
+        )
+        return
+    
     # Check if command is being used in the correct channel
     if not hasattr(interaction.channel, 'name') or interaction.channel.name != "gathercoin":
         await interaction.followup.send(
@@ -4647,6 +5111,16 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
     await interaction.response.defer(ephemeral=False)
     
     user_id = interaction.user.id
+    
+    # Check if user is on Russian Roulette elimination cooldown (dead)
+    is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+    if is_roulette_cooldown:
+        minutes_left = roulette_time_left // 60
+        await interaction.followup.send(
+            f"Sorry, {interaction.user.name}, you're dead. You cannot buy or sell stocks for {minutes_left} minute(s)", ephemeral=True
+        )
+        return
+    
     guild_id = interaction.guild.id if interaction.guild else None
     
     # Validate amount
@@ -4791,6 +5265,43 @@ async def russian(
     user_id = interaction.user.id
     user_name = interaction.user.name
     channel_id = interaction.channel.id
+    channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
+
+    # Check if user is on Russian Roulette elimination cooldown
+    is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+    if is_roulette_cooldown:
+        minutes_left = roulette_time_left // 60
+        await interaction.followup.send(
+            f"Sorry, {interaction.user.name}, you're dead. You cannot /russian for {minutes_left} minute(s)", ephemeral=True
+        )
+        return
+
+    # Check if this is a Russian Roulette channel (by name pattern)
+    is_roulette_channel = "russian" in channel_name or "roulette" in channel_name
+    
+    # If in a Russian Roulette channel, require Planter II or above
+    if is_roulette_channel:
+        planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V", "PLANTER VI", "PLANTER VII", "PLANTER VIII", "PLANTER IX", "PLANTER X"]
+        user_roles = [role.name for role in interaction.user.roles]
+        has_planter_role = any(role in planter_roles for role in user_roles)
+        
+        if not has_planter_role:
+            await interaction.followup.send(
+                f"❌ You must be at least **Planter II** to play Russian Roulette. (Go /gather!!)\n\n",
+                ephemeral=True
+            )
+            return
+        
+        # Check if they have Planter II or higher (not Planter I)
+        planter_levels = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V", "PLANTER VI", "PLANTER VII", "PLANTER VIII", "PLANTER IX", "PLANTER X"]
+        user_planter_role = next((role for role in user_roles if role in planter_levels), None)
+        
+        if user_planter_role == "PLANTER I":
+            await interaction.followup.send(
+                f"❌ You must be at least **Planter II** to play Russian Roulette. (Go /gather!!)\n\n",
+                ephemeral=True
+            )
+            return
 
     # make sure game is actually valid and the person can do it
 
@@ -4827,23 +5338,34 @@ async def russian(
         await interaction.followup.send(f"❌ Bet amount must be greater than $0.00!", ephemeral=True)
         return
 
+    # Validate bet has at most 2 decimal places (no fractional cents)
+    if not validate_money_precision(bet):
+        await interaction.followup.send("❌ Bet amount must be in dollars and cents (maximum 2 decimal places)!", ephemeral=True)
+        return
+
+    # Normalize bet to exactly 2 decimal places
+    bet = normalize_money(bet)
+
     # get user balance
     user_balance = get_user_balance(user_id)
-    if bet > user_balance:
+    user_balance = normalize_money(user_balance)
+    
+    if not can_afford_rounded(user_balance, bet):
         await interaction.followup.send(f"You don't have enough balance to play Russian Roulette.", ephemeral=True)
         return
 
     #create unique game ID
     game_id = str(uuid.uuid4())[:8]
 
-    #create new game
+    #create new game (bet is already normalized)
     game = RouletteGame(game_id, user_id, user_name, bullets, bet, players)
     active_roulette_games[game_id] = game
     user_active_games[user_id] = game_id
     active_roulette_channel_games[channel_id] = game_id
 
     # deduct bet from host
-    update_user_balance(user_id, user_balance - bet)
+    new_balance = normalize_money(user_balance - bet)
+    update_user_balance(user_id, new_balance)
     # increase bullet multiplier
     bullet_multiplier = 1.3 ** bullets
 

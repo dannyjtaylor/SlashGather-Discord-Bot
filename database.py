@@ -78,6 +78,7 @@ def _ensure_user_document(user_id: int) -> None:
         "last_gather_time": 0.0,
         "last_harvest_time": 0.0,
         "last_mine_time": 0.0,
+        "last_roulette_elimination_time": 0.0,
         "total_forage_count": 0,
         "items": {},
         "ripeness_stats": {},
@@ -273,6 +274,23 @@ def update_user_last_harvest_time(user_id: int, timestamp: float) -> None:
     users.update_one(
         {"_id": int(user_id)},
         {"$set": {"last_harvest_time": float(timestamp)}},
+        upsert=True,
+    )
+
+
+def get_user_last_roulette_elimination_time(user_id: int) -> float:
+    """Get user's last Russian Roulette elimination time."""
+    users = _get_users_collection()
+    doc = users.find_one({"_id": int(user_id)}, {"last_roulette_elimination_time": 1})
+    return float(doc.get("last_roulette_elimination_time", 0.0)) if doc else 0.0
+
+
+def update_user_last_roulette_elimination_time(user_id: int, timestamp: float) -> None:
+    """Update user's last Russian Roulette elimination time (sets 30-minute cooldown)."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"last_roulette_elimination_time": float(timestamp)}},
         upsert=True,
     )
 
