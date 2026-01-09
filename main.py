@@ -68,6 +68,8 @@ from database import (
     get_user_items,
     get_user_basket_upgrades,
     set_user_basket_upgrade,
+    get_user_harvest_upgrades,
+    set_user_harvest_upgrade,
     get_user_crypto_holdings,
     update_user_crypto_holdings,
     get_user_last_mine_time,
@@ -96,6 +98,7 @@ from database import (
     reset_user_cooldowns,
     wipe_user_money,
     wipe_user_plants,
+    wipe_user_crypto,
     wipe_user_all,
 )
 
@@ -225,6 +228,68 @@ SOIL_UPGRADES = [
     {"name": "The Best Soil In The Entire Universe", "gmo_boost": 0.10},
 ]
 
+# HARVEST UPGRADE PATHS
+# Note: These prices are doubled from the user's specifications
+HARVEST_CAR_UPGRADES = [
+    {"name": "Smart Car", "extra_items": 1},
+    {"name": "Nissan Cube", "extra_items": 2},
+    {"name": "Mini Cooper", "extra_items": 3},
+    {"name": "2001 Honda Civic", "extra_items": 4},
+    {"name": "2010 BMW 528i XDrive", "extra_items": 5},
+    {"name": "Minivan", "extra_items": 6},
+    {"name": "Ford F150", "extra_items": 7},
+    {"name": "Limousine", "extra_items": 8},
+    {"name": "Japanese Bullet Train", "extra_items": 9},
+    {"name": "Cargo Plane", "extra_items": 10},
+]
+
+HARVEST_CAR_PRICES = [1500, 2000, 5000, 20000, 100000, 200000, 1000000, 2000000, 6000000, 15000000]
+
+HARVEST_CHAIN_UPGRADES = [
+    {"name": "Winter", "chain_chance": 0.01},
+    {"name": "Spring", "chain_chance": 0.02},
+    {"name": "Great Season!", "chain_chance": 0.03},
+    {"name": "Amazing Season!", "chain_chance": 0.04},
+    {"name": "Bountiful Season!", "chain_chance": 0.05},
+    {"name": "Floraltastic Season!", "chain_chance": 0.075},
+    {"name": "Astralicious Season!", "chain_chance": 0.10},
+    {"name": "Spectral Season!", "chain_chance": 0.15},
+    {"name": "Galaxial Season!", "chain_chance": 0.25},
+    {"name": "Universal Season!", "chain_chance": 0.50},
+]
+
+HARVEST_CHAIN_PRICES = [1000, 5000, 15000, 50000, 100000, 200000, 1000000, 5000000, 10000000, 20000000]
+
+HARVEST_FERTILIZER_UPGRADES = [
+    {"name": "Ash", "multiplier": 0.05},
+    {"name": "Dirt", "multiplier": 0.10},
+    {"name": "Water", "multiplier": 0.25},
+    {"name": "Regular Fertilizer", "multiplier": 0.35},
+    {"name": "Bone Meal", "multiplier": 0.50},
+    {"name": "Enriched Fertilizer", "multiplier": 0.75},
+    {"name": "Diamond Enhanced Bone Meal", "multiplier": 1.00},
+    {"name": "Luminescent Fertilizer", "multiplier": 1.50},
+    {"name": "Astral Fertilizer", "multiplier": 2.50},
+    {"name": "Galactic Spectral Fertilizer", "multiplier": 4.00},
+]
+
+HARVEST_FERTILIZER_PRICES = [1000, 2000, 5000, 15000, 50000, 125000, 250000, 1000000, 5000000, 15000000]
+
+HARVEST_COOLDOWN_UPGRADES = [
+    {"name": "Flexible Schedule & Six Figure Salary", "reduction": 3},
+    {"name": "8 Hours/Week", "reduction": 5},
+    {"name": "10 Hours/Week", "reduction": 10},
+    {"name": "15 Hours/Week", "reduction": 20},
+    {"name": "20 Hours/Week", "reduction": 40},  # 40 seconds
+    {"name": "40 Hours/Week", "reduction": 60},  # 1 minute = 60 seconds
+    {"name": "60 Hours/Week", "reduction": 150},  # 2.5 minutes = 150 seconds
+    {"name": "80 Hours/Week", "reduction": 300},  # 5 minutes = 300 seconds
+    {"name": "112 Hours/Week", "reduction": 450},  # 7.5 minutes = 450 seconds
+    {"name": "Cannot Leave The Farm", "reduction": 600},  # 10 minutes = 600 seconds
+]
+
+HARVEST_COOLDOWN_PRICES = [5000, 50000, 100000, 500000, 1000000, 2500000, 5000000, 10000000, 15000000, 20000000]
+
 # Money handling helper functions to fix floating point precision issues
 def normalize_money(amount: float) -> float:
     """Round money to exactly 2 decimal places to avoid floating point precision issues."""
@@ -266,7 +331,17 @@ def can_harvest(user_id):
     
     if last_harvest_time == 0:
         return True, 0, False
-    cooldown_end = last_harvest_time + HARVEST_COOLDOWN
+    
+    # Get harvest upgrades for cooldown reduction
+    harvest_upgrades = get_user_harvest_upgrades(user_id)
+    cooldown_tier = harvest_upgrades["cooldown"]
+    cooldown_reduction = 0
+    if cooldown_tier > 0:
+        cooldown_reduction = HARVEST_COOLDOWN_UPGRADES[cooldown_tier - 1]["reduction"]
+    
+    # Apply cooldown reduction
+    effective_cooldown = max(0, HARVEST_COOLDOWN - cooldown_reduction)
+    cooldown_end = last_harvest_time + effective_cooldown
     if current_time >= cooldown_end:
         return True, 0, False
     else:
@@ -918,14 +993,14 @@ class RouletteGame:
     #calculate the total multiplier
     def calculate_total_multiplier(self, rounds_survived):
         # Base multiplier from bullets (keep this as is for now, or remove if not needed)
-        bullet_multiplier = 1.3 ** self.initial_bullets
-        # 1.6x per round survived
-        round_multiplier = 1.6 ** rounds_survived
-        # 1.6x per ADDITIONAL player (not counting yourself if solo)
+        bullet_multiplier = 1.2 ** self.initial_bullets
+        # 1.2x per round survived
+        round_multiplier = 1.2 ** rounds_survived
+        # 1.4x per ADDITIONAL player (not counting yourself if solo)
         # If solo (max_players == 1), additional_players = 0
         # If 2 players, additional_players = 1, etc.
         additional_players = max(0, len(self.players) - 1)
-        player_multiplier = 1.6 ** additional_players
+        player_multiplier = 1.4 ** additional_players
         return bullet_multiplier * round_multiplier * player_multiplier
 
     #if a player loses, get them out and add their money to the pot
@@ -1080,7 +1155,7 @@ async def play_roulette_round(channel, game_id):
     #revolver chamber spinning animation
     embed = discord.Embed(
         title=f"🔫 {current_player['name']}'s Turn",
-        description="*The cylinder re-spins for this turn...*\n\n🔄 🔄 🔄\n\n**The chamber is re-spun every time it's someone's turn!**",
+        description="*The cylinder re-spins...*\n\n🔄 🔄 🔄",
         color=discord.Color.orange()
     )
     embed.add_field(name="💀 Bullets Remaining", value=f"{game.bullets}/6", inline=True)
@@ -2026,7 +2101,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.2.6 :33"
+            name="running /gather on V0.3.0 :33"
         )
     )
     try:
@@ -2180,9 +2255,12 @@ async def gather(interaction: discord.Interaction):
         if chain_triggered:
             # Reset cooldown by setting last_gather_time to 0 (allows immediate next gather)
             update_user_last_gather_time(user_id, 0)
-            embed.add_field(name="⚡ CHAIN!", value="Your cooldown has been reset! Gather again!", inline=False)
     
-    await interaction.followup.send(embed=embed) 
+    await interaction.followup.send(embed=embed)
+    
+    # Send separate chain message if triggered
+    if chain_triggered:
+        await interaction.followup.send(f"🔗🔗 **CHAIN!** Your cooldown has been reset! Gather again! 🔗🔗") 
 
 #/harvest command, basically /castnet
 @bot.tree.command(name="harvest", description="Harvest a bunch of plants at once!")
@@ -2208,10 +2286,23 @@ async def harvest(interaction: discord.Interaction):
     set_harvest_cooldown(user_id)
     
     
-    # Get user upgrades (same for all 10 gathers)
+    # Get user upgrades (basket upgrades for gather, harvest upgrades for harvest)
     user_upgrades = get_user_basket_upgrades(user_id)
     basket_tier = user_upgrades["basket"]
     soil_tier = user_upgrades["soil"]
+    
+    # Get harvest upgrades
+    harvest_upgrades = get_user_harvest_upgrades(user_id)
+    car_tier = harvest_upgrades["car"]
+    chain_tier = harvest_upgrades["chain"]
+    fertilizer_tier = harvest_upgrades["fertilizer"]
+    
+    # Calculate number of items to harvest (default 10 + extra items from car upgrade)
+    base_items = 10
+    extra_items = 0
+    if car_tier > 0:
+        extra_items = HARVEST_CAR_UPGRADES[car_tier - 1]["extra_items"]
+    total_items_to_harvest = base_items + extra_items
     
     # Get upgrade multipliers
     basket_multiplier = BASKET_UPGRADES[basket_tier - 1]["multiplier"] if basket_tier > 0 else 1.0
@@ -2219,13 +2310,23 @@ async def harvest(interaction: discord.Interaction):
     soil_gmo_boost = SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] if soil_tier > 0 else 0
     gmo_chance = base_gmo_chance + soil_gmo_boost
     
-    #/gather 10 times
+    # Get fertilizer multiplier (percentage increase)
+    fertilizer_multiplier = 1.0
+    if fertilizer_tier > 0:
+        fertilizer_multiplier = 1.0 + HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["multiplier"]
+    
+    # Get chain chance
+    chain_chance = 0.0
+    if chain_tier > 0:
+        chain_chance = HARVEST_CHAIN_UPGRADES[chain_tier - 1]["chain_chance"]
+    
+    #/gather multiple times based on car upgrade
     gathered_items = []
     total_value = 0.0
     current_balance = get_user_balance(user_id)
 
 
-    for i in range(10):
+    for i in range(total_items_to_harvest):
         item = random.choice(GATHERABLE_ITEMS)
         name = item["name"]
         if item["category"] == "Fruit":
@@ -2253,6 +2354,9 @@ async def harvest(interaction: discord.Interaction):
         
         # Apply basket upgrade money multiplier
         final_value *= basket_multiplier
+        
+        # Apply fertilizer upgrade money multiplier (percentage increase)
+        final_value *= fertilizer_multiplier
 
         #update new balance
         current_balance += final_value
@@ -2296,6 +2400,14 @@ async def harvest(interaction: discord.Interaction):
             )
         await interaction.followup.send(embed=rankup_embed)
 
+    # Check for chain chance (season upgrade)
+    chain_triggered = False
+    if chain_chance > 0:
+        chain_triggered = random.random() < chain_chance
+        if chain_triggered:
+            # Reset cooldown by setting last_harvest_time to 0 (allows immediate next harvest)
+            update_user_last_harvest_time(user_id, 0)
+    
     #create harvest embed
     embed = discord.Embed(
         title = "You Harvested!",
@@ -2314,6 +2426,10 @@ async def harvest(interaction: discord.Interaction):
     embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
 
     await interaction.followup.send(embed=embed)
+    
+    # Send separate chain message if triggered
+    if chain_triggered:
+        await interaction.followup.send(f"🔗🔗 **CHAIN!** Your harvest cooldown has been reset! Harvest again! 🔗🔗")
     #end harvest
 
 
@@ -2599,6 +2715,228 @@ async def gear(interaction: discord.Interaction):
     
     user_id = interaction.user.id
     view = BasketUpgradeView(user_id, interaction.guild)
+    embed = view.create_embed()
+    
+    await interaction.followup.send(embed=embed, view=view)
+
+
+# Harvest Upgrade View with buttons
+class HarvestUpgradeView(discord.ui.View):
+    def __init__(self, user_id: int, guild: discord.Guild, timeout=300):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.guild = guild
+    
+    def create_embed(self) -> discord.Embed:
+        """Create the harvest upgrade embed."""
+        upgrades = get_user_harvest_upgrades(self.user_id)
+        balance = get_user_balance(self.user_id)
+        
+        embed = discord.Embed(
+            title="🚜 Harvest Upgrade Shop",
+            description=f"💰 Your Balance: **${balance:,.2f}**\n\nChoose an upgrade path to purchase!",
+            color=discord.Color.green()
+        )
+        
+        # Path 1: Car (Extra Items)
+        car_tier = upgrades["car"]
+        current_car = "Just Yourself" if car_tier == 0 else HARVEST_CAR_UPGRADES[car_tier - 1]["name"]
+        current_extra = 0 if car_tier == 0 else HARVEST_CAR_UPGRADES[car_tier - 1]["extra_items"]
+        if car_tier < 10:
+            next_car = HARVEST_CAR_UPGRADES[car_tier]["name"]
+            next_extra = HARVEST_CAR_UPGRADES[car_tier]["extra_items"]
+            next_cost = HARVEST_CAR_PRICES[car_tier]
+            can_afford = "✅" if balance >= next_cost else "❌"
+            car_text = f"**Upgrade {car_tier + 1}/10**\n**Current:** {current_car} (+{current_extra} extra items)\n**Next:** {next_car} (+{next_extra} extra items)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+        else:
+            car_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_car} (+{current_extra} extra items)"
+        
+        embed.add_field(
+            name="🚗 PATH 1: CAR",
+            value=car_text,
+            inline=False
+        )
+        
+        # Path 2: Chain Chance (Season)
+        chain_tier = upgrades["chain"]
+        current_season = "No Season" if chain_tier == 0 else HARVEST_CHAIN_UPGRADES[chain_tier - 1]["name"]
+        current_chain = 0 if chain_tier == 0 else HARVEST_CHAIN_UPGRADES[chain_tier - 1]["chain_chance"] * 100
+        if chain_tier < 10:
+            next_season = HARVEST_CHAIN_UPGRADES[chain_tier]["name"]
+            next_chain = HARVEST_CHAIN_UPGRADES[chain_tier]["chain_chance"] * 100
+            next_cost = HARVEST_CHAIN_PRICES[chain_tier]
+            can_afford = "✅" if balance >= next_cost else "❌"
+            chain_text = f"**Upgrade {chain_tier + 1}/10**\n**Current:** {current_season} ({current_chain}% chain chance)\n**Next:** {next_season} ({next_chain}% chain chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+        else:
+            chain_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_season} ({current_chain}% chain chance)"
+        
+        embed.add_field(
+            name="🌾 PATH 2: YIELD",
+            value=chain_text,
+            inline=False
+        )
+        
+        # Path 3: Fertilizer (Money Multiplier)
+        fertilizer_tier = upgrades["fertilizer"]
+        current_fertilizer = "No Fertilizer" if fertilizer_tier == 0 else HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["name"]
+        current_multiplier = 0 if fertilizer_tier == 0 else HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["multiplier"] * 100
+        if fertilizer_tier < 10:
+            next_fertilizer = HARVEST_FERTILIZER_UPGRADES[fertilizer_tier]["name"]
+            next_multiplier = HARVEST_FERTILIZER_UPGRADES[fertilizer_tier]["multiplier"] * 100
+            next_cost = HARVEST_FERTILIZER_PRICES[fertilizer_tier]
+            can_afford = "✅" if balance >= next_cost else "❌"
+            fertilizer_text = f"**Upgrade {fertilizer_tier + 1}/10**\n**Current:** {current_fertilizer} (+{current_multiplier}% money)\n**Next:** {next_fertilizer} (+{next_multiplier}% money)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+        else:
+            fertilizer_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_fertilizer} (+{current_multiplier}% money)"
+        
+        embed.add_field(
+            name="💩 PATH 3: FERTILIZER",
+            value=fertilizer_text,
+            inline=False
+        )
+        
+        # Path 4: Cooldown Reduction (Workers)
+        cooldown_tier = upgrades["cooldown"]
+        current_workers = "No Workers" if cooldown_tier == 0 else HARVEST_COOLDOWN_UPGRADES[cooldown_tier - 1]["name"]
+        current_reduction = 0 if cooldown_tier == 0 else HARVEST_COOLDOWN_UPGRADES[cooldown_tier - 1]["reduction"]
+        if cooldown_tier < 10:
+            next_workers = HARVEST_COOLDOWN_UPGRADES[cooldown_tier]["name"]
+            next_reduction = HARVEST_COOLDOWN_UPGRADES[cooldown_tier]["reduction"]
+            next_cost = HARVEST_COOLDOWN_PRICES[cooldown_tier]
+            can_afford = "✅" if balance >= next_cost else "❌"
+            # Format reduction time nicely
+            if next_reduction < 60:
+                reduction_text = f"-{next_reduction}s"
+            elif next_reduction < 3600:
+                minutes = next_reduction // 60
+                seconds = next_reduction % 60
+                if seconds > 0:
+                    reduction_text = f"-{minutes}m {seconds}s"
+                else:
+                    reduction_text = f"-{minutes}m"
+            else:
+                hours = next_reduction // 3600
+                minutes = (next_reduction % 3600) // 60
+                if minutes > 0:
+                    reduction_text = f"-{hours}h {minutes}m"
+                else:
+                    reduction_text = f"-{hours}h"
+            
+            if current_reduction < 60:
+                current_reduction_text = f"-{current_reduction}s"
+            elif current_reduction < 3600:
+                minutes = current_reduction // 60
+                seconds = current_reduction % 60
+                if seconds > 0:
+                    current_reduction_text = f"-{minutes}m {seconds}s"
+                else:
+                    current_reduction_text = f"-{minutes}m"
+            else:
+                hours = current_reduction // 3600
+                minutes = (current_reduction % 3600) // 60
+                if minutes > 0:
+                    current_reduction_text = f"-{hours}h {minutes}m"
+                else:
+                    current_reduction_text = f"-{hours}h"
+            
+            cooldown_text = f"**Upgrade {cooldown_tier + 1}/10**\n**Current:** {current_workers} ({current_reduction_text} cooldown)\n**Next:** {next_workers} ({reduction_text} cooldown)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+        else:
+            if current_reduction < 60:
+                current_reduction_text = f"-{current_reduction}s"
+            elif current_reduction < 3600:
+                minutes = current_reduction // 60
+                seconds = current_reduction % 60
+                if seconds > 0:
+                    current_reduction_text = f"-{minutes}m {seconds}s"
+                else:
+                    current_reduction_text = f"-{minutes}m"
+            else:
+                hours = current_reduction // 3600
+                minutes = (current_reduction % 3600) // 60
+                if minutes > 0:
+                    current_reduction_text = f"-{hours}h {minutes}m"
+                else:
+                    current_reduction_text = f"-{hours}h"
+            cooldown_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_workers} ({current_reduction_text} cooldown)"
+        
+        embed.add_field(
+            name="⚡ PATH 4: COOLDOWN REDUCTION",
+            value=cooldown_text,
+            inline=False
+        )
+        
+        embed.set_footer(text="Click a button below to purchase an upgrade!")
+        
+        return embed
+    
+    @discord.ui.button(label="🚗 Buy Car", style=discord.ButtonStyle.primary, row=0)
+    async def buy_car(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_purchase(interaction, "car", HARVEST_CAR_UPGRADES, HARVEST_CAR_PRICES, "Car")
+    
+    @discord.ui.button(label="🌾 Buy Yield", style=discord.ButtonStyle.primary, row=0)
+    async def buy_chain(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_purchase(interaction, "chain", HARVEST_CHAIN_UPGRADES, HARVEST_CHAIN_PRICES, "Yield")
+    
+    @discord.ui.button(label="💩 Buy Fertilizer", style=discord.ButtonStyle.primary, row=1)
+    async def buy_fertilizer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_purchase(interaction, "fertilizer", HARVEST_FERTILIZER_UPGRADES, HARVEST_FERTILIZER_PRICES, "Fertilizer")
+    
+    @discord.ui.button(label="⚡ Buy Workers", style=discord.ButtonStyle.primary, row=1)
+    async def buy_cooldown(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_purchase(interaction, "cooldown", HARVEST_COOLDOWN_UPGRADES, HARVEST_COOLDOWN_PRICES, "Workers")
+    
+    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=2)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ This is not your harvest shop!", ephemeral=True)
+            return
+        
+        embed = self.create_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def handle_purchase(self, interaction: discord.Interaction, upgrade_type: str, upgrade_list: list, price_list: list, upgrade_name: str):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(f"❌ This is not your harvest shop!", ephemeral=True)
+            return
+        
+        upgrades = get_user_harvest_upgrades(self.user_id)
+        current_tier = upgrades[upgrade_type]
+        
+        if current_tier >= 10:
+            await interaction.response.send_message(f"❌ You already have the maximum {upgrade_name} upgrade!", ephemeral=True)
+            return
+        
+        cost = price_list[current_tier]
+        balance = get_user_balance(self.user_id)
+        
+        if balance < cost:
+            await interaction.response.send_message(
+                f"❌ You don't have enough money! You need **${cost:,.2f}** but only have **${balance:,.2f}**.", 
+                ephemeral=True
+            )
+            return
+        
+        # Deduct money and upgrade
+        new_balance = balance - cost
+        update_user_balance(self.user_id, new_balance)
+        set_user_harvest_upgrade(self.user_id, upgrade_type, current_tier + 1)
+        
+        next_upgrade = upgrade_list[current_tier]
+        
+        # Send quick confirmation and update the main embed
+        await interaction.response.send_message(f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
+        
+        embed = self.create_embed()
+        await interaction.message.edit(embed=embed, view=self)
+
+
+# Orchard command
+@bot.tree.command(name="orchard", description="Upgrade your harvest equipment!")
+async def orchard(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=False)
+    
+    user_id = interaction.user.id
+    view = HarvestUpgradeView(user_id, interaction.guild)
     embed = view.create_embed()
     
     await interaction.followup.send(embed=embed, view=view)
@@ -3166,9 +3504,13 @@ async def endevent(interaction: discord.Interaction, event_type: str):
 
 
 # Reset command - Admin only, #hidden channel
-@bot.tree.command(name="reset", description="[ADMIN] Reset all cooldowns for /gather, /harvest, and /mine")
+@bot.tree.command(name="reset", description="[ADMIN] Reset cooldowns or crypto prices")
 @app_commands.default_permissions(administrator=True)
-async def reset(interaction: discord.Interaction):
+@app_commands.choices(type=[
+    app_commands.Choice(name="cooldowns", value="cooldowns"),
+    app_commands.Choice(name="cryptoprices", value="cryptoprices")
+])
+async def reset(interaction: discord.Interaction, type: str):
     await interaction.response.defer(ephemeral=True)
     
     # Check if user has administrator permissions
@@ -3184,27 +3526,51 @@ async def reset(interaction: discord.Interaction):
         )
         return
     
-    # Get all members in the guild
-    guild = interaction.guild
-    if not guild:
-        await interaction.followup.send("❌ **Error**: Could not get guild information.", ephemeral=True)
-        return
+    if type == "cooldowns":
+        # Get all members in the guild
+        guild = interaction.guild
+        if not guild:
+            await interaction.followup.send("❌ **Error**: Could not get guild information.", ephemeral=True)
+            return
+        
+        members = guild.members
+        reset_count = 0
+        
+        # Reset cooldowns for all members
+        for member in members:
+            if not member.bot:  # Skip bots
+                reset_user_cooldowns(member.id)
+                reset_count += 1
+        
+        embed = discord.Embed(
+            title="✅ Cooldowns Reset",
+            description=f"Reset cooldowns for **{reset_count}** users.",
+            color=discord.Color.green()
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        print(f"Admin {interaction.user.name} reset cooldowns for {reset_count} users")
     
-    members = guild.members
-    reset_count = 0
-    
-    # Reset cooldowns for all members
-    for member in members:
-        if not member.bot:  # Skip bots
-            reset_user_cooldowns(member.id)
-            reset_count += 1
-    
-    embed = discord.Embed(
-        title="✅ Cooldowns Reset",
-        color=discord.Color.green()
-    )
-    await interaction.followup.send(embed=embed, ephemeral=True)
-    #print(f"Admin {interaction.user.name} reset cooldowns for {reset_count} users")
+    elif type == "cryptoprices":
+        # Reset crypto prices to base prices
+        base_prices = {coin["symbol"]: coin["base_price"] for coin in CRYPTO_COINS}
+        update_crypto_prices(base_prices)
+        
+        # Also reset price history
+        initialize_crypto_history()
+        
+        embed = discord.Embed(
+            title="✅ Crypto Prices Reset",
+            description="Cryptocurrency prices have been reset to their base values:",
+            color=discord.Color.green()
+        )
+        for coin in CRYPTO_COINS:
+            embed.add_field(
+                name=f"{coin['name']} ({coin['symbol']})",
+                value=f"${coin['base_price']:,.2f}",
+                inline=True
+            )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        print(f"Admin {interaction.user.name} reset crypto prices to base values")
 
 
 # Wipe command - Admin only, #hidden channel
@@ -3213,6 +3579,7 @@ async def reset(interaction: discord.Interaction):
 @app_commands.choices(type=[
     app_commands.Choice(name="money", value="money"),
     app_commands.Choice(name="plants", value="plants"),
+    app_commands.Choice(name="crypto", value="crypto"),
     app_commands.Choice(name="all", value="all")
 ])
 async def wipe(interaction: discord.Interaction, type: str):
@@ -3253,7 +3620,7 @@ async def wipe(interaction: discord.Interaction, type: str):
             color=discord.Color.orange()
         )
         embed.add_field(name="What was reset", value="• Money (balance)\n• Stock holdings (shares)\n• Crypto holdings (portfolio)", inline=False)
-        embed.add_field(name="What was kept", value="• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Gardeners\n• GPUs\n• Plants", inline=False)
+        embed.add_field(name="What was kept", value="• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Plants", inline=False)
     elif type == "plants":
         # Reset plants and update ranks
         for member in members:
@@ -3272,7 +3639,21 @@ async def wipe(interaction: discord.Interaction, type: str):
             color=discord.Color.orange()
         )
         embed.add_field(name="What was reset", value="• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)", inline=False)
-        embed.add_field(name="What was kept", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Gardeners\n• GPUs", inline=False)
+        embed.add_field(name="What was kept", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs", inline=False)
+    elif type == "crypto":
+        # Reset crypto holdings only
+        for member in members:
+            if not member.bot:  # Skip bots
+                wipe_user_crypto(member.id)
+                wiped_count += 1
+        
+        embed = discord.Embed(
+            title="✅ Crypto Wiped",
+            description=f"Reset crypto holdings to 0 for **{wiped_count}** users in this server.",
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="What was reset", value="• Crypto holdings (portfolio)", inline=False)
+        embed.add_field(name="What was kept", value="• Money (balance)\n• Stock holdings (shares)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Plants", inline=False)
     else:  # type == "all"
         # Reset money, all upgrades, and plants
         for member in members:
@@ -3290,7 +3671,7 @@ async def wipe(interaction: discord.Interaction, type: str):
             description=f"Reset everything for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank.\n\n**Market has been reset** - all shares returned, making all stocks available at max capacity.",
             color=discord.Color.red()
         )
-        embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Gardeners\n• GPUs\n• Stock holdings (shares)\n• Crypto holdings (portfolio)\n• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)", inline=False)
+        embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Stock holdings (shares)\n• Crypto holdings (portfolio)\n• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)", inline=False)
     
     await interaction.followup.send(embed=embed, ephemeral=True)
     print(f"Admin {interaction.user.name} wiped {type} data for {wiped_count} users")
@@ -4034,9 +4415,9 @@ async def send_market_news_loop():
 # CRYPTOCURRENCY SYSTEM
 # Cryptocurrency definitions
 CRYPTO_COINS = [
-    {"name": "RootCoin", "symbol": "RTC", "base_price": 200.0},
-    {"name": "Terrarium", "symbol": "TER", "base_price": 200.0},
-    {"name": "Canopy", "symbol": "CNY", "base_price": 200.0},
+    {"name": "RootCoin", "symbol": "RTC", "base_price": 90000.0},
+    {"name": "Terrarium", "symbol": "TER", "base_price": 3100.0},
+    {"name": "Canopy", "symbol": "CNY", "base_price": 855.0},
 ]
 
 # Crypto price history storage: {symbol: [float]} - keeps last 6 prices (5 minutes + current)
@@ -4065,8 +4446,8 @@ def update_crypto_prices_market():
         fluctuation_weights = [0.5, 0.3, 0.2]
         fluctuation_percent = random.choices([0.01, 0.02, 0.03], weights=fluctuation_weights, k=1)[0]
         
-        # Random direction: increase or decrease (50/50)
-        direction = random.choice([1, -1])
+        # Random direction: increase or decrease (52% up / 48% down for slight upward bias)
+        direction = random.choices([1, -1], weights=[0.52, 0.48], k=1)[0]
         
         # Calculate new price
         new_price = current_price * (1 + (direction * fluctuation_percent))
@@ -4320,9 +4701,22 @@ async def gpu_background_task():
                             # Randomly select a coin to mine
                             coin = random.choice(CRYPTO_COINS)
                             symbol = coin["symbol"]
+                            base_price = coin["base_price"]
                             
-                            # Random amount between 0.0075 and 0.0125 (4 decimal places)
-                            random_thousandths = random.randint(75, 125)
+                            # Calculate mining amount based on coin's base price (proportional to old 200.0 base)
+                            # Target: $50-60 per session average (assuming up to 60 clicks per 60s session, 1 per second)
+                            # This means ~$0.83-$1.00 per click average, so $0.60-$1.40 range with RNG
+                            # At $200 base: $0.60-$1.40 = 0.003-0.007 coins = 30-70 thousandths
+                            # New system: scale by price ratio (200.0 / base_price)
+                            price_ratio = 200.0 / base_price
+                            # Reduced range: 30-70 thousandths (0.003-0.007) at $200 base
+                            # Scaled range: multiply by price_ratio
+                            min_thousandths = int(30 * price_ratio)
+                            max_thousandths = int(70 * price_ratio)
+                            # Ensure at least 1 thousandth
+                            min_thousandths = max(1, min_thousandths)
+                            max_thousandths = max(min_thousandths, max_thousandths)
+                            random_thousandths = random.randint(min_thousandths, max_thousandths)
                             base_amount = round(random_thousandths / 10000, 4)
                             
                             # Apply GPU percent boost
@@ -4765,10 +5159,22 @@ class MiningView(discord.ui.View):
         # Randomly select a coin to mine
         coin = random.choice(CRYPTO_COINS)
         symbol = coin["symbol"]
-        # Random amount between 0.0075 and 0.01250 (4 decimal places)
-        # Generate random integer from 75 to 125 (inclusive) representing thousandths
-        # Divide by 10000 to get 4 decimal places (e.g., 75 = 0.0075, 125 = 0.0125)
-        random_thousandths = random.randint(75, 125)
+        base_price = coin["base_price"]
+        
+        # Calculate mining amount based on coin's base price (proportional to old 200.0 base)
+        # Target: $50-60 per session average (assuming up to 60 clicks per 60s session, 1 per second)
+        # This means ~$0.83-$1.00 per click average, so $0.60-$1.40 range with RNG
+        # At $200 base: $0.60-$1.40 = 0.003-0.007 coins = 30-70 thousandths
+        # New system: scale by price ratio (200.0 / base_price)
+        price_ratio = 200.0 / base_price
+        # Reduced range: 30-70 thousandths (0.003-0.007) at $200 base
+        # Scaled range: multiply by price_ratio
+        min_thousandths = int(30 * price_ratio)
+        max_thousandths = int(70 * price_ratio)
+        # Ensure at least 1 thousandth
+        min_thousandths = max(1, min_thousandths)
+        max_thousandths = max(min_thousandths, max_thousandths)
+        random_thousandths = random.randint(min_thousandths, max_thousandths)
         base_amount = round(random_thousandths / 10000, 4)
         
         # Apply GPU percent boost (e.g., 5% = 0.05, so multiply by 1.05)
@@ -4788,7 +5194,7 @@ class MiningView(discord.ui.View):
         
         # Calculate value of this mine
         prices = get_crypto_prices()
-        coin_price = prices.get(symbol, 200.0)
+        coin_price = prices.get(symbol, base_price)
         mine_value = amount * coin_price
         self.session_value += mine_value
         
@@ -4796,7 +5202,7 @@ class MiningView(discord.ui.View):
         holdings = get_user_crypto_holdings(interaction.user.id)
         
         # Calculate total portfolio value
-        total_value = sum(holdings[c["symbol"]] * prices.get(c["symbol"], 200.0) for c in CRYPTO_COINS)
+        total_value = sum(holdings[c["symbol"]] * prices.get(c["symbol"], c["base_price"]) for c in CRYPTO_COINS)
         
         # Create session summary
         session_summary = ""
@@ -4808,6 +5214,47 @@ class MiningView(discord.ui.View):
         elapsed_time = time.time() - self.start_time
         max_time = 60 + self.gpu_seconds_boost
         time_remaining = max(0, max_time - int(elapsed_time))
+        
+        # Check if time has actually expired (not just rounded to 0)
+        if elapsed_time >= max_time or self.timed_out:
+            # Session has expired - show expired embed immediately
+            self.timed_out = True
+            for item in self.children:
+                item.disabled = True
+            
+            # Create and show expired embed
+            timeout_embed = discord.Embed(
+                title="⏰ Mining Session Expired",
+                description="Time's up! Your mining session has ended.",
+                color=discord.Color.orange()
+            )
+            
+            if self.total_mines > 0:
+                timeout_embed.add_field(
+                    name="Session Summary",
+                    value=f"Total Mines: **{self.total_mines}**\nSession Value: **${self.session_value:.2f}**",
+                    inline=False
+                )
+                
+                if self.gpus_used:
+                    timeout_embed.add_field(name="GPUs Used", value="\n".join(self.gpus_used), inline=False)
+                
+                if session_summary:
+                    timeout_embed.add_field(name="Mined This Session", value=session_summary.strip(), inline=False)
+                
+                timeout_embed.add_field(
+                    name="Your Total Holdings",
+                    value=f"RTC: {holdings['RTC']:.4f}\nTER: {holdings['TER']:.4f}\nCNY: {holdings['CNY']:.4f}",
+                    inline=False
+                )
+                timeout_embed.add_field(name="Total Portfolio Value", value=f"**${total_value:.2f}**", inline=False)
+            else:
+                timeout_embed.description = "Time's up! You didn't mine anything this session."
+            
+            timeout_embed.set_footer(text="Use /mine again after your cooldown expires!")
+            
+            await interaction.followup.edit_message(interaction.message.id, embed=timeout_embed, view=self)
+            return
         
         # Create GPU info text
         gpu_text = ""
@@ -4858,7 +5305,7 @@ class MiningView(discord.ui.View):
             # Get current holdings for final display
             holdings = get_user_crypto_holdings(self.user_id)
             prices = get_crypto_prices()
-            total_value = sum(holdings[c["symbol"]] * prices.get(c["symbol"], 200.0) for c in CRYPTO_COINS)
+            total_value = sum(holdings[c["symbol"]] * prices.get(c["symbol"], c["base_price"]) for c in CRYPTO_COINS)
             
             timeout_embed.add_field(
                 name="Session Summary",
@@ -4982,7 +5429,7 @@ async def mine(interaction: discord.Interaction):
         embed.add_field(name="GPUs Active", value="\n".join(gpus_used), inline=False)
     
     # Set footer text
-    footer_text = "Each click mines a random amount (0.0075-0.0125) of a random cryptocurrency!"
+    footer_text = "Each click mines a coin-specific amount based on the cryptocurrency's value!"
     if total_percent_boost > 0:
         footer_text += f" GPUs boost your mining by +{total_percent_boost}%!"
     embed.set_footer(text=footer_text)
@@ -5033,7 +5480,10 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         return
     
     # Calculate sale value
-    coin_price = prices.get(coin, 200.0)
+    # Get base price for the coin
+    coin_info = next((c for c in CRYPTO_COINS if c["symbol"] == coin), None)
+    coin_base_price = coin_info["base_price"] if coin_info else 855.0
+    coin_price = prices.get(coin, coin_base_price)
     sale_value = amount * coin_price
     
     # Update holdings (subtract)
@@ -5094,7 +5544,7 @@ async def portfolio(interaction: discord.Interaction):
     for coin in CRYPTO_COINS:
         symbol = coin["symbol"]
         amount = crypto_holdings.get(symbol, 0.0)
-        price = crypto_prices.get(symbol, 200.0)
+        price = crypto_prices.get(symbol, coin["base_price"])
         value = amount * price
         crypto_values[symbol] = value
         crypto_total += value
@@ -5128,7 +5578,7 @@ async def portfolio(interaction: discord.Interaction):
             symbol = coin["symbol"]
             amount = crypto_holdings.get(symbol, 0.0)
             if amount > 0:
-                price = crypto_prices.get(symbol, 200.0)
+                price = crypto_prices.get(symbol, coin["base_price"])
                 value = crypto_values.get(symbol, 0.0)
                 embed.add_field(
                     name=f"{coin['name']} ({symbol})",
@@ -5448,7 +5898,7 @@ async def russian(
     new_balance = normalize_money(user_balance - bet)
     update_user_balance(user_id, new_balance)
     # increase bullet multiplier
-    bullet_multiplier = 1.3 ** bullets
+    bullet_multiplier = 1.2 ** bullets
 
     # # SOLO MODE
     # if players == 1:
@@ -5495,7 +5945,7 @@ async def russian(
     #embed.add_field(name="🎮 Game ID", value=f"`{game_id}`", inline=True)
     embed.add_field(
     name="📋 Rules",
-    value="Each round you survive increases your winnings by **1.3x**!\nCash out anytime to keep your winnings, or keep playing for more!",
+    value="Cash out anytime to keep your winnings, or keep playing for more!",
     inline=False
 )
     

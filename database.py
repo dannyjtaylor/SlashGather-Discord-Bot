@@ -93,6 +93,12 @@ def _ensure_user_document(user_id: int) -> None:
             "gloves": 0,
             "soil": 0
         },
+        "harvest_upgrades": {
+            "car": 0,
+            "chain": 0,
+            "fertilizer": 0,
+            "cooldown": 0
+        },
         "crypto_holdings": {
             "RTC": 0.0,
             "TER": 0.0,
@@ -367,6 +373,32 @@ def set_user_basket_upgrade(user_id: int, upgrade_type: str, tier: int) -> None:
     )
 
 
+def get_user_harvest_upgrades(user_id: int) -> Dict[str, int]:
+    """Get user's harvest upgrade levels. Returns dict with keys: car, chain, fertilizer, cooldown."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"harvest_upgrades": 1})
+    if not doc:
+        return {"car": 0, "chain": 0, "fertilizer": 0, "cooldown": 0}
+    upgrades = doc.get("harvest_upgrades", {})
+    return {
+        "car": upgrades.get("car", 0),
+        "chain": upgrades.get("chain", 0),
+        "fertilizer": upgrades.get("fertilizer", 0),
+        "cooldown": upgrades.get("cooldown", 0)
+    }
+
+
+def set_user_harvest_upgrade(user_id: int, upgrade_type: str, tier: int) -> None:
+    """Set user's harvest upgrade tier. upgrade_type: 'car', 'chain', 'fertilizer', or 'cooldown'."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {f"harvest_upgrades.{upgrade_type}": int(tier)}},
+        upsert=True,
+    )
+
+
 # Cryptocurrency functions
 def get_user_crypto_holdings(user_id: int) -> Dict[str, float]:
     """Get user's cryptocurrency holdings. Returns dict with keys: RTC, TER, CNY."""
@@ -416,7 +448,7 @@ def get_crypto_prices() -> Dict[str, float]:
     doc = users.find_one({"_id": 0}, {"crypto_prices": 1})  # Use _id=0 for global data
     if not doc:
         # Initialize with default prices
-        default_prices = {"RTC": 200.0, "TER": 200.0, "CNY": 200.0}
+        default_prices = {"RTC": 90000.0, "TER": 3100.0, "CNY": 855.0}
         users.update_one(
             {"_id": 0},
             {"$set": {"crypto_prices": default_prices}},
@@ -425,9 +457,9 @@ def get_crypto_prices() -> Dict[str, float]:
         return default_prices
     prices = doc.get("crypto_prices", {})
     return {
-        "RTC": float(prices.get("RTC", 200.0)),
-        "TER": float(prices.get("TER", 200.0)),
-        "CNY": float(prices.get("CNY", 200.0))
+        "RTC": float(prices.get("RTC", 90000.0)),
+        "TER": float(prices.get("TER", 3100.0)),
+        "CNY": float(prices.get("CNY", 855.0))
     }
 
 
@@ -774,14 +806,15 @@ def get_user_gather_data(user_id: int) -> Dict:
 
 
 def reset_user_cooldowns(user_id: int) -> None:
-    """Reset all cooldowns for a user (gather, harvest, mine)."""
+    """Reset all cooldowns for a user (gather, harvest, mine, Russian Roulette elimination)."""
     users = _get_users_collection()
     users.update_one(
         {"_id": int(user_id)},
         {"$set": {
             "last_gather_time": 0.0,
             "last_harvest_time": 0.0,
-            "last_mine_time": 0.0
+            "last_mine_time": 0.0,
+            "last_roulette_elimination_time": 0.0
         }},
         upsert=True,
     )
@@ -825,8 +858,24 @@ def wipe_user_plants(user_id: int) -> None:
     )
 
 
+def wipe_user_crypto(user_id: int) -> None:
+    """Reset user's crypto holdings to 0, keeping everything else."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {
+            "crypto_holdings": {
+                "RTC": 0.0,
+                "TER": 0.0,
+                "CNY": 0.0
+            }
+        }},
+        upsert=True,
+    )
+
+
 def wipe_user_all(user_id: int) -> None:
-    """Reset user's money and all upgrades (basket, shoes, gloves, soil, gardeners, GPUs, plants, stocks, crypto)."""
+    """Reset user's money and all upgrades (basket, shoes, gloves, soil, harvest upgrades, gardeners, GPUs, plants, stocks, crypto)."""
     users = _get_users_collection()
     default_balance = _get_default_balance()
     users.update_one(
@@ -838,6 +887,12 @@ def wipe_user_all(user_id: int) -> None:
                 "shoes": 0,
                 "gloves": 0,
                 "soil": 0
+            },
+            "harvest_upgrades": {
+                "car": 0,
+                "chain": 0,
+                "fertilizer": 0,
+                "cooldown": 0
             },
             "gardeners": [],
             "gpus": [],
