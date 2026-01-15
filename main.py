@@ -10,6 +10,7 @@ import asyncio
 import uuid
 import threading
 import datetime
+import aiohttp
 
 # Load environment variables FIRST
 load_dotenv(override=True)
@@ -95,11 +96,18 @@ from database import (
     clear_expired_events,
     get_user_gather_data,
     perform_gather_update,
+    get_user_tree_rings,
+    increment_tree_rings,
+    get_bloom_multiplier,
+    get_bloom_rank,
+    get_user_bloom_count,
+    perform_bloom,
     reset_user_cooldowns,
     wipe_user_money,
     wipe_user_plants,
     wipe_user_crypto,
     wipe_user_all,
+    _get_users_collection,
 )
 
 try:
@@ -137,9 +145,74 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix='/', intents=intents)
+
+# Helper function to safely handle interaction responses and prevent "interaction failed" messages
+async def safe_interaction_response(interaction: discord.Interaction, 
+                                   response_func, 
+                                   *args, 
+                                   error_message="❌ An error occurred. Please try again.",
+                                   **kwargs):
+    """
+    Safely send an interaction response, catching all errors to prevent "interaction failed" message.
+    
+    Args:
+        interaction: The Discord interaction object
+        response_func: The function to call (e.g., interaction.response.send_message)
+        *args, **kwargs: Arguments to pass to response_func
+        error_message: Message to send if response_func fails
+    """
+    try:
+        return await response_func(*args, **kwargs)
+    except discord.errors.InteractionResponded:
+        # Already responded, try followup instead if applicable
+        if hasattr(interaction, 'followup'):
+            try:
+                if 'send_message' in str(response_func) or 'send' in str(response_func):
+                    # Extract message content from args/kwargs
+                    content = args[0] if args else kwargs.get('content', error_message)
+                    ephemeral = kwargs.get('ephemeral', True)
+                    return await interaction.followup.send(content, ephemeral=ephemeral)
+                elif 'edit_message' in str(response_func) or 'edit' in str(response_func):
+                    message_id = interaction.message.id if hasattr(interaction, 'message') else None
+                    if message_id:
+                        return await interaction.followup.edit_message(message_id, *args[1:], **kwargs)
+            except:
+                pass
+    except discord.errors.NotFound:
+        # Interaction expired
+        print(f"Interaction expired for user {interaction.user.id if hasattr(interaction, 'user') else 'unknown'}")
+    except Exception as e:
+        # Try to send error message
+        try:
+            if hasattr(interaction, 'response') and not interaction.response.is_done():
+                await interaction.response.send_message(error_message, ephemeral=True)
+            elif hasattr(interaction, 'followup'):
+                await interaction.followup.send(error_message, ephemeral=True)
+        except:
+            pass
+        print(f"Error in interaction response: {e}")
+    return None
+
+# Helper function to safely defer an interaction
+async def safe_defer(interaction: discord.Interaction, ephemeral: bool = False):
+    """Safely defer an interaction, handling all possible errors."""
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=ephemeral)
+        return True
+    except discord.errors.InteractionResponded:
+        # Already responded, that's fine
+        return True
+    except discord.errors.NotFound:
+        # Interaction expired
+        print(f"Interaction expired for user {interaction.user.id if hasattr(interaction, 'user') else 'unknown'}")
+        return False
+    except Exception as e:
+        print(f"Error deferring interaction: {e}")
+        return False
 GATHER_COOLDOWN = 60 #(seconds)
 HARVEST_COOLDOWN = 60 * 30 #(30 minutes)
-MINE_COOLDOWN = 5 * 60 #(5 minutes)
+MINE_COOLDOWN = 60 * 60 #(1 hour)
 ROULETTE_ELIMINATION_COOLDOWN = 60 * 30 #(30 minutes)
 
 # Event check intervals (for testing - adjust these values to change how often events are checked)
@@ -255,7 +328,7 @@ HARVEST_CHAIN_UPGRADES = [
     {"name": "Astralicious Season!", "chain_chance": 0.10},
     {"name": "Spectral Season!", "chain_chance": 0.15},
     {"name": "Galaxial Season!", "chain_chance": 0.25},
-    {"name": "Universal Season!", "chain_chance": 0.50},
+    {"name": "Universal Season!", "chain_chance": 0.40},
 ]
 
 HARVEST_CHAIN_PRICES = [1000, 5000, 15000, 50000, 100000, 200000, 1000000, 5000000, 10000000, 20000000]
@@ -339,6 +412,21 @@ def can_harvest(user_id):
     if cooldown_tier > 0:
         cooldown_reduction = HARVEST_COOLDOWN_UPGRADES[cooldown_tier - 1]["reduction"]
     
+    # Apply event cooldown reductions
+    active_events = get_active_events_cached()
+    hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
+    daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
+    
+    if hourly_event:
+        event_id = hourly_event.get("effects", {}).get("event_id", "")
+        if event_id == "speed_harvest":
+            cooldown_reduction += 30  # Cooldown reduced by 30 seconds
+    
+    if daily_event:
+        event_id = daily_event.get("effects", {}).get("event_id", "")
+        if event_id == "speed_day":
+            cooldown_reduction += 15  # Cooldown reduced by 15 seconds
+    
     # Apply cooldown reduction
     effective_cooldown = max(0, HARVEST_COOLDOWN - cooldown_reduction)
     cooldown_end = last_harvest_time + effective_cooldown
@@ -352,6 +440,58 @@ def set_harvest_cooldown(user_id):
     update_user_last_harvest_time(user_id, time.time())
 
     
+async def assign_bloom_rank_role(member: discord.Member, guild: discord.Guild) -> tuple[str | None, str | None]:
+    """Assign Bloom Rank role to user based on their bloom_count."""
+    user_id = member.id
+    bloom_count = get_user_bloom_count(user_id)
+    current_rank = get_bloom_rank(user_id)
+    
+    # All Bloom Rank roles in order
+    bloom_rank_roles = [
+        "PINE I", "PINE II", "PINE III",
+        "CEDAR I", "CEDAR II", "CEDAR III",
+        "BIRCH I", "BIRCH II", "BIRCH III",
+        "MAPLE I", "MAPLE II", "MAPLE III",
+        "OAK I", "OAK II", "OAK III",
+        "FIR I", "FIR II", "FIR III",
+        "REDWOOD"
+    ]
+    
+    # Find the user's current bloom rank role
+    previous_role_name = next((role.name for role in member.roles if role.name in bloom_rank_roles), None)
+    
+    # Determine the target role based on current rank
+    target_role_name = current_rank
+    
+    # If the target role is the same as current role, no changes needed
+    if target_role_name == previous_role_name:
+        return previous_role_name, None
+    
+    # Remove the old bloom rank role if they had one
+    if previous_role_name:
+        old_role = discord.utils.get(guild.roles, name=previous_role_name)
+        if old_role:
+            try:
+                await member.remove_roles(old_role)
+            except Exception as e:
+                print(f"Error removing bloom rank role {previous_role_name} from user {user_id}: {e}")
+    
+    # Assign the new bloom rank role
+    if target_role_name:
+        new_role = discord.utils.get(guild.roles, name=target_role_name)
+        if new_role:
+            try:
+                await member.add_roles(new_role)
+            except Exception as e:
+                print(f"Error adding bloom rank role {target_role_name} to user {user_id}: {e}")
+                return previous_role_name, None
+        else:
+            print(f"Bloom rank role {target_role_name} not found in guild {guild.id}")
+            return previous_role_name, None
+    
+    return previous_role_name, target_role_name
+
+
 async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> tuple[str | None, str | None]:
     #assign gatherer role to the user
     #PLANTER I - 0-49 items gathered
@@ -468,12 +608,12 @@ def can_gather(user_id, user_data=None, active_events=None):
     daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
     
     if hourly_event:
-        event_id = hourly_event.get("event_id", "")
+        event_id = hourly_event.get("effects", {}).get("event_id", "")
         if event_id == "speed_harvest":
             cooldown_reduction += 30  # Cooldown reduced by 30 seconds
     
     if daily_event:
-        event_id = daily_event.get("event_id", "")
+        event_id = daily_event.get("effects", {}).get("event_id", "")
         if event_id == "speed_day":
             cooldown_reduction += 15  # Cooldown reduced by 15 seconds
     
@@ -518,7 +658,7 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
     
     # Apply category-specific event effects (May Flowers, Fruit Festival, Vegetable Boom)
     if hourly_event:
-        event_id = hourly_event.get("event_id", "")
+        event_id = hourly_event.get("effects", {}).get("event_id", "")
         if event_id == "may_flowers":
             # Increase flower weights by 60%
             weights = []
@@ -554,7 +694,7 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
     
     # Apply event base value modifications (May Flowers, Fruit Festival, Vegetable Boom)
     if hourly_event:
-        event_id = hourly_event.get("event_id", "")
+        event_id = hourly_event.get("effects", {}).get("event_id", "")
         if event_id == "may_flowers" and item["category"] == "Flower":
             base_value *= 3  # Triple flower prices
         elif event_id == "fruit_festival" and item["category"] == "Fruit":
@@ -576,11 +716,13 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
         weights = [r["chance"] for r in ripeness_list]
         
         # Apply Perfect Ripeness event (hourly) or Ripeness Rush event (daily)
-        if hourly_event and hourly_event.get("event_id") == "perfect_ripeness":
+        hourly_event_id = hourly_event.get("effects", {}).get("event_id", "") if hourly_event else ""
+        daily_event_id = daily_event.get("effects", {}).get("event_id", "") if daily_event else ""
+        if hourly_event_id == "perfect_ripeness":
             # Increase all ripeness multipliers by 50%
             ripeness = random.choices(ripeness_list, weights=weights, k=1)[0]
             ripeness_multiplier = ripeness["multiplier"] * 1.5
-        elif daily_event and daily_event.get("event_id") == "ripeness_rush":
+        elif daily_event_id == "ripeness_rush":
             # Double perfect ripeness chance
             weights = []
             for r in ripeness_list:
@@ -610,16 +752,16 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
     
     # Apply event GMO chance modifications
     if hourly_event:
-        event_id = hourly_event.get("event_id", "")
+        event_id = hourly_event.get("effects", {}).get("event_id", "")
         if event_id == "radiation_leak":
-            # GMO chance = 50% + current GMO chance
-            gmo_chance = 0.50 + gmo_chance
+            # GMO chance +25%
+            gmo_chance += 0.25
     
     if daily_event:
-        event_id = daily_event.get("event_id", "")
+        event_id = daily_event.get("effects", {}).get("event_id", "")
         if event_id == "gmo_surge":
-            # GMO chance +33%
-            gmo_chance += 0.33
+            # GMO chance +25%
+            gmo_chance += 0.25
     
     # Clamp GMO chance to max 1.0 (100%)
     gmo_chance = min(gmo_chance, 1.0)
@@ -637,7 +779,7 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
     
     # Apply event basket multiplier modifications
     if hourly_event:
-        event_id = hourly_event.get("event_id", "")
+        event_id = hourly_event.get("effects", {}).get("event_id", "")
         if event_id == "basket_boost":
             # Basket multiplier +50%
             basket_multiplier *= 1.5
@@ -645,20 +787,26 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
     # Apply event value multipliers (Bumper Crop, Harvest Festival, Double Money, Lucky Strike)
     value_multiplier = 1.0
     if hourly_event:
-        event_id = hourly_event.get("event_id", "")
+        event_id = hourly_event.get("effects", {}).get("event_id", "")
         if event_id == "bumper_crop":
             value_multiplier *= 2.0  # All item values x2
         elif event_id == "lucky_strike":
             value_multiplier *= 1.25  # All multipliers +25%
     
     if daily_event:
-        event_id = daily_event.get("event_id", "")
+        event_id = daily_event.get("effects", {}).get("event_id", "")
         if event_id == "double_money":
             value_multiplier *= 2.0  # All earnings doubled
         elif event_id == "harvest_festival":
             value_multiplier *= 1.5  # All item values +50%
     
     final_value *= basket_multiplier * value_multiplier
+
+    # Apply bloom multiplier
+    bloom_multiplier = get_bloom_multiplier(user_id)
+    base_final_value = final_value
+    final_value *= bloom_multiplier
+    extra_money_from_bloom = final_value - base_final_value
 
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
@@ -677,6 +825,9 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
     return {
         "name": name,
         "value": final_value,
+        "base_value": base_final_value,
+        "extra_money_from_bloom": extra_money_from_bloom,
+        "bloom_multiplier": bloom_multiplier,
         "ripeness": ripeness["name"],
         "is_gmo": is_gmo,
         "category": item["category"],
@@ -831,7 +982,7 @@ HOURLY_EVENTS = [
         "name": "Radiation Leak!",
         "emoji": "☢️",
         "description": "Radiation has leaked into the forest! GMO mutations are more common.",
-        "effect": "GMO chance = 50% + current GMO chance"
+        "effect": "GMO chance +25%"
     },
     {
         "id": "may_flowers",
@@ -918,7 +1069,7 @@ DAILY_EVENTS = [
         "name": "GMO Surge!",
         "emoji": "✨",
         "description": "GMO mutations are surging! Increased GMO chance all day!",
-        "effect": "GMO chance +33% for 24 hours"
+        "effect": "GMO chance +25% for 24 hours"
     },
     {
         "id": "harvest_festival",
@@ -1364,163 +1515,164 @@ class RouletteJoinView(discord.ui.View):
 
     @discord.ui.button(label = "Join Game", style = discord.ButtonStyle.green, emoji = "🔫")
     async def join_game(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_id = interaction.user.id
-        if self.game_id not in active_roulette_games:
-            await interaction.response.send_message("❌ Game no longer exists!", ephemeral=True)
-            return
+        try:
+            user_id = interaction.user.id
+            if self.game_id not in active_roulette_games:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
+                return
+                
+            game = active_roulette_games[self.game_id]
             
-        game = active_roulette_games[self.game_id]
-        
-        # Check if user is on Russian Roulette elimination cooldown (dead)
-        is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
-        if is_roulette_cooldown:
-            minutes_left = roulette_time_left // 60
-            await interaction.response.send_message(
-                f"Sorry, {interaction.user.name}, you're dead. You cannot join Russian Roulette for {minutes_left} minute(s)", ephemeral=True
-            )
-            return
-        
-        # Check if user is already in this game
-        if user_id in game.players:
-            await interaction.response.send_message("❌ You're already in this game!", ephemeral=True)
-            return
+            # Check if user is on Russian Roulette elimination cooldown (dead)
+            is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+            if is_roulette_cooldown:
+                minutes_left = roulette_time_left // 60
+                await safe_interaction_response(interaction, interaction.response.send_message,
+                    f"Sorry, {interaction.user.name}, you're dead. You cannot join Russian Roulette for {minutes_left} minute(s)", ephemeral=True)
+                return
             
-        # Check if user is in another game
-        if user_id in user_active_games:
-            await interaction.response.send_message("❌ You're already in another game!", ephemeral=True)
-            return
+            # Check if user is already in this game
+            if user_id in game.players:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You're already in this game!", ephemeral=True)
+                return
+                
+            # Check if user is in another game
+            if user_id in user_active_games:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You're already in another game!", ephemeral=True)
+                return
+                
+            # Check if game is full
+            if len(game.players) >= game.max_players:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game is full!", ephemeral=True)
+                return
+                
+            # Check if game already started
+            if game.game_started:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game already started!", ephemeral=True)
+                return
+                
+            # Check user balance
+            user_balance = get_user_balance(user_id)
+            user_balance = normalize_money(user_balance)
+            bet_amount = normalize_money(game.bet_amount)
             
-        # Check if game is full
-        if len(game.players) >= game.max_players:
-            await interaction.response.send_message("❌ Game is full!", ephemeral=True)
-            return
+            if not can_afford_rounded(user_balance, bet_amount):
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You don't have enough balance to join!", ephemeral=True)
+                return
+                
+            # Join the game
+            game.add_player(user_id, interaction.user.name)
+            user_active_games[user_id] = self.game_id
             
-        # Check if game already started
-        if game.game_started:
-            await interaction.response.send_message("❌ Game already started!", ephemeral=True)
-            return
+            # Deduct bet
+            new_balance = normalize_money(user_balance - bet_amount)
+            update_user_balance(user_id, new_balance)
             
-        # Check user balance
-        user_balance = get_user_balance(user_id)
-        user_balance = normalize_money(user_balance)
-        bet_amount = normalize_money(game.bet_amount)
-        
-        if not can_afford_rounded(user_balance, bet_amount):
-            await interaction.response.send_message("❌ You don't have enough balance to join!", ephemeral=True)
-            return
+            # Update the embed
+            embed = interaction.message.embeds[0]
+            embed.description = f"**{game.host_name}** is playing with **{len(game.players)}/{game.max_players}** players!\n\n*How long can you survive?*"
             
-        # Join the game
-        game.add_player(user_id, interaction.user.name)
-        user_active_games[user_id] = self.game_id
-        
-        # Deduct bet
-        new_balance = normalize_money(user_balance - bet_amount)
-        update_user_balance(user_id, new_balance)
-        
-        # Update the embed
-        embed = interaction.message.embeds[0]
-        embed.description = f"**{game.host_name}** is playing with **{len(game.players)}/{game.max_players}** players!\n\n*How long can you survive?*"
-        
-        # Update the view (disable join button if full)
-        if len(game.players) >= game.max_players:
-            button.disabled = True
-            button.label = "Game Full"
-        
-        await interaction.response.edit_message(embed=embed, view=self)
+            # Update the view (disable join button if full)
+            if len(game.players) >= game.max_players:
+                button.disabled = True
+                button.label = "Game Full"
+            
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+        except Exception as e:
+            print(f"Error in join_game: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
 
     @discord.ui.button(label="Start Game", style=discord.ButtonStyle.blurple, emoji="🚀")
     async def start_game(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Only host can start
-        if interaction.user.id != self.host_id:
-            await interaction.response.send_message("❌ Only the game host can start the game!", ephemeral=True)
-            return
-            
-        if self.game_id not in active_roulette_games:
-            await interaction.response.send_message("❌ Game no longer exists!", ephemeral=True)
-            return
-            
-        game = active_roulette_games[self.game_id]
-        
-        # Check if game already started (race condition protection)
-        if game.game_started:
-            await interaction.response.send_message("❌ Game already started!", ephemeral=True)
-            return
-        
-        # Validate that there are players
-        if len(game.players) == 0:
-            await interaction.response.send_message("❌ Cannot start game: No players in game!", ephemeral=True)
-            return
-            
-        # Set pot before starting (start_roulette_game will set game_started)
-        game.pot = normalize_money(game.bet_amount * len(game.players))
-        
         try:
-            await interaction.response.edit_message(content="🎮 **Game Started!**", view=None)
-        except discord.errors.InteractionResponded:
-            # Interaction already responded, try followup
-            await interaction.followup.edit_message(interaction.message.id, content="🎮 **Game Started!**", view=None)
+            # Only host can start
+            if interaction.user.id != self.host_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Only the game host can start the game!", ephemeral=True)
+                return
+                
+            if self.game_id not in active_roulette_games:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
+                return
+                
+            game = active_roulette_games[self.game_id]
+            
+            # Check if game already started (race condition protection)
+            if game.game_started:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game already started!", ephemeral=True)
+                return
+            
+            # Validate that there are players
+            if len(game.players) == 0:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Cannot start game: No players in game!", ephemeral=True)
+                return
+                
+            # Set pot before starting (start_roulette_game will set game_started)
+            game.pot = normalize_money(game.bet_amount * len(game.players))
+            
+            await safe_interaction_response(interaction, interaction.response.edit_message, content="🎮 **Game Started!**", view=None)
+            
+            # Start the actual game (this will set game_started and handle errors)
+            await start_roulette_game(interaction.channel, self.game_id)
         except Exception as e:
-            print(f"Error editing message: {e}")
-            # Continue anyway - game should still start
-        
-        # Start the actual game (this will set game_started and handle errors)
-        await start_roulette_game(interaction.channel, self.game_id)
+            print(f"Error in start_game: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     @discord.ui.button(label="Cancel Game", style=discord.ButtonStyle.red, emoji="❌")
     async def cancel_game(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Only host can cancel
-        if interaction.user.id != self.host_id:
-            await interaction.response.send_message("❌ Only the game host can cancel the game!", ephemeral=True)
-            return
-        
-        if self.game_id not in active_roulette_games:
-            await interaction.response.send_message("❌ Game no longer exists!", ephemeral=True)
-            return
-        
-        game = active_roulette_games[self.game_id]
-        
-        # Check if game already started
-        if game.game_started:
-            await interaction.response.send_message("❌ Cannot cancel a game that has already started!", ephemeral=True)
-            return
-        
-        # Refund all players
-        refunded_count = 0
-        for player_id in list(game.players.keys()):
-            try:
-                user_balance = get_user_balance(player_id)
-                user_balance = normalize_money(user_balance)
-                refund_amount = normalize_money(game.bet_amount)
-                new_balance = normalize_money(user_balance + refund_amount)
-                update_user_balance(player_id, new_balance)
-                refunded_count += 1
-            except Exception as e:
-                print(f"Error refunding player {player_id}: {e}")
-        
-        # Clean up game from all dictionaries
-        if self.game_id in active_roulette_games:
-            del active_roulette_games[self.game_id]
-        
-        for ch_id, tracked_game_id in list(active_roulette_channel_games.items()):
-            if tracked_game_id == self.game_id:
-                del active_roulette_channel_games[ch_id]
-        
-        for player_id in list(user_active_games.keys()):
-            if user_active_games[player_id] == self.game_id:
-                del user_active_games[player_id]
-        
-        # Update the message to show cancellation
-        embed = discord.Embed(
-            title="❌ Game Cancelled",
-            description=f"**{game.host_name}** cancelled the game.\n\nAll bets have been refunded.",
-            color=discord.Color.red()
-        )
-        embed.add_field(name="💰 Refunded", value=f"${game.bet_amount:.2f} to {refunded_count} player(s)", inline=True)
-        
         try:
-            await interaction.response.edit_message(embed=embed, view=None)
-        except discord.errors.InteractionResponded:
-            await interaction.followup.edit_message(interaction.message.id, embed=embed, view=None)
+            # Only host can cancel
+            if interaction.user.id != self.host_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Only the game host can cancel the game!", ephemeral=True)
+                return
+            
+            if self.game_id not in active_roulette_games:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
+                return
+            
+            game = active_roulette_games[self.game_id]
+            
+            # Check if game already started
+            if game.game_started:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Cannot cancel a game that has already started!", ephemeral=True)
+                return
+            
+            # Refund all players
+            refunded_count = 0
+            for player_id in list(game.players.keys()):
+                try:
+                    user_balance = get_user_balance(player_id)
+                    user_balance = normalize_money(user_balance)
+                    refund_amount = normalize_money(game.bet_amount)
+                    new_balance = normalize_money(user_balance + refund_amount)
+                    update_user_balance(player_id, new_balance)
+                    refunded_count += 1
+                except Exception as e:
+                    print(f"Error refunding player {player_id}: {e}")
+            
+            # Clean up game from all dictionaries
+            if self.game_id in active_roulette_games:
+                del active_roulette_games[self.game_id]
+            
+            for ch_id, tracked_game_id in list(active_roulette_channel_games.items()):
+                if tracked_game_id == self.game_id:
+                    del active_roulette_channel_games[ch_id]
+            
+            for player_id in list(user_active_games.keys()):
+                if user_active_games[player_id] == self.game_id:
+                    del user_active_games[player_id]
+            
+            # Update the message to show cancellation
+            embed = discord.Embed(
+                title="❌ Game Cancelled",
+                description=f"**{game.host_name}** cancelled the game.\n\nAll bets have been refunded.",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="💰 Refunded", value=f"${game.bet_amount:.2f} to {refunded_count} player(s)", inline=True)
+            
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=None)
+        except Exception as e:
+            print(f"Error in cancel_game: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     async def on_timeout(self):
         # Auto-start the game after 5 minutes if host hasn't started it
@@ -1557,81 +1709,98 @@ class RouletteContinueView(discord.ui.View):
     
     @discord.ui.button(label="Pull Trigger", style=discord.ButtonStyle.danger, emoji="🔫")
     async def continue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.game_id not in active_roulette_games:
-            await interaction.response.send_message("❌ Game no longer exists!", ephemeral=True)
-            return
-        
-        game = active_roulette_games[self.game_id]
-        current_player_id = game.get_current_player()
-        
-        if interaction.user.id != current_player_id:
-            await interaction.response.send_message("❌ It's not your turn!", ephemeral=True)
-            return
-        
-        await interaction.response.defer()
-        await interaction.message.delete()
-        
-        # Continue the game
-        await play_roulette_round(interaction.channel, self.game_id)
+        try:
+            if self.game_id not in active_roulette_games:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
+                return
+            
+            game = active_roulette_games[self.game_id]
+            current_player_id = game.get_current_player()
+            
+            if interaction.user.id != current_player_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ It's not your turn!", ephemeral=True)
+                return
+            
+            if not await safe_defer(interaction):
+                return
+            
+            try:
+                await interaction.message.delete()
+            except:
+                pass  # Message might already be deleted
+            
+            # Continue the game
+            await play_roulette_round(interaction.channel, self.game_id)
+        except Exception as e:
+            print(f"Error in continue_button: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     @discord.ui.button(label="Cash Out", style=discord.ButtonStyle.secondary, emoji="💰")
     async def cashout_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.allow_cashout:
-            await interaction.response.send_message("❌ Cash out is not available on the very first turn!", ephemeral=True)
-            return
-        
-        if self.game_id not in active_roulette_games:
-            await interaction.response.send_message("❌ Game no longer exists!", ephemeral=True)
-            return
-        
-        game = active_roulette_games[self.game_id]
-        current_player_id = game.get_current_player()
-        
-        if interaction.user.id != current_player_id:
-            await interaction.response.send_message("❌ It's not your turn!", ephemeral=True)
-            return
-        
-        await interaction.response.defer()
-        
-        # Cash out - player gets their stake back
-        player = game.players[current_player_id]
-        winnings = normalize_money(player['current_stake'])
-        
-        # Add winnings to player balance
-        current_balance = get_user_balance(current_player_id)
-        current_balance = normalize_money(current_balance)
-        new_balance = normalize_money(current_balance + winnings)
-        update_user_balance(current_player_id, new_balance)
-        
-        # Remove from active games
-        if current_player_id in user_active_games:
-            del user_active_games[current_player_id]
-        
-        # Mark player as eliminated (cashed out)
-        game.players[current_player_id]['alive'] = False
-        
-        embed = discord.Embed(
-            title="💰 CASHED OUT! 💰",
-            description=f"**{player['name']}** decided to walk away!",
-            color=discord.Color.gold()
-        )
-        embed.add_field(name="💵 Winnings", value=f"${winnings:.2f}", inline=True)
-        embed.add_field(name="💸 Profit", value=f"${normalize_money(winnings - normalize_money(game.bet_amount)):.2f}", inline=True)
-        embed.add_field(name="📈 Multiplier Achieved", value=f"{game.calculate_total_multiplier(player['rounds_survived']):.2f}x", inline=True)
-        embed.add_field(name="🎯 Rounds Survived", value=f"{player['rounds_survived']}", inline=True)
-        
-        await interaction.message.edit(embed=embed, view=None)
-        
-        # Check if game ends
-        alive_count = len(game.get_alive_players())
-        
-        if alive_count == 0 or (alive_count == 1 and game.max_players > 1):
-            await asyncio.sleep(2)
-            await end_roulette_game(interaction.channel, self.game_id)
-        else:
-            game.next_turn()
-            await asyncio.sleep(2)
-            await play_roulette_round(interaction.channel, self.game_id)
+        try:
+            if not self.allow_cashout:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Cash out is not available on the very first turn!", ephemeral=True)
+                return
+            
+            if self.game_id not in active_roulette_games:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
+                return
+            
+            game = active_roulette_games[self.game_id]
+            current_player_id = game.get_current_player()
+            
+            if interaction.user.id != current_player_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ It's not your turn!", ephemeral=True)
+                return
+            
+            if not await safe_defer(interaction):
+                return
+            
+            # Cash out - player gets their stake back
+            player = game.players[current_player_id]
+            winnings = normalize_money(player['current_stake'])
+            
+            # Add winnings to player balance
+            current_balance = get_user_balance(current_player_id)
+            current_balance = normalize_money(current_balance)
+            new_balance = normalize_money(current_balance + winnings)
+            update_user_balance(current_player_id, new_balance)
+            
+            # Remove from active games
+            if current_player_id in user_active_games:
+                del user_active_games[current_player_id]
+            
+            # Mark player as eliminated (cashed out)
+            game.players[current_player_id]['alive'] = False
+            
+            embed = discord.Embed(
+                title="💰 CASHED OUT! 💰",
+                description=f"**{player['name']}** decided to walk away!",
+                color=discord.Color.gold()
+            )
+            embed.add_field(name="💵 Winnings", value=f"${winnings:.2f}", inline=True)
+            embed.add_field(name="💸 Profit", value=f"${normalize_money(winnings - normalize_money(game.bet_amount)):.2f}", inline=True)
+            embed.add_field(name="📈 Multiplier Achieved", value=f"{game.calculate_total_multiplier(player['rounds_survived']):.2f}x", inline=True)
+            embed.add_field(name="🎯 Rounds Survived", value=f"{player['rounds_survived']}", inline=True)
+            
+            try:
+                await interaction.message.edit(embed=embed, view=None)
+            except:
+                pass  # Message might have been deleted
+            
+            # Check if game ends
+            alive_count = len(game.get_alive_players())
+            
+            if alive_count == 0 or (alive_count == 1 and game.max_players > 1):
+                await asyncio.sleep(2)
+                await end_roulette_game(interaction.channel, self.game_id)
+            else:
+                game.next_turn()
+                await asyncio.sleep(2)
+                await play_roulette_round(interaction.channel, self.game_id)
+        except Exception as e:
+            print(f"Error in cashout_button: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     async def on_timeout(self):
         # Auto-cash out when timeout expires
@@ -1781,53 +1950,58 @@ async def end_roulette_game(channel, game_id):
     app_commands.Choice(name="tails", value="tails")
 ])
 async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
-    await interaction.response.defer(ephemeral=False)
-    user_id = interaction.user.id
-    
-    # Validate bet amount is positive
-    if bet <= 0:
-        await interaction.followup.send("❌ Bet amount must be greater than $0.00!", ephemeral=True)
-        return
-    
-    # Validate bet has at most 2 decimal places (no fractional cents)
-    if not validate_money_precision(bet):
-        await interaction.followup.send("❌ Bet amount must be in dollars and cents (maximum 2 decimal places)!", ephemeral=True)
-        return
-    
-    # Normalize bet to exactly 2 decimal places
-    bet = normalize_money(bet)
-    
-    current_balance = get_user_balance(user_id)
-    current_balance = normalize_money(current_balance)
-    
-    if not can_afford_rounded(current_balance, bet):
-        await interaction.followup.send(f"You do not have enough balance to bet **${bet:.2f}**, {interaction.user.name}.", ephemeral=False)
-        return
-    
-    # Deduct bet first
-    new_balance_after_bet = normalize_money(current_balance - bet)
-    update_user_balance(user_id, new_balance_after_bet)
-    
-    # Flip the coin - randomly choose heads or tails (lowercase)
-    coin_result = random.choice(["heads", "tails"])
-    
-    # Check if they won (their choice matches the result, both lowercase)
-    won = choice.lower() == coin_result
-    
-    # Calculate new balance
-    if won:
-        # They win - get double their bet back (bet was already deducted, so add 2*bet)
-        new_balance = normalize_money(new_balance_after_bet + (bet * 2))
-        update_user_balance(user_id, new_balance)
-        message = f"You placed **${bet:.2f}** on **{choice}**!\nThe coin landed on **{coin_result}**! You doubled your bet!!\nYour new balance is **${new_balance:.2f}**."
-    else:
-        # They lose - bet was already deducted
-        new_balance = new_balance_after_bet
-        # Get the opposite choice for display (lowercase)
-        opposite = "tails" if choice.lower() == "heads" else "heads"
-        message = f"You placed **${bet:.2f}** on **{choice}**!\nOuch {interaction.user.name}, the coin landed on **{opposite}**. You lost **${bet:.2f}**.\nYour new balance is **${new_balance:.2f}**."
-    
-    await interaction.followup.send(message, ephemeral=False)
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        user_id = interaction.user.id
+        
+        # Validate bet amount is positive
+        if bet <= 0:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Bet amount must be greater than $0.00!", ephemeral=True)
+            return
+        
+        # Validate bet has at most 2 decimal places (no fractional cents)
+        if not validate_money_precision(bet):
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Bet amount must be in dollars and cents (maximum 2 decimal places)!", ephemeral=True)
+            return
+        
+        # Normalize bet to exactly 2 decimal places
+        bet = normalize_money(bet)
+        
+        current_balance = get_user_balance(user_id)
+        current_balance = normalize_money(current_balance)
+        
+        if not can_afford_rounded(current_balance, bet):
+            await safe_interaction_response(interaction, interaction.followup.send, f"You do not have enough balance to bet **${bet:.2f}**, {interaction.user.name}.", ephemeral=False)
+            return
+        
+        # Deduct bet first
+        new_balance_after_bet = normalize_money(current_balance - bet)
+        update_user_balance(user_id, new_balance_after_bet)
+        
+        # Flip the coin - randomly choose heads or tails (lowercase)
+        coin_result = random.choice(["heads", "tails"])
+        
+        # Check if they won (their choice matches the result, both lowercase)
+        won = choice.lower() == coin_result
+        
+        # Calculate new balance
+        if won:
+            # They win - get double their bet back (bet was already deducted, so add 2*bet)
+            new_balance = normalize_money(new_balance_after_bet + (bet * 2))
+            update_user_balance(user_id, new_balance)
+            message = f"You placed **${bet:.2f}** on **{choice}**!\nThe coin landed on **{coin_result}**! You doubled your bet!!\nYour new balance is **${new_balance:.2f}**."
+        else:
+            # They lose - bet was already deducted
+            new_balance = new_balance_after_bet
+            # Get the opposite choice for display (lowercase)
+            opposite = "tails" if choice.lower() == "heads" else "heads"
+            message = f"You placed **${bet:.2f}** on **{choice}**!\nOuch {interaction.user.name}, the coin landed on **{opposite}**. You lost **${bet:.2f}**.\nYour new balance is **${new_balance:.2f}**."
+        
+        await safe_interaction_response(interaction, interaction.followup.send, message, ephemeral=False)
+    except Exception as e:
+        print(f"Error in coinflip command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # Slots game implementation
@@ -2031,59 +2205,67 @@ class SlotsView(discord.ui.View):
     @discord.ui.button(label="🎰 SPIN 🎰", style=discord.ButtonStyle.success, emoji="🎲", row=0)
     async def spin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Spin the slots!"""
-        if self.spinning or self.spun:
-            await interaction.response.send_message("❌ You already spun!", ephemeral=True)
-            return
-        
-        self.spinning = True
-        # Start animation in a task so we don't block
-        await self.animate_spin(interaction)
+        try:
+            if self.spinning or self.spun:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You already spun!", ephemeral=True)
+                return
+            
+            self.spinning = True
+            # Start animation in a task so we don't block
+            await self.animate_spin(interaction)
+        except Exception as e:
+            print(f"Error in spin_button: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 @bot.tree.command(name="slots", description="Play slots! Match 3 in the middle row to win!")
 @app_commands.describe(bet="The amount to bet")
 async def slots(interaction: discord.Interaction, bet: float):
-    await interaction.response.defer(ephemeral=False)
-    user_id = interaction.user.id
-    
-    # Check if user is on Russian Roulette elimination cooldown (dead)
-    is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
-    if is_roulette_cooldown:
-        minutes_left = roulette_time_left // 60
-        await interaction.followup.send(
-            f"Sorry, {interaction.user.name}, you're dead. You cannot play slots for {minutes_left} minute(s)", ephemeral=True
-        )
-        return
-    
-    # Validate bet amount is positive
-    if bet <= 0:
-        await interaction.followup.send("❌ Invalid bet amount!", ephemeral=True)
-        return
-    
-    # Validate bet has at most 2 decimal places (no fractional cents)
-    if not validate_money_precision(bet):
-        await interaction.followup.send("❌ Invalid bet amount!", ephemeral=True)
-        return
-    
-    # Normalize bet to exactly 2 decimal places
-    bet = normalize_money(bet)
-    
-    current_balance = get_user_balance(user_id)
-    current_balance = normalize_money(current_balance)
-    
-    if not can_afford_rounded(current_balance, bet):
-        await interaction.followup.send(f"You do not have enough balance to bet **${bet:.2f}**, {interaction.user.name}.", ephemeral=False)
-        return
-    
-    # Deduct bet first
-    new_balance_after_bet = normalize_money(current_balance - bet)
-    update_user_balance(user_id, new_balance_after_bet)
-    
-    # Create slots view
-    view = SlotsView(user_id, bet)
-    embed = view.update_embed()
-    
-    await interaction.followup.send(embed=embed, view=view)
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        user_id = interaction.user.id
+        
+        # Check if user is on Russian Roulette elimination cooldown (dead)
+        is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+        if is_roulette_cooldown:
+            minutes_left = roulette_time_left // 60
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"Sorry, {interaction.user.name}, you're dead. You cannot play slots for {minutes_left} minute(s)", ephemeral=True)
+            return
+        
+        # Validate bet amount is positive
+        if bet <= 0:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Invalid bet amount!", ephemeral=True)
+            return
+        
+        # Validate bet has at most 2 decimal places (no fractional cents)
+        if not validate_money_precision(bet):
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Invalid bet amount!", ephemeral=True)
+            return
+        
+        # Normalize bet to exactly 2 decimal places
+        bet = normalize_money(bet)
+        
+        current_balance = get_user_balance(user_id)
+        current_balance = normalize_money(current_balance)
+        
+        if not can_afford_rounded(current_balance, bet):
+            await safe_interaction_response(interaction, interaction.followup.send, f"You do not have enough balance to bet **${bet:.2f}**, {interaction.user.name}.", ephemeral=False)
+            return
+        
+        # Deduct bet first
+        new_balance_after_bet = normalize_money(current_balance - bet)
+        update_user_balance(user_id, new_balance_after_bet)
+        
+        # Create slots view
+        view = SlotsView(user_id, bet)
+        embed = view.update_embed()
+        
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
+    except Exception as e:
+        print(f"Error in slots command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # user_balances = {}
@@ -2101,7 +2283,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.3.0 :33"
+            name="running /gather on V0.3.1 :3"
         )
     )
     try:
@@ -2171,266 +2353,485 @@ async def on_member_join(member):
 
 @bot.tree.command(name="gather", description="Gather a random item from nature!")
 async def gather(interaction: discord.Interaction):
-    #use defer for custom message
-    await interaction.response.defer(ephemeral=False)
-
-    # Fetch user data and events once at the start
-    user_id = interaction.user.id
-    user_data = get_user_gather_data(user_id)   
-    active_events = get_active_events_cached()
-
-    #check if the user is on cooldown (default 1 min), if so let them know how much time they have left
-    can_user_gather, time_left, is_roulette_cooldown = can_gather(user_id, user_data=user_data, active_events=active_events)
-    if not can_user_gather:
-        #then user is on cooldown
-        if is_roulette_cooldown:
-            # Russian Roulette elimination cooldown
-            minutes_left = time_left // 60
-            await interaction.followup.send(
-                f"Sorry, {interaction.user.name}, you're dead. You cannot /gather for {minutes_left} minute(s)", ephemeral=True
-            )
-        else:
-            # Normal gather cooldown
-            await interaction.followup.send(
-                f"You must wait {time_left} seconds before gathering again, {interaction.user.name}.", ephemeral=True
-            )
-        return
-
-    # Perform the gather with pre-fetched data
-    gather_result = await perform_gather_for_user(user_id, apply_cooldown=True, 
-                                                  user_data=user_data, active_events=active_events)
-
-    # assign role and check for rank-up
-    old_role = None
-    new_role = None
     try:
-        old_role, new_role = await assign_gatherer_role(interaction.user, interaction.guild)
-    except Exception as e:
-        print(f"Error assigning gatherer role to user {user_id}: {e}")
+        #use defer for custom message
+        if not await safe_defer(interaction, ephemeral=False):
+            return
 
-    # Send rank-up notification if player advanced
-    if new_role:
-        # Special message for Planter I advancement (when old_role is None)
-        if new_role == "PLANTER I" and old_role is None:
-            rankup_embed = discord.Embed(
-                title="🌱 Rank Up!",
-                description=f"{interaction.user.mention} advanced to **PLANTER I**!",
-                color=discord.Color.gold(),
-            )
-        else:
-            rankup_embed = discord.Embed(
-                title="🌱 Rank Up!",
-                description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
-                color=discord.Color.gold(),
-            )
-        await interaction.followup.send(embed=rankup_embed)
+        # Fetch user data and events once at the start
+        user_id = interaction.user.id
+        user_data = get_user_gather_data(user_id)   
+        active_events = get_active_events_cached()
 
-    #create discord embed
-    embed = discord.Embed(
-        title= "You Gathered!",
-        description = f"You foraged for a(n) **{gather_result['name']}**!",
-        color = discord.Color.green()
-    )
+        #check if the user is on cooldown (default 1 min), if so let them know how much time they have left
+        can_user_gather, time_left, is_roulette_cooldown = can_gather(user_id, user_data=user_data, active_events=active_events)
+        if not can_user_gather:
+            #then user is on cooldown
+            if is_roulette_cooldown:
+                # Russian Roulette elimination cooldown
+                minutes_left = time_left // 60
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"Sorry, {interaction.user.name}, you're dead. You cannot /gather for {minutes_left} minute(s)", ephemeral=True)
+            else:
+                # Normal gather cooldown
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"You must wait {time_left} seconds before gathering again, {interaction.user.name}.", ephemeral=True)
+            return
 
-    embed.add_field(name="Value", value=f"**${gather_result['value']:.2f}**", inline=True)
-    embed.add_field(name="Ripeness", value=f"{gather_result['ripeness']}", inline=True)
-    embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
-    # add a line to show [username] in [month]
-    embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
-    embed.add_field(name="new balance: ", value=f"**${gather_result['new_balance']:.2f}**", inline=False)
-    
-    # Check for chain chance (gloves upgrade) - use pre-fetched data
-    user_upgrades = user_data["basket_upgrades"]
-    gloves_tier = user_upgrades["gloves"]
-    chain_triggered = False
-    if gloves_tier > 0:
-        chain_chance = GLOVES_UPGRADES[gloves_tier - 1]["chain_chance"]
+        # Get Tree Rings before gather to check if one was awarded
+        tree_rings_before = get_user_tree_rings(user_id)
         
-        # Apply Chain Reaction event (hourly) - use pre-fetched events
-        hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
-        if hourly_event and hourly_event.get("event_id") == "chain_reaction":
-            chain_chance *= 2  # Double the chain chance
+        # Perform the gather with pre-fetched data
+        gather_result = await perform_gather_for_user(user_id, apply_cooldown=True, 
+                                                      user_data=user_data, active_events=active_events)
+
+        # Check if a Tree Ring was awarded
+        tree_rings_after = get_user_tree_rings(user_id)
+        if tree_rings_after > tree_rings_before:
+            tree_rings_awarded = tree_rings_after - tree_rings_before
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"🌳 {interaction.user.mention} You've been awarded **{tree_rings_awarded} Tree Ring{'s' if tree_rings_awarded > 1 else ''}**!",
+                ephemeral=True)
+
+        # assign role and check for rank-up
+        old_role = None
+        new_role = None
+        try:
+            old_role, new_role = await assign_gatherer_role(interaction.user, interaction.guild)
+        except Exception as e:
+            print(f"Error assigning gatherer role to user {user_id}: {e}")
+
+        # Send rank-up notification if player advanced
+        if new_role:
+            # Special message for Planter I advancement (when old_role is None)
+            if new_role == "PLANTER I" and old_role is None:
+                rankup_embed = discord.Embed(
+                    title="🌱 Rank Up!",
+                    description=f"{interaction.user.mention} advanced to **PLANTER I**!",
+                    color=discord.Color.gold(),
+                )
+            else:
+                rankup_embed = discord.Embed(
+                    title="🌱 Rank Up!",
+                    description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
+                    color=discord.Color.gold(),
+                )
+            await safe_interaction_response(interaction, interaction.followup.send, embed=rankup_embed)
+
+        #create discord embed
+        embed = discord.Embed(
+            title= "You Gathered!",
+            description = f"You foraged for a(n) **{gather_result['name']}**!",
+            color = discord.Color.green()
+        )
+
+        embed.add_field(name="Value", value=f"**${gather_result['value']:.2f}**", inline=True)
+        embed.add_field(name="Ripeness", value=f"{gather_result['ripeness']}", inline=True)
+        embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
         
-        chain_triggered = random.random() < chain_chance
+        # Show bloom multiplier if applicable (only after first bloom)
+        bloom_count = get_user_bloom_count(user_id)
+        if bloom_count > 0 and gather_result.get('extra_money_from_bloom', 0) > 0:
+            tree_rings = get_user_tree_rings(user_id)
+            multiplier_percent = (gather_result['bloom_multiplier'] - 1.0) * 100
+            embed.add_field(
+                name="🌳 Tree Ring Boost", 
+                value=f"+{multiplier_percent:.1f}% ({gather_result['bloom_multiplier']:.2f}x) - **+${gather_result['extra_money_from_bloom']:.2f}**", 
+                inline=False
+            )
+        
+        # add a line to show [username] in [month]
+        embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
+        embed.add_field(name="new balance: ", value=f"**${gather_result['new_balance']:.2f}**", inline=False)
+        
+        # Check for chain chance (gloves upgrade) - use pre-fetched data
+        user_upgrades = user_data["basket_upgrades"]
+        gloves_tier = user_upgrades["gloves"]
+        chain_triggered = False
+        if gloves_tier > 0:
+            chain_chance = GLOVES_UPGRADES[gloves_tier - 1]["chain_chance"]
+            
+            # Apply Chain Reaction event (hourly) - use pre-fetched events
+            hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
+            if hourly_event:
+                event_id = hourly_event.get("effects", {}).get("event_id", "")
+                if event_id == "chain_reaction":
+                    chain_chance *= 2  # Double the chain chance
+            
+            chain_triggered = random.random() < chain_chance
+            if chain_triggered:
+                # Reset cooldown by setting last_gather_time to 0 (allows immediate next gather)
+                update_user_last_gather_time(user_id, 0)
+        
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+        
+        # Send separate chain message if triggered
         if chain_triggered:
-            # Reset cooldown by setting last_gather_time to 0 (allows immediate next gather)
-            update_user_last_gather_time(user_id, 0)
-    
-    await interaction.followup.send(embed=embed)
-    
-    # Send separate chain message if triggered
-    if chain_triggered:
-        await interaction.followup.send(f"🔗🔗 **CHAIN!** Your cooldown has been reset! Gather again! 🔗🔗") 
+            await safe_interaction_response(interaction, interaction.followup.send, f"🔗🔗 **CHAIN!** Your cooldown has been reset! Gather again! 🔗🔗")
+    except Exception as e:
+        print(f"Error in gather command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 #/harvest command, basically /castnet
 @bot.tree.command(name="harvest", description="Harvest a bunch of plants at once!")
 async def harvest(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    user_id = interaction.user.id
-    can_user_harvest, time_left, is_roulette_cooldown = can_harvest(user_id)
-    if not can_user_harvest:
-        if is_roulette_cooldown:
-            # Russian Roulette elimination cooldown
-            minutes_left = time_left // 60
-            await interaction.followup.send(
-                f"Sorry, {interaction.user.name}, you're dead. You cannot /harvest for {minutes_left} minute(s)", ephemeral=True
-            )
-        else:
-            # Normal harvest cooldown
-            minutes_left = time_left // 60
-            seconds_left = time_left % 60   
-            await interaction.followup.send(
-                f"You must wait {minutes_left} minutes and {seconds_left} seconds before harvesting again, {interaction.user.name}.", ephemeral=True
-            )
-        return
-    set_harvest_cooldown(user_id)
-    
-    
-    # Get user upgrades (basket upgrades for gather, harvest upgrades for harvest)
-    user_upgrades = get_user_basket_upgrades(user_id)
-    basket_tier = user_upgrades["basket"]
-    soil_tier = user_upgrades["soil"]
-    
-    # Get harvest upgrades
-    harvest_upgrades = get_user_harvest_upgrades(user_id)
-    car_tier = harvest_upgrades["car"]
-    chain_tier = harvest_upgrades["chain"]
-    fertilizer_tier = harvest_upgrades["fertilizer"]
-    
-    # Calculate number of items to harvest (default 10 + extra items from car upgrade)
-    base_items = 10
-    extra_items = 0
-    if car_tier > 0:
-        extra_items = HARVEST_CAR_UPGRADES[car_tier - 1]["extra_items"]
-    total_items_to_harvest = base_items + extra_items
-    
-    # Get upgrade multipliers
-    basket_multiplier = BASKET_UPGRADES[basket_tier - 1]["multiplier"] if basket_tier > 0 else 1.0
-    base_gmo_chance = 0.05
-    soil_gmo_boost = SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] if soil_tier > 0 else 0
-    gmo_chance = base_gmo_chance + soil_gmo_boost
-    
-    # Get fertilizer multiplier (percentage increase)
-    fertilizer_multiplier = 1.0
-    if fertilizer_tier > 0:
-        fertilizer_multiplier = 1.0 + HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["multiplier"]
-    
-    # Get chain chance
-    chain_chance = 0.0
-    if chain_tier > 0:
-        chain_chance = HARVEST_CHAIN_UPGRADES[chain_tier - 1]["chain_chance"]
-    
-    #/gather multiple times based on car upgrade
-    gathered_items = []
-    total_value = 0.0
-    current_balance = get_user_balance(user_id)
-
-
-    for i in range(total_items_to_harvest):
-        item = random.choice(GATHERABLE_ITEMS)
-        name = item["name"]
-        if item["category"] == "Fruit":
-            ripeness_list = LEVEL_OF_RIPENESS_FRUITS
-        elif item["category"] == "Vegetable":
-            ripeness_list = LEVEL_OF_RIPENESS_VEGETABLES
-        elif item["category"] == "Flower":
-            ripeness_list = LEVEL_OF_RIPENESS_FLOWERS
-        else:
-            ripeness_list = []
-            
-        #calcualte value w/ ripeness
-        if ripeness_list:
-            weights = [r["chance"] for r in ripeness_list]
-            ripeness = random.choices(ripeness_list, weights=weights, k=1)[0]
-            final_value = item["base_value"] * ripeness["multiplier"]
-        else:
-            final_value = item["base_value"]
-            ripeness = {"name": "Normal"}
-
-        # Apply soil upgrade GMO chance boost and check for GMO
-        is_gmo = random.choices([True, False], weights=[gmo_chance, 1-gmo_chance], k=1)[0]
-        if is_gmo:
-            final_value *= 2
-        
-        # Apply basket upgrade money multiplier
-        final_value *= basket_multiplier
-        
-        # Apply fertilizer upgrade money multiplier (percentage increase)
-        final_value *= fertilizer_multiplier
-
-        #update new balance
-        current_balance += final_value
-        total_value += final_value
-
-        #store items and stats
-        add_user_item(user_id, name)
-        add_ripeness_stat(user_id, ripeness["name"])
-        increment_forage_count(user_id)
-        increment_gather_stats(user_id, item["category"], name)
-
-        #track what was gathered
-        gathered_items.append({"name": name, "value": final_value, "ripeness": ripeness["name"], "is_gmo": is_gmo})
-
-    #save_final_balance
-    update_user_balance(user_id, current_balance)
-
-    #assign role in case they hit a new gatherer level in a harvest
-    old_role = None
-    new_role = None
     try:
-        old_role, new_role = await assign_gatherer_role(interaction.user, interaction.guild)
-    except Exception as e:
-        print(f"Error assigning gatherer role to user {user_id}: {e}")
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        user_id = interaction.user.id
+        can_user_harvest, time_left, is_roulette_cooldown = can_harvest(user_id)
+        if not can_user_harvest:
+            if is_roulette_cooldown:
+                # Russian Roulette elimination cooldown
+                minutes_left = time_left // 60
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"Sorry, {interaction.user.name}, you're dead. You cannot /harvest for {minutes_left} minute(s)", ephemeral=True)
+            else:
+                # Normal harvest cooldown
+                minutes_left = time_left // 60
+                seconds_left = time_left % 60   
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"You must wait {minutes_left} minutes and {seconds_left} seconds before harvesting again, {interaction.user.name}.", ephemeral=True)
+            return
+        set_harvest_cooldown(user_id)
+        
+        # Fetch active events
+        active_events = get_active_events_cached()
+        
+        # Get user upgrades (basket upgrades for gather, harvest upgrades for harvest)
+        user_upgrades = get_user_basket_upgrades(user_id)
+        basket_tier = user_upgrades["basket"]
+        soil_tier = user_upgrades["soil"]
+        
+        # Get harvest upgrades
+        harvest_upgrades = get_user_harvest_upgrades(user_id)
+        car_tier = harvest_upgrades["car"]
+        chain_tier = harvest_upgrades["chain"]
+        fertilizer_tier = harvest_upgrades["fertilizer"]
+        
+        # Calculate number of items to harvest (default 10 + extra items from car upgrade)
+        base_items = 10
+        extra_items = 0
+        if car_tier > 0:
+            extra_items = HARVEST_CAR_UPGRADES[car_tier - 1]["extra_items"]
+        total_items_to_harvest = base_items + extra_items
+        
+        # Get upgrade multipliers
+        basket_multiplier = BASKET_UPGRADES[basket_tier - 1]["multiplier"] if basket_tier > 0 else 1.0
+        base_gmo_chance = 0.05
+        soil_gmo_boost = SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] if soil_tier > 0 else 0
+        gmo_chance = base_gmo_chance + soil_gmo_boost
+        
+        # Get fertilizer multiplier (percentage increase)
+        fertilizer_multiplier = 1.0
+        if fertilizer_tier > 0:
+            fertilizer_multiplier = 1.0 + HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["multiplier"]
+        
+        # Get chain chance
+        chain_chance = 0.0
+        if chain_tier > 0:
+            chain_chance = HARVEST_CHAIN_UPGRADES[chain_tier - 1]["chain_chance"]
+        
+        # Get active events
+        hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
+        daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
+        
+        # Apply Chain Reaction event (hourly) - double the chain chance
+        if hourly_event:
+            event_id = hourly_event.get("effects", {}).get("event_id", "")
+            if event_id == "chain_reaction":
+                chain_chance *= 2  # Double the chain chance
+        
+        # Apply event GMO chance modifications
+        if hourly_event:
+            event_id = hourly_event.get("effects", {}).get("event_id", "")
+            if event_id == "radiation_leak":
+                # GMO chance +25%
+                gmo_chance += 0.25
+        
+        if daily_event:
+            event_id = daily_event.get("effects", {}).get("event_id", "")
+            if event_id == "gmo_surge":
+                # GMO chance +25%
+                gmo_chance += 0.25
+        
+        # Clamp GMO chance to max 1.0 (100%)
+        gmo_chance = min(gmo_chance, 1.0)
+        
+        # Apply event basket multiplier modifications
+        if hourly_event:
+            event_id = hourly_event.get("effects", {}).get("event_id", "")
+            if event_id == "basket_boost":
+                # Basket multiplier +50%
+                basket_multiplier *= 1.5
+        
+        # Get bloom multiplier
+        bloom_multiplier = get_bloom_multiplier(user_id)
+        
+        # Get total items before harvest to check for Tree Ring milestones
+        plants_before_harvest = get_user_total_items(user_id)
+        
+        #/gather multiple times based on car upgrade
+        gathered_items = []
+        total_value = 0.0
+        total_base_value = 0.0
+        current_balance = get_user_balance(user_id)
+
+        for i in range(total_items_to_harvest):
+            item = random.choice(GATHERABLE_ITEMS)
+            name = item["name"]
+            if item["category"] == "Fruit":
+                ripeness_list = LEVEL_OF_RIPENESS_FRUITS
+            elif item["category"] == "Vegetable":
+                ripeness_list = LEVEL_OF_RIPENESS_VEGETABLES
+            elif item["category"] == "Flower":
+                ripeness_list = LEVEL_OF_RIPENESS_FLOWERS
+            else:
+                ripeness_list = []
+                
+            # Calculate base value with event modifications (category price events)
+            base_value = item["base_value"]
+            if hourly_event:
+                event_id = hourly_event.get("effects", {}).get("event_id", "")
+                if event_id == "may_flowers" and item["category"] == "Flower":
+                    base_value *= 3  # Triple flower prices
+                elif event_id == "fruit_festival" and item["category"] == "Fruit":
+                    base_value *= 2  # Double fruit prices
+                elif event_id == "vegetable_boom" and item["category"] == "Vegetable":
+                    base_value *= 2  # Double vegetable prices
+            
+            # Calculate value w/ ripeness
+            if ripeness_list:
+                # Use weighted random selection for the chance
+                weights = [r["chance"] for r in ripeness_list]
+                
+                # Apply Perfect Ripeness event (hourly) or Ripeness Rush event (daily)
+                hourly_event_id = hourly_event.get("effects", {}).get("event_id", "") if hourly_event else ""
+                daily_event_id = daily_event.get("effects", {}).get("event_id", "") if daily_event else ""
+                if hourly_event_id == "perfect_ripeness":
+                    # Increase all ripeness multipliers by 50%
+                    ripeness = random.choices(ripeness_list, weights=weights, k=1)[0]
+                    ripeness_multiplier = ripeness["multiplier"] * 1.5
+                elif daily_event_id == "ripeness_rush":
+                    # Double perfect ripeness chance
+                    weights = []
+                    for r in ripeness_list:
+                        if "Perfect" in r["name"]:
+                            weights.append(r["chance"] * 2)
+                        else:
+                            weights.append(r["chance"])
+                    ripeness = random.choices(ripeness_list, weights=weights, k=1)[0]
+                    ripeness_multiplier = ripeness["multiplier"]
+                else:
+                    ripeness = random.choices(ripeness_list, weights=weights, k=1)[0]
+                    ripeness_multiplier = ripeness["multiplier"]
+                
+                final_value = base_value * ripeness_multiplier
+            else:
+                final_value = base_value
+                ripeness = {"name": "Normal"}
+
+            # Apply soil upgrade GMO chance boost and check for GMO
+            is_gmo = random.choices([True, False], weights=[gmo_chance, 1-gmo_chance], k=1)[0]
+            if is_gmo:
+                final_value *= 2
+            
+            # Apply basket upgrade money multiplier
+            final_value *= basket_multiplier
+            
+            # Apply fertilizer upgrade money multiplier (percentage increase)
+            final_value *= fertilizer_multiplier
+            
+            # Apply event value multipliers (Bumper Crop, Harvest Festival, Double Money, Lucky Strike)
+            value_multiplier = 1.0
+            if hourly_event:
+                event_id = hourly_event.get("effects", {}).get("event_id", "")
+                if event_id == "bumper_crop":
+                    value_multiplier *= 2.0  # All item values x2
+                elif event_id == "lucky_strike":
+                    value_multiplier *= 1.25  # All multipliers +25%
+            
+            if daily_event:
+                event_id = daily_event.get("effects", {}).get("event_id", "")
+                if event_id == "double_money":
+                    value_multiplier *= 2.0  # All earnings doubled
+                elif event_id == "harvest_festival":
+                    value_multiplier *= 1.5  # All item values +50%
+            
+            final_value *= value_multiplier
+
+            # Track base value before bloom multiplier
+            base_value_before_bloom = final_value
+            
+            # Apply bloom multiplier
+            final_value *= bloom_multiplier
+
+            #update new balance
+            current_balance += final_value
+            total_value += final_value
+            total_base_value += base_value_before_bloom
+
+            #store items and stats
+            add_user_item(user_id, name)
+            add_ripeness_stat(user_id, ripeness["name"])
+            increment_forage_count(user_id)
+            increment_gather_stats(user_id, item["category"], name)
+
+            #track what was gathered
+            gathered_items.append({"name": name, "value": final_value, "ripeness": ripeness["name"], "is_gmo": is_gmo})
+
+        # Check for Tree Ring milestones after harvest
+        # Get current total_items after all increments
+        current_total = get_user_total_items(user_id)
+        tree_rings_to_award = 0
+        
+        # Check each 200-plant milestone between plants_before_harvest and current_total
+        # Example: if went from 195 to 215, we crossed 200
+        for milestone in range(200, current_total + 1, 200):
+            if plants_before_harvest < milestone <= current_total:
+                tree_rings_to_award += 1
+        
+        # Award Tree Rings if any milestones were crossed
+        if tree_rings_to_award > 0:
+            increment_tree_rings(user_id, tree_rings_to_award)
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"🌳 {interaction.user.mention} You've been awarded **{tree_rings_to_award} Tree Ring{'s' if tree_rings_to_award > 1 else ''}**!",
+                ephemeral=True)
+
+        #save_final_balance
+        update_user_balance(user_id, current_balance)
+
+        #assign role in case they hit a new gatherer level in a harvest
+        old_role = None
+        new_role = None
+        try:
+            old_role, new_role = await assign_gatherer_role(interaction.user, interaction.guild)
+        except Exception as e:
+            print(f"Error assigning gatherer role to user {user_id}: {e}")
 
 
-    # Send rank-up notification if player advanced
-    if new_role:
-        # Special message for Planter I advancement (when old_role is None)
-        if new_role == "PLANTER I" and old_role is None:
-            rankup_embed = discord.Embed(
-                title="🌾 Rank Up!",
-                description=f"{interaction.user.mention} advanced to **PLANTER I**!",
-                color=discord.Color.gold(),
+        # Send rank-up notification if player advanced
+        if new_role:
+            # Special message for Planter I advancement (when old_role is None)
+            if new_role == "PLANTER I" and old_role is None:
+                rankup_embed = discord.Embed(
+                    title="🌾 Rank Up!",
+                    description=f"{interaction.user.mention} advanced to **PLANTER I**!",
+                    color=discord.Color.gold(),
+                )
+            else:
+                rankup_embed = discord.Embed(
+                    title="🌾 Rank Up!",
+                    description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
+                    color=discord.Color.gold(),
+                )
+            await safe_interaction_response(interaction, interaction.followup.send, embed=rankup_embed)
+
+        # Check for chain chance (season upgrade)
+        chain_triggered = False
+        if chain_chance > 0:
+            chain_triggered = random.random() < chain_chance
+            if chain_triggered:
+                # Reset cooldown by setting last_harvest_time to 0 (allows immediate next harvest)
+                update_user_last_harvest_time(user_id, 0)
+        
+        #create harvest embed
+        embed = discord.Embed(
+            title = "You Harvested!",
+            color = discord.Color.green()
+        )
+
+        #show gathered items, just using 20 for now
+        items_text = ""
+        for item in gathered_items[:20]:
+            gmo_text = " GMO! ✨" if item["is_gmo"] else ""
+            items_text += f"• **{item['name']}** - ${item['value']:.2f} ({item['ripeness']}){gmo_text}\n"
+
+        embed.add_field(name="📦 Items Gathered", value=items_text or "No items", inline=False)
+        embed.add_field(name="💰 Total Value", value=f"**${total_value:.2f}**", inline=True)
+        embed.add_field(name="💵 New Balance", value=f"**${current_balance:.2f}**", inline=True)
+        
+        # Show bloom multiplier if applicable (only after first bloom)
+        bloom_count = get_user_bloom_count(user_id)
+        extra_money_from_bloom = total_value - total_base_value
+        if bloom_count > 0 and extra_money_from_bloom > 0:
+            tree_rings = get_user_tree_rings(user_id)
+            multiplier_percent = (bloom_multiplier - 1.0) * 100
+            embed.add_field(
+                name="🌳 Tree Ring Boost", 
+                value=f"+{multiplier_percent:.1f}% **+(${extra_money_from_bloom:.2f})**", 
+                inline=False
             )
-        else:
-            rankup_embed = discord.Embed(
-                title="🌾 Rank Up!",
-                description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
-                color=discord.Color.gold(),
-            )
-        await interaction.followup.send(embed=rankup_embed)
+        
+        embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
 
-    # Check for chain chance (season upgrade)
-    chain_triggered = False
-    if chain_chance > 0:
-        chain_triggered = random.random() < chain_chance
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+        
+        # Send separate chain message if triggered
         if chain_triggered:
-            # Reset cooldown by setting last_harvest_time to 0 (allows immediate next harvest)
-            update_user_last_harvest_time(user_id, 0)
-    
-    #create harvest embed
-    embed = discord.Embed(
-        title = "You Harvested!",
-        color = discord.Color.green()
-    )
+            await safe_interaction_response(interaction, interaction.followup.send, f"🔗🔗 **CHAIN!** Your harvest cooldown has been reset! Harvest again! 🔗🔗")
+    except Exception as e:
+        print(f"Error in harvest command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
-    #show gathered items, just using 20 for now
-    items_text = ""
-    for item in gathered_items[:20]:
-        gmo_text = " GMO! ✨" if item["is_gmo"] else ""
-        items_text += f"• **{item['name']}** - ${item['value']:.2f} ({item['ripeness']}){gmo_text}\n"
 
-    embed.add_field(name="📦 Items Gathered", value=items_text or "No items", inline=False)
-    embed.add_field(name="💰 Total Value", value=f"**${total_value:.2f}**", inline=True)
-    embed.add_field(name="💵 New Balance", value=f"**${current_balance:.2f}**", inline=True)
-    embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
-
-    await interaction.followup.send(embed=embed)
-    
-    # Send separate chain message if triggered
-    if chain_triggered:
-        await interaction.followup.send(f"🔗🔗 **CHAIN!** Your harvest cooldown has been reset! Harvest again! 🔗🔗")
-    #end harvest
+@bot.tree.command(name="bloom", description="Bloom to reset your progress and advance your Bloom Rank! (Requires 3000 plants)")
+async def bloom(interaction: discord.Interaction):
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        
+        user_id = interaction.user.id
+        total_items = get_user_total_items(user_id)
+        
+        # Check if user has at least 3000 plants
+        if total_items < 3000:
+            plants_needed = 3000 - total_items
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ You need **{plants_needed}** more plants to bloom, {interaction.user.name}!",
+                ephemeral=True)
+            return
+        
+        # Get current stats before blooming
+        old_rank = get_bloom_rank(user_id)
+        tree_rings = get_user_tree_rings(user_id)
+        
+        # Perform bloom
+        perform_bloom(user_id)
+        
+        # Get new stats
+        new_rank = get_bloom_rank(user_id)
+        
+        # Assign Bloom Rank role
+        old_bloom_role = None
+        new_bloom_role = None
+        try:
+            old_bloom_role, new_bloom_role = await assign_bloom_rank_role(interaction.user, interaction.guild)
+        except Exception as e:
+            print(f"Error assigning bloom rank role to user {user_id}: {e}")
+        
+        # Create confirmation embed
+        embed = discord.Embed(
+            title="🌳 You Bloomed!",
+            description=f"{interaction.user.mention} has advanced to **{new_rank}**!",
+            color=discord.Color.gold()
+        )
+        
+        embed.add_field(name="🌲 Bloom Rank", value=f"**{old_rank}** → **{new_rank}**", inline=False)
+        embed.add_field(name="🌳 Tree Rings", value=f"**{tree_rings}** Tree Rings", inline=False)
+        
+        if tree_rings > 0:
+            multiplier = get_bloom_multiplier(user_id)
+            multiplier_percent = (multiplier - 1.0) * 100
+            embed.add_field(
+                name="💰 Money Boost", 
+                value=f"+{multiplier_percent:.1f}% on all earnings", 
+                inline=False
+            )
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+    except Exception as e:
+        print(f"Error in bloom command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # # balance command
@@ -2447,106 +2848,122 @@ async def harvest(interaction: discord.Interaction):
 # userstats command
 @bot.tree.command(name="userstats", description="View your statistics!")
 async def userstats(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    
-    user_id = interaction.user.id
-    user_balance = get_user_balance(user_id)
-    total_items = get_user_total_items(user_id)
-    
-    # Calculate items needed for next rankup
-    # PLANTER I: 0-49 (need 50 for PLANTER II)
-    # PLANTER II: 50-149 (need 150 for PLANTER III)
-    # PLANTER III: 150-299 (need 300 for PLANTER IV)
-    # PLANTER IV: 300-499 (need 500 for PLANTER V)
-    # PLANTER V: 500-999 (need 1000 for PLANTER VI)
-    # PLANTER VI: 1000-1999 (need 2000 for PLANTER VII)
-    # PLANTER VII: 2000-3999 (need 4000 for PLANTER VIII)
-    # PLANTER VIII: 4000-9999 (need 10000 for PLANTER IX)
-    # PLANTER IX: 10000-99999 (need 100000 for PLANTER X)
-    # PLANTER X: 100000+ (max rank)
-    items_needed = None
-    next_rank = None
-    
-    if total_items < 50:
-        items_needed = 50 - total_items
-        next_rank = "PLANTER II"
-    elif total_items < 150:
-        items_needed = 150 - total_items
-        next_rank = "PLANTER III"
-    elif total_items < 300:
-        items_needed = 300 - total_items
-        next_rank = "PLANTER IV"
-    elif total_items < 500:
-        items_needed = 500 - total_items
-        next_rank = "PLANTER V"
-    elif total_items < 1000:
-        items_needed = 1000 - total_items
-        next_rank = "PLANTER VI"
-    elif total_items < 2000:
-        items_needed = 2000 - total_items
-        next_rank = "PLANTER VII"
-    elif total_items < 4000:
-        items_needed = 4000 - total_items
-        next_rank = "PLANTER VIII"
-    elif total_items < 10000:
-        items_needed = 10000 - total_items
-        next_rank = "PLANTER IX"
-    elif total_items < 100000:
-        items_needed = 100000 - total_items
-        next_rank = "PLANTER X"
-    else:
-        # Max rank achieved
-        items_needed = 0
-        next_rank = "MAX RANK"
-    
-    embed = discord.Embed(
-        title=f"📊 {interaction.user.name}'s Stats",
-        color=discord.Color.blue()
-    )
-    
-    embed.add_field(name="💰 Balance", value=f"**${user_balance:.2f}**", inline=True)
-    embed.add_field(name="🌱 Plants Gathered", value=f"**{total_items}** plants", inline=True)
-    
-    if items_needed == 0:
-        embed.add_field(name="🏆 Rank Status", value=f"**{next_rank}** - You've reached the maximum rank!", inline=False)
-    else:
-        embed.add_field(name="📈 Next Rank", value=f"**{items_needed}** more plants until **{next_rank}**", inline=False)
-    
-    await interaction.followup.send(embed=embed)
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        
+        user_id = interaction.user.id
+        user_balance = get_user_balance(user_id)
+        total_items = get_user_total_items(user_id)
+        
+        # Calculate items needed for next rankup
+        # PLANTER I: 0-49 (need 50 for PLANTER II)
+        # PLANTER II: 50-149 (need 150 for PLANTER III)
+        # PLANTER III: 150-299 (need 300 for PLANTER IV)
+        # PLANTER IV: 300-499 (need 500 for PLANTER V)
+        # PLANTER V: 500-999 (need 1000 for PLANTER VI)
+        # PLANTER VI: 1000-1999 (need 2000 for PLANTER VII)
+        # PLANTER VII: 2000-3999 (need 4000 for PLANTER VIII)
+        # PLANTER VIII: 4000-9999 (need 10000 for PLANTER IX)
+        # PLANTER IX: 10000-99999 (need 100000 for PLANTER X)
+        # PLANTER X: 100000+ (max rank)
+        items_needed = None
+        next_rank = None
+        
+        if total_items < 50:
+            items_needed = 50 - total_items
+            next_rank = "PLANTER II"
+        elif total_items < 150:
+            items_needed = 150 - total_items
+            next_rank = "PLANTER III"
+        elif total_items < 300:
+            items_needed = 300 - total_items
+            next_rank = "PLANTER IV"
+        elif total_items < 500:
+            items_needed = 500 - total_items
+            next_rank = "PLANTER V"
+        elif total_items < 1000:
+            items_needed = 1000 - total_items
+            next_rank = "PLANTER VI"
+        elif total_items < 2000:
+            items_needed = 2000 - total_items
+            next_rank = "PLANTER VII"
+        elif total_items < 4000:
+            items_needed = 4000 - total_items
+            next_rank = "PLANTER VIII"
+        elif total_items < 10000:
+            items_needed = 10000 - total_items
+            next_rank = "PLANTER IX"
+        elif total_items < 100000:
+            items_needed = 100000 - total_items
+            next_rank = "PLANTER X"
+        else:
+            # Max rank achieved
+            items_needed = 0
+            next_rank = "MAX RANK"
+        
+        embed = discord.Embed(
+            title=f"📊 {interaction.user.name}'s Stats",
+            color=discord.Color.blue()
+        )
+        
+        embed.add_field(name="💰 Balance", value=f"**${user_balance:.2f}**", inline=True)
+        embed.add_field(name="🌱 Plants Gathered", value=f"**{total_items}** plants", inline=True)
+        
+        # Add Bloom Rank and Tree Rings
+        bloom_rank = get_bloom_rank(user_id)
+        tree_rings = get_user_tree_rings(user_id)
+        embed.add_field(name="🌲 Bloom Rank", value=f"**{bloom_rank}**", inline=True)
+        embed.add_field(name="🌳 Tree Rings", value=f"**{tree_rings}**", inline=True)
+        
+        if items_needed == 0:
+            embed.add_field(name="🏆 Rank Status", value=f"**{next_rank}** - You've reached the maximum rank!", inline=False)
+        else:
+            embed.add_field(name="📈 Next Rank", value=f"**{items_needed}** more plants until **{next_rank}**", inline=False)
+        
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+    except Exception as e:
+        print(f"Error in userstats command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # almanac command
 @bot.tree.command(name="almanac", description="View your collection of your gathered items!")
 async def almanac(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    
-    user_id = interaction.user.id
-    user_items = get_user_items(user_id)
-    
-    if not user_items:
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        
+        user_id = interaction.user.id
+        user_items = get_user_items(user_id)
+        
+        if not user_items:
+            embed = discord.Embed(
+                title=f"{interaction.user.name}'s Almanac",
+                description="Your collection is empty! Start gathering items with `/gather` or `/harvest` to fill it up!",
+                color=discord.Color.orange()
+            )
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+            return
+        
+        # Build the almanac text
+        almanac_text = ""
+        for item_name, count in user_items.items():
+            # Get description or use a default one
+            description = ITEM_DESCRIPTIONS.get(item_name, "A mysterious item from nature!")
+            # Format: [ ITEM NAME ] xCount : "Description"
+            almanac_text += f"[ {item_name.upper()} ] x{count} : \"{description}\"\n"
+        
         embed = discord.Embed(
             title=f"{interaction.user.name}'s Almanac",
-            description="Your collection is empty! Start gathering items with `/gather` or `/harvest` to fill it up!",
-            color=discord.Color.orange()
+            description=almanac_text,
+            color=discord.Color.green()
         )
-        await interaction.followup.send(embed=embed)
-        return
-    
-    # Build the almanac text
-    almanac_text = ""
-    for item_name, count in user_items.items():
-        # Get description or use a default one
-        description = ITEM_DESCRIPTIONS.get(item_name, "A mysterious item from nature!")
-        # Format: [ ITEM NAME ] xCount : "Description"
-        almanac_text += f"[ {item_name.upper()} ] x{count} : \"{description}\"\n"
-    
-    embed = discord.Embed(
-        title=f"{interaction.user.name}'s Almanac",
-        description=almanac_text,
-        color=discord.Color.green()
-    )
-    
-    await interaction.followup.send(embed=embed)
+        
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+    except Exception as e:
+        print(f"Error in almanac command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # Basket Upgrade View with buttons
@@ -2649,75 +3066,106 @@ class BasketUpgradeView(discord.ui.View):
     
     @discord.ui.button(label="🧺 Buy Basket", style=discord.ButtonStyle.primary, row=0)
     async def buy_basket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_purchase(interaction, "basket", BASKET_UPGRADES, "Basket")
+        try:
+            await self.handle_purchase(interaction, "basket", BASKET_UPGRADES, "Basket")
+        except Exception as e:
+            print(f"Error in buy_basket: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     @discord.ui.button(label="👟 Buy Shoes", style=discord.ButtonStyle.primary, row=0)
     async def buy_shoes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_purchase(interaction, "shoes", SHOES_UPGRADES, "Shoes")
+        try:
+            await self.handle_purchase(interaction, "shoes", SHOES_UPGRADES, "Shoes")
+        except Exception as e:
+            print(f"Error in buy_shoes: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     @discord.ui.button(label="🧤 Buy Gloves", style=discord.ButtonStyle.primary, row=1)
     async def buy_gloves(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_purchase(interaction, "gloves", GLOVES_UPGRADES, "Gloves")
+        try:
+            await self.handle_purchase(interaction, "gloves", GLOVES_UPGRADES, "Gloves")
+        except Exception as e:
+            print(f"Error in buy_gloves: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     @discord.ui.button(label="🌱 Buy Soil", style=discord.ButtonStyle.primary, row=1)
     async def buy_soil(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_purchase(interaction, "soil", SOIL_UPGRADES, "Soil")
+        try:
+            await self.handle_purchase(interaction, "soil", SOIL_UPGRADES, "Soil")
+        except Exception as e:
+            print(f"Error in buy_soil: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=2)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ This is not your gear shop!", ephemeral=True)
-            return
-        
-        embed = self.create_embed()
-        await interaction.response.edit_message(embed=embed, view=self)
+        try:
+            if interaction.user.id != self.user_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your gear shop!", ephemeral=True)
+                return
+            
+            embed = self.create_embed()
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+        except Exception as e:
+            print(f"Error in refresh (gear): {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     async def handle_purchase(self, interaction: discord.Interaction, upgrade_type: str, upgrade_list: list, upgrade_name: str):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message(f"❌ This is not your gear shop!", ephemeral=True)
-            return
-        
-        upgrades = get_user_basket_upgrades(self.user_id)
-        current_tier = upgrades[upgrade_type]
-        
-        if current_tier >= 10:
-            await interaction.response.send_message(f"❌ You already have the maximum {upgrade_name} upgrade!", ephemeral=True)
-            return
-        
-        cost = UPGRADE_PRICES[current_tier]
-        balance = get_user_balance(self.user_id)
-        
-        if balance < cost:
-            await interaction.response.send_message(
-                f"❌ You don't have enough money! You need **${cost:,.2f}** but only have **${balance:,.2f}**.", 
-                ephemeral=True
-            )
-            return
-        
-        # Deduct money and upgrade
-        new_balance = balance - cost
-        update_user_balance(self.user_id, new_balance)
-        set_user_basket_upgrade(self.user_id, upgrade_type, current_tier + 1)
-        
-        next_upgrade = upgrade_list[current_tier]
-        
-        # Send quick confirmation and update the main embed
-        await interaction.response.send_message(f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
-        
-        embed = self.create_embed()
-        await interaction.message.edit(embed=embed, view=self)
+        try:
+            if interaction.user.id != self.user_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, f"❌ This is not your gear shop!", ephemeral=True)
+                return
+            
+            upgrades = get_user_basket_upgrades(self.user_id)
+            current_tier = upgrades[upgrade_type]
+            
+            if current_tier >= 10:
+                await safe_interaction_response(interaction, interaction.response.send_message, f"❌ You already have the maximum {upgrade_name} upgrade!", ephemeral=True)
+                return
+            
+            cost = UPGRADE_PRICES[current_tier]
+            balance = get_user_balance(self.user_id)
+            
+            if balance < cost:
+                await safe_interaction_response(interaction, interaction.response.send_message,
+                    f"❌ You don't have enough money! You need **${cost:,.2f}** but only have **${balance:,.2f}**.", 
+                    ephemeral=True)
+                return
+            
+            # Deduct money and upgrade
+            new_balance = balance - cost
+            update_user_balance(self.user_id, new_balance)
+            set_user_basket_upgrade(self.user_id, upgrade_type, current_tier + 1)
+            
+            next_upgrade = upgrade_list[current_tier]
+            
+            # Send quick confirmation and update the main embed
+            await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
+            
+            embed = self.create_embed()
+            try:
+                await interaction.message.edit(embed=embed, view=self)
+            except:
+                pass  # Message might have been deleted
+        except Exception as e:
+            print(f"Error in handle_purchase (gear): {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # Gear command
 @bot.tree.command(name="gear", description="Upgrade your gathering equipment!")
 async def gear(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    
-    user_id = interaction.user.id
-    view = BasketUpgradeView(user_id, interaction.guild)
-    embed = view.create_embed()
-    
-    await interaction.followup.send(embed=embed, view=view)
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        
+        user_id = interaction.user.id
+        view = BasketUpgradeView(user_id, interaction.guild)
+        embed = view.create_embed()
+        
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
+    except Exception as e:
+        print(f"Error in gear command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # Harvest Upgrade View with buttons
@@ -2871,75 +3319,106 @@ class HarvestUpgradeView(discord.ui.View):
     
     @discord.ui.button(label="🚗 Buy Car", style=discord.ButtonStyle.primary, row=0)
     async def buy_car(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_purchase(interaction, "car", HARVEST_CAR_UPGRADES, HARVEST_CAR_PRICES, "Car")
+        try:
+            await self.handle_purchase(interaction, "car", HARVEST_CAR_UPGRADES, HARVEST_CAR_PRICES, "Car")
+        except Exception as e:
+            print(f"Error in buy_car: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     @discord.ui.button(label="🌾 Buy Yield", style=discord.ButtonStyle.primary, row=0)
     async def buy_chain(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_purchase(interaction, "chain", HARVEST_CHAIN_UPGRADES, HARVEST_CHAIN_PRICES, "Yield")
+        try:
+            await self.handle_purchase(interaction, "chain", HARVEST_CHAIN_UPGRADES, HARVEST_CHAIN_PRICES, "Yield")
+        except Exception as e:
+            print(f"Error in buy_chain: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     @discord.ui.button(label="💩 Buy Fertilizer", style=discord.ButtonStyle.primary, row=1)
     async def buy_fertilizer(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_purchase(interaction, "fertilizer", HARVEST_FERTILIZER_UPGRADES, HARVEST_FERTILIZER_PRICES, "Fertilizer")
+        try:
+            await self.handle_purchase(interaction, "fertilizer", HARVEST_FERTILIZER_UPGRADES, HARVEST_FERTILIZER_PRICES, "Fertilizer")
+        except Exception as e:
+            print(f"Error in buy_fertilizer: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     @discord.ui.button(label="⚡ Buy Workers", style=discord.ButtonStyle.primary, row=1)
     async def buy_cooldown(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_purchase(interaction, "cooldown", HARVEST_COOLDOWN_UPGRADES, HARVEST_COOLDOWN_PRICES, "Workers")
+        try:
+            await self.handle_purchase(interaction, "cooldown", HARVEST_COOLDOWN_UPGRADES, HARVEST_COOLDOWN_PRICES, "Workers")
+        except Exception as e:
+            print(f"Error in buy_cooldown: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=2)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ This is not your harvest shop!", ephemeral=True)
-            return
-        
-        embed = self.create_embed()
-        await interaction.response.edit_message(embed=embed, view=self)
+        try:
+            if interaction.user.id != self.user_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your harvest shop!", ephemeral=True)
+                return
+            
+            embed = self.create_embed()
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+        except Exception as e:
+            print(f"Error in refresh (harvest): {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     async def handle_purchase(self, interaction: discord.Interaction, upgrade_type: str, upgrade_list: list, price_list: list, upgrade_name: str):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message(f"❌ This is not your harvest shop!", ephemeral=True)
-            return
-        
-        upgrades = get_user_harvest_upgrades(self.user_id)
-        current_tier = upgrades[upgrade_type]
-        
-        if current_tier >= 10:
-            await interaction.response.send_message(f"❌ You already have the maximum {upgrade_name} upgrade!", ephemeral=True)
-            return
-        
-        cost = price_list[current_tier]
-        balance = get_user_balance(self.user_id)
-        
-        if balance < cost:
-            await interaction.response.send_message(
-                f"❌ You don't have enough money! You need **${cost:,.2f}** but only have **${balance:,.2f}**.", 
-                ephemeral=True
-            )
-            return
-        
-        # Deduct money and upgrade
-        new_balance = balance - cost
-        update_user_balance(self.user_id, new_balance)
-        set_user_harvest_upgrade(self.user_id, upgrade_type, current_tier + 1)
-        
-        next_upgrade = upgrade_list[current_tier]
-        
-        # Send quick confirmation and update the main embed
-        await interaction.response.send_message(f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
-        
-        embed = self.create_embed()
-        await interaction.message.edit(embed=embed, view=self)
+        try:
+            if interaction.user.id != self.user_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, f"❌ This is not your harvest shop!", ephemeral=True)
+                return
+            
+            upgrades = get_user_harvest_upgrades(self.user_id)
+            current_tier = upgrades[upgrade_type]
+            
+            if current_tier >= 10:
+                await safe_interaction_response(interaction, interaction.response.send_message, f"❌ You already have the maximum {upgrade_name} upgrade!", ephemeral=True)
+                return
+            
+            cost = price_list[current_tier]
+            balance = get_user_balance(self.user_id)
+            
+            if balance < cost:
+                await safe_interaction_response(interaction, interaction.response.send_message,
+                    f"❌ You don't have enough money! You need **${cost:,.2f}** but only have **${balance:,.2f}**.", 
+                    ephemeral=True)
+                return
+            
+            # Deduct money and upgrade
+            new_balance = balance - cost
+            update_user_balance(self.user_id, new_balance)
+            set_user_harvest_upgrade(self.user_id, upgrade_type, current_tier + 1)
+            
+            next_upgrade = upgrade_list[current_tier]
+            
+            # Send quick confirmation and update the main embed
+            await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
+            
+            embed = self.create_embed()
+            try:
+                await interaction.message.edit(embed=embed, view=self)
+            except:
+                pass  # Message might have been deleted
+        except Exception as e:
+            print(f"Error in handle_purchase (harvest): {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # Orchard command
 @bot.tree.command(name="orchard", description="Upgrade your harvest equipment!")
 async def orchard(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    
-    user_id = interaction.user.id
-    view = HarvestUpgradeView(user_id, interaction.guild)
-    embed = view.create_embed()
-    
-    await interaction.followup.send(embed=embed, view=view)
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        
+        user_id = interaction.user.id
+        view = HarvestUpgradeView(user_id, interaction.guild)
+        embed = view.create_embed()
+        
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
+    except Exception as e:
+        print(f"Error in orchard command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # Hire View with pagination
@@ -3044,88 +3523,107 @@ class HireView(discord.ui.View):
     
     @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, row=0)
     async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ This is not your hiring center!", ephemeral=True)
-            return
-        
-        if self.current_page > 0:
-            self.current_page -= 1
-            self.update_buttons()
-            embed = self.create_embed(self.current_page)
-            await interaction.response.edit_message(embed=embed, view=self)
-        else:
-            await interaction.response.defer()
+        try:
+            if interaction.user.id != self.user_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your hiring center!", ephemeral=True)
+                return
+            
+            if self.current_page > 0:
+                self.current_page -= 1
+                self.update_buttons()
+                embed = self.create_embed(self.current_page)
+                await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+            else:
+                await safe_defer(interaction)
+        except Exception as e:
+            print(f"Error in previous_button (hire): {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary, row=0)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ This is not your hiring center!", ephemeral=True)
-            return
-        
-        if self.current_page < self.total_pages - 1:
-            self.current_page += 1
-            self.update_buttons()
-            embed = self.create_embed(self.current_page)
-            await interaction.response.edit_message(embed=embed, view=self)
-        else:
-            await interaction.response.defer()
+        try:
+            if interaction.user.id != self.user_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your hiring center!", ephemeral=True)
+                return
+            
+            if self.current_page < self.total_pages - 1:
+                self.current_page += 1
+                self.update_buttons()
+                embed = self.create_embed(self.current_page)
+                await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+            else:
+                await safe_defer(interaction)
+        except Exception as e:
+            print(f"Error in next_button (hire): {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     @discord.ui.button(label="Hire", style=discord.ButtonStyle.success, row=1)
     async def hire_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ This is not your hiring center!", ephemeral=True)
-            return
-        
-        slot_id = self.current_page + 1
-        gardeners = get_user_gardeners(self.user_id)
-        gardener_dict = {g["id"]: g for g in gardeners}
-        
-        # Check if slot is already taken
-        if slot_id in gardener_dict:
-            await interaction.response.send_message(f"❌ Gardener #{slot_id} is already hired!", ephemeral=True)
-            return
-        
-        # Check if max gardeners reached
-        if len(gardeners) >= 5:
-            await interaction.response.send_message("❌ You already have the maximum of 5 gardeners!", ephemeral=True)
-            return
-        
-        price = GARDENER_PRICES[slot_id - 1]
-        balance = get_user_balance(self.user_id)
-        
-        if balance < price:
-            await interaction.response.send_message(
-                f"❌ You don't have enough money! You need **${price:,.2f}** but only have **${balance:,.2f}**.",
-                ephemeral=True
-            )
-            return
-        
-        # Hire the gardener
-        success = add_gardener(self.user_id, slot_id, price)
-        if not success:
-            await interaction.response.send_message("❌ Failed to hire gardener. Please try again.", ephemeral=True)
-            return
-        
-        # Send confirmation and update embed
-        await interaction.response.send_message(f"✅ Hired **Gardener #{slot_id}** for ${price:,.2f}! They'll start gathering for you automatically.", ephemeral=True)
-        
-        embed = self.create_embed(self.current_page)
-        self.update_buttons()
-        await interaction.message.edit(embed=embed, view=self)
+        try:
+            if interaction.user.id != self.user_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your hiring center!", ephemeral=True)
+                return
+            
+            slot_id = self.current_page + 1
+            gardeners = get_user_gardeners(self.user_id)
+            gardener_dict = {g["id"]: g for g in gardeners}
+            
+            # Check if slot is already taken
+            if slot_id in gardener_dict:
+                await safe_interaction_response(interaction, interaction.response.send_message, f"❌ Gardener #{slot_id} is already hired!", ephemeral=True)
+                return
+            
+            # Check if max gardeners reached
+            if len(gardeners) >= 5:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You already have the maximum of 5 gardeners!", ephemeral=True)
+                return
+            
+            price = GARDENER_PRICES[slot_id - 1]
+            balance = get_user_balance(self.user_id)
+            
+            if balance < price:
+                await safe_interaction_response(interaction, interaction.response.send_message,
+                    f"❌ You don't have enough money! You need **${price:,.2f}** but only have **${balance:,.2f}**.",
+                    ephemeral=True)
+                return
+            
+            # Hire the gardener
+            success = add_gardener(self.user_id, slot_id, price)
+            if not success:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Failed to hire gardener. Please try again.", ephemeral=True)
+                return
+            
+            # Send confirmation and update embed
+            await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Hired **Gardener #{slot_id}** for ${price:,.2f}! They'll start gathering for you automatically.", ephemeral=True)
+            
+            embed = self.create_embed(self.current_page)
+            self.update_buttons()
+            try:
+                await interaction.message.edit(embed=embed, view=self)
+            except:
+                pass  # Message might have been deleted
+        except Exception as e:
+            print(f"Error in hire_button: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # Hire command
 @bot.tree.command(name="hire", description="Hire gardeners to automatically gather items for you!")
 async def hire(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    
-    user_id = interaction.user.id
-    
-    view = HireView(user_id)
-    embed = view.create_embed(0)  # Start on page 0 (Gardener #1)
-    view.update_buttons()
-    
-    await interaction.followup.send(embed=embed, view=view)
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        
+        user_id = interaction.user.id
+        
+        view = HireView(user_id)
+        embed = view.create_embed(0)  # Start on page 0 (Gardener #1)
+        view.update_buttons()
+        
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
+    except Exception as e:
+        print(f"Error in hire command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # GPU View with pagination
@@ -3209,82 +3707,101 @@ class GpuView(discord.ui.View):
     
     @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, row=0)
     async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ This is not your GPU shop!", ephemeral=True)
-            return
-        
-        if self.current_page > 0:
-            self.current_page -= 1
-            self.update_buttons()
-            embed = self.create_embed(self.current_page)
-            await interaction.response.edit_message(embed=embed, view=self)
-        else:
-            await interaction.response.defer()
+        try:
+            if interaction.user.id != self.user_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your GPU shop!", ephemeral=True)
+                return
+            
+            if self.current_page > 0:
+                self.current_page -= 1
+                self.update_buttons()
+                embed = self.create_embed(self.current_page)
+                await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+            else:
+                await safe_defer(interaction)
+        except Exception as e:
+            print(f"Error in previous_button (gpu): {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary, row=0)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ This is not your GPU shop!", ephemeral=True)
-            return
-        
-        if self.current_page < self.total_pages - 1:
-            self.current_page += 1
-            self.update_buttons()
-            embed = self.create_embed(self.current_page)
-            await interaction.response.edit_message(embed=embed, view=self)
-        else:
-            await interaction.response.defer()
+        try:
+            if interaction.user.id != self.user_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your GPU shop!", ephemeral=True)
+                return
+            
+            if self.current_page < self.total_pages - 1:
+                self.current_page += 1
+                self.update_buttons()
+                embed = self.create_embed(self.current_page)
+                await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+            else:
+                await safe_defer(interaction)
+        except Exception as e:
+            print(f"Error in next_button (gpu): {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     @discord.ui.button(label="Buy", style=discord.ButtonStyle.success, row=1)
     async def buy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ This is not your GPU shop!", ephemeral=True)
-            return
-        
-        gpu_info = GPU_SHOP[self.current_page]
-        gpu_name = gpu_info["name"]
-        price = gpu_info["price"]
-        balance = get_user_balance(self.user_id)
-        user_gpus = get_user_gpus(self.user_id)
-        
-        # Check if already owned
-        if gpu_name in user_gpus:
-            await interaction.response.send_message(f"❌ You already own **{gpu_name}**!", ephemeral=True)
-            return
-        
-        if balance < price:
-            await interaction.response.send_message(
-                f"❌ You don't have enough money! You need **${price:,.2f}** but only have **${balance:,.2f}**.",
-                ephemeral=True
-            )
-            return
-        
-        # Buy the GPU
-        success = add_gpu(self.user_id, gpu_name, price)
-        if not success:
-            await interaction.response.send_message("❌ Failed to buy GPU. Please try again.", ephemeral=True)
-            return
-        
-        # Send confirmation and update embed
-        await interaction.response.send_message(f"✅ Purchased **{gpu_name}** for ${price:,.2f}! It will boost your mining!", ephemeral=True)
-        
-        embed = self.create_embed(self.current_page)
-        self.update_buttons()
-        await interaction.message.edit(embed=embed, view=self)
+        try:
+            if interaction.user.id != self.user_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your GPU shop!", ephemeral=True)
+                return
+            
+            gpu_info = GPU_SHOP[self.current_page]
+            gpu_name = gpu_info["name"]
+            price = gpu_info["price"]
+            balance = get_user_balance(self.user_id)
+            user_gpus = get_user_gpus(self.user_id)
+            
+            # Check if already owned
+            if gpu_name in user_gpus:
+                await safe_interaction_response(interaction, interaction.response.send_message, f"❌ You already own **{gpu_name}**!", ephemeral=True)
+                return
+            
+            if balance < price:
+                await safe_interaction_response(interaction, interaction.response.send_message,
+                    f"❌ You don't have enough money! You need **${price:,.2f}** but only have **${balance:,.2f}**.",
+                    ephemeral=True)
+                return
+            
+            # Buy the GPU
+            success = add_gpu(self.user_id, gpu_name, price)
+            if not success:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Failed to buy GPU. Please try again.", ephemeral=True)
+                return
+            
+            # Send confirmation and update embed
+            await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Purchased **{gpu_name}** for ${price:,.2f}! It will boost your mining!", ephemeral=True)
+            
+            embed = self.create_embed(self.current_page)
+            self.update_buttons()
+            try:
+                await interaction.message.edit(embed=embed, view=self)
+            except:
+                pass  # Message might have been deleted
+        except Exception as e:
+            print(f"Error in buy_button (gpu): {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # GPU command
 @bot.tree.command(name="gpu", description="Buy GPUs to boost your cryptocurrency mining!")
 async def gpu(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    
-    user_id = interaction.user.id
-    
-    view = GpuView(user_id)
-    embed = view.create_embed(0)  # Start on page 0 (GPU 1)
-    view.update_buttons()
-    
-    await interaction.followup.send(embed=embed, view=view)
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        
+        user_id = interaction.user.id
+        
+        view = GpuView(user_id)
+        embed = view.create_embed(0)  # Start on page 0 (GPU 1)
+        view.update_buttons()
+        
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
+    except Exception as e:
+        print(f"Error in gpu command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # Admin Event Commands
@@ -3300,72 +3817,76 @@ async def gpu(interaction: discord.Interaction):
     app_commands.Choice(name="60 minutes", value=60)
 ])
 async def starthourlyevent(interaction: discord.Interaction, event: str, duration: int):
-    await interaction.response.defer(ephemeral=True)
-    
-    # Check if user has administrator permissions
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
-        return
-    
-    # Check if there's already an active hourly event
-    existing_hourly = get_active_event_by_type("hourly")
-    if existing_hourly:
-        current_time = time.time()
-        if existing_hourly.get("end_time", 0) > current_time:
-            await interaction.followup.send(
-                f"❌ **Error**: An hourly event is already active: **{existing_hourly['event_name']}** "
-                f"(ends in {int((existing_hourly.get('end_time', 0) - current_time) / 60)} minutes). "
-                f"Use `/endevent hourly` to end it first.",
-                ephemeral=True
-            )
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
             return
-        else:
-            # Clean up expired event
-            clear_event(existing_hourly.get("event_id", ""))
+        
+        # Check if user has administrator permissions
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
     
-    # Find the event info
-    event_info = next((e for e in HOURLY_EVENTS if e["id"] == event), None)
-    if not event_info:
-        await interaction.followup.send("❌ **Error**: Event not found.", ephemeral=True)
-        return
-    
-    # Create the event
-    duration_minutes = duration
-    duration_seconds = duration_minutes * 60
-    start_time = time.time()
-    end_time = start_time + duration_seconds
-    
-    event_id = f"hourly_{int(start_time)}_{event_info['id']}"
-    
-    set_active_event(
-        event_id=event_id,
-        event_type="hourly",
-        event_name=event_info["name"],
-        start_time=start_time,
-        end_time=end_time,
-        effects={"event_id": event_info["id"]}
-    )
-    
-    # Send announcement to all guilds
-    guilds_sent = 0
-    for guild in bot.guilds:
-        try:
-            await send_event_start_embed(guild, {
-                "event_type": "hourly",
-                "event_id": event_info["id"],
-                "event_name": event_info["name"]
-            }, duration_minutes)
-            guilds_sent += 1
-        except Exception as e:
-            print(f"Error sending start embed to {guild.name} for hourly event: {e}")
-    
-    embed = discord.Embed(
-        title=f"✅ Event Started Successfully",
-        description=f"**{event_info['emoji']} {event_info['name']}**",
-        color=discord.Color.green()
-    )
-    await interaction.followup.send(embed=embed, ephemeral=True)
-    print(f"Admin {interaction.user.name} started hourly event: {event_info['name']} for {duration_minutes} minutes")
+        # Check if there's already an active hourly event
+        existing_hourly = get_active_event_by_type("hourly")
+        if existing_hourly:
+            current_time = time.time()
+            if existing_hourly.get("end_time", 0) > current_time:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ **Error**: An hourly event is already active: **{existing_hourly['event_name']}** "
+                    f"(ends in {int((existing_hourly.get('end_time', 0) - current_time) / 60)} minutes). "
+                    f"Use `/endevent hourly` to end it first.",
+                    ephemeral=True)
+                return
+            else:
+                # Clean up expired event
+                clear_event(existing_hourly.get("event_id", ""))
+        
+        # Find the event info
+        event_info = next((e for e in HOURLY_EVENTS if e["id"] == event), None)
+        if not event_info:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: Event not found.", ephemeral=True)
+            return
+        
+        # Create the event
+        duration_minutes = duration
+        duration_seconds = duration_minutes * 60
+        start_time = time.time()
+        end_time = start_time + duration_seconds
+        
+        event_id = f"hourly_{int(start_time)}_{event_info['id']}"
+        
+        set_active_event(
+            event_id=event_id,
+            event_type="hourly",
+            event_name=event_info["name"],
+            start_time=start_time,
+            end_time=end_time,
+            effects={"event_id": event_info["id"]}
+        )
+        
+        # Send announcement to all guilds
+        guilds_sent = 0
+        for guild in bot.guilds:
+            try:
+                await send_event_start_embed(guild, {
+                    "event_type": "hourly",
+                    "event_id": event_info["id"],
+                    "event_name": event_info["name"]
+                }, duration_minutes)
+                guilds_sent += 1
+            except Exception as e:
+                print(f"Error sending start embed to {guild.name} for hourly event: {e}")
+        
+        embed = discord.Embed(
+            title=f"✅ Event Started Successfully",
+            description=f"**{event_info['emoji']} {event_info['name']}**",
+            color=discord.Color.green()
+        )
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+        print(f"Admin {interaction.user.name} started hourly event: {event_info['name']} for {duration_minutes} minutes")
+    except Exception as e:
+        print(f"Error in starthourlyevent command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 @bot.tree.command(name="startdailyevent", description="[ADMIN] Start a specific daily event manually")
@@ -3375,72 +3896,76 @@ async def starthourlyevent(interaction: discord.Interaction, event: str, duratio
     for e in DAILY_EVENTS
 ])
 async def startdailyevent(interaction: discord.Interaction, event: str):
-    await interaction.response.defer(ephemeral=True)
-    
-    # Check if user has administrator permissions
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
-        return
-    
-    # Check if there's already an active daily event
-    existing_daily = get_active_event_by_type("daily")
-    if existing_daily:
-        current_time = time.time()
-        if existing_daily.get("end_time", 0) > current_time:
-            await interaction.followup.send(
-                f"❌ **Error**: A daily event is already active: **{existing_daily['event_name']}** "
-                f"(ends in {int((existing_daily.get('end_time', 0) - current_time) / 3600)} hours). "
-                f"Use `/endevent daily` to end it first.",
-                ephemeral=True
-            )
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
             return
-        else:
-            # Clean up expired event
-            clear_event(existing_daily.get("event_id", ""))
+        
+        # Check if user has administrator permissions
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
     
-    # Find the event info
-    event_info = next((e for e in DAILY_EVENTS if e["id"] == event), None)
-    if not event_info:
-        await interaction.followup.send("❌ **Error**: Event not found.", ephemeral=True)
-        return
-    
-    # Create the event (fixed 24 hour duration)
-    duration_minutes = 24 * 60
-    duration_seconds = duration_minutes * 60
-    start_time = time.time()
-    end_time = start_time + duration_seconds
-    
-    event_id = f"daily_{int(start_time)}_{event_info['id']}"
-    
-    set_active_event(
-        event_id=event_id,
-        event_type="daily",
-        event_name=event_info["name"],
-        start_time=start_time,
-        end_time=end_time,
-        effects={"event_id": event_info["id"]}
-    )
-    
-    # Send announcement to all guilds
-    guilds_sent = 0
-    for guild in bot.guilds:
-        try:
-            await send_event_start_embed(guild, {
-                "event_type": "daily",
-                "event_id": event_info["id"],
-                "event_name": event_info["name"]
-            }, duration_minutes)
-            guilds_sent += 1
-        except Exception as e:
-            print(f"Error sending start embed to {guild.name} for daily event: {e}")
-    
-    embed = discord.Embed(
-        title=f"✅ Event Started Successfully",
-        description=f"**{event_info['emoji']} {event_info['name']}**",
-        color=discord.Color.green()
-    )
-    await interaction.followup.send(embed=embed, ephemeral=True)
-    print(f"Admin {interaction.user.name} started daily event: {event_info['name']}")
+        # Check if there's already an active daily event
+        existing_daily = get_active_event_by_type("daily")
+        if existing_daily:
+            current_time = time.time()
+            if existing_daily.get("end_time", 0) > current_time:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ **Error**: A daily event is already active: **{existing_daily['event_name']}** "
+                    f"(ends in {int((existing_daily.get('end_time', 0) - current_time) / 3600)} hours). "
+                    f"Use `/endevent daily` to end it first.",
+                    ephemeral=True)
+                return
+            else:
+                # Clean up expired event
+                clear_event(existing_daily.get("event_id", ""))
+        
+        # Find the event info
+        event_info = next((e for e in DAILY_EVENTS if e["id"] == event), None)
+        if not event_info:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: Event not found.", ephemeral=True)
+            return
+        
+        # Create the event (fixed 24 hour duration)
+        duration_minutes = 24 * 60
+        duration_seconds = duration_minutes * 60
+        start_time = time.time()
+        end_time = start_time + duration_seconds
+        
+        event_id = f"daily_{int(start_time)}_{event_info['id']}"
+        
+        set_active_event(
+            event_id=event_id,
+            event_type="daily",
+            event_name=event_info["name"],
+            start_time=start_time,
+            end_time=end_time,
+            effects={"event_id": event_info["id"]}
+        )
+        
+        # Send announcement to all guilds
+        guilds_sent = 0
+        for guild in bot.guilds:
+            try:
+                await send_event_start_embed(guild, {
+                    "event_type": "daily",
+                    "event_id": event_info["id"],
+                    "event_name": event_info["name"]
+                }, duration_minutes)
+                guilds_sent += 1
+            except Exception as e:
+                print(f"Error sending start embed to {guild.name} for daily event: {e}")
+        
+        embed = discord.Embed(
+            title=f"✅ Event Started Successfully",
+            description=f"**{event_info['emoji']} {event_info['name']}**",
+            color=discord.Color.green()
+        )
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+        print(f"Admin {interaction.user.name} started daily event: {event_info['name']}")
+    except Exception as e:
+        print(f"Error in startdailyevent command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 @bot.tree.command(name="endevent", description="[ADMIN] End the currently active hourly or daily event")
@@ -3450,57 +3975,61 @@ async def startdailyevent(interaction: discord.Interaction, event: str):
     app_commands.Choice(name="daily", value="daily")
 ])
 async def endevent(interaction: discord.Interaction, event_type: str):
-    await interaction.response.defer(ephemeral=True)
-    
-    # Check if user has administrator permissions
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
-        return
-    
-    # Get the active event
-    active_event = get_active_event_by_type(event_type)
-    if not active_event:
-        await interaction.followup.send(
-            f"❌ **Error**: No active {event_type} event found.",
-            ephemeral=True
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        
+        # Check if user has administrator permissions
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+        
+        # Get the active event
+        active_event = get_active_event_by_type(event_type)
+        if not active_event:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ **Error**: No active {event_type} event found.",
+                ephemeral=True)
+            return
+        
+        # Get event info for the embed
+        event_type_id = active_event.get("effects", {}).get("event_id")
+        if not event_type_id:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: Could not find event information.", ephemeral=True)
+            return
+        
+        event_info = None
+        if event_type == "hourly":
+            event_info = next((e for e in HOURLY_EVENTS if e["id"] == event_type_id), None)
+        elif event_type == "daily":
+            event_info = next((e for e in DAILY_EVENTS if e["id"] == event_type_id), None)
+        
+        if not event_info:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: Event info not found.", ephemeral=True)
+            return
+        
+        # Clear the event from database
+        clear_event(active_event.get("event_id", ""))
+        
+        # Send end message to all guilds
+        guilds_sent = 0
+        for guild in bot.guilds:
+            try:
+                await send_event_end_embed(guild, active_event)
+                guilds_sent += 1
+            except Exception as e:
+                print(f"Error sending end embed to {guild.name}: {e}")
+        
+        embed = discord.Embed(
+            title=f"✅ Event Ended Successfully",
+            description=f"**{event_info['emoji']} {event_info['name']}**",
+            color=discord.Color.orange()
         )
-        return
-    
-    # Get event info for the embed
-    event_type_id = active_event.get("effects", {}).get("event_id")
-    if not event_type_id:
-        await interaction.followup.send("❌ **Error**: Could not find event information.", ephemeral=True)
-        return
-    
-    event_info = None
-    if event_type == "hourly":
-        event_info = next((e for e in HOURLY_EVENTS if e["id"] == event_type_id), None)
-    elif event_type == "daily":
-        event_info = next((e for e in DAILY_EVENTS if e["id"] == event_type_id), None)
-    
-    if not event_info:
-        await interaction.followup.send("❌ **Error**: Event info not found.", ephemeral=True)
-        return
-    
-    # Clear the event from database
-    clear_event(active_event.get("event_id", ""))
-    
-    # Send end message to all guilds
-    guilds_sent = 0
-    for guild in bot.guilds:
-        try:
-            await send_event_end_embed(guild, active_event)
-            guilds_sent += 1
-        except Exception as e:
-            print(f"Error sending end embed to {guild.name}: {e}")
-    
-    embed = discord.Embed(
-        title=f"✅ Event Ended Successfully",
-        description=f"**{event_info['emoji']} {event_info['name']}**",
-        color=discord.Color.orange()
-    )
-    await interaction.followup.send(embed=embed, ephemeral=True)
-    print(f"Admin {interaction.user.name} ended {event_type} event: {event_info['name']}")
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+        print(f"Admin {interaction.user.name} ended {event_type} event: {event_info['name']}")
+    except Exception as e:
+        print(f"Error in endevent command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # Reset command - Admin only, #hidden channel
@@ -3511,66 +4040,70 @@ async def endevent(interaction: discord.Interaction, event_type: str):
     app_commands.Choice(name="cryptoprices", value="cryptoprices")
 ])
 async def reset(interaction: discord.Interaction, type: str):
-    await interaction.response.defer(ephemeral=True)
-    
-    # Check if user has administrator permissions
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
-        return
-    
-    # Check if command is being used in the #hidden channel
-    if not hasattr(interaction.channel, 'name') or interaction.channel.name != "hidden":
-        await interaction.followup.send(
-            f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
-            ephemeral=True
-        )
-        return
-    
-    if type == "cooldowns":
-        # Get all members in the guild
-        guild = interaction.guild
-        if not guild:
-            await interaction.followup.send("❌ **Error**: Could not get guild information.", ephemeral=True)
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
             return
         
-        members = guild.members
-        reset_count = 0
+        # Check if user has administrator permissions
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
         
-        # Reset cooldowns for all members
-        for member in members:
-            if not member.bot:  # Skip bots
-                reset_user_cooldowns(member.id)
-                reset_count += 1
+        # Check if command is being used in the #hidden channel
+        if not hasattr(interaction.channel, 'name') or interaction.channel.name != "hidden":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
+                ephemeral=True)
+            return
         
-        embed = discord.Embed(
-            title="✅ Cooldowns Reset",
-            description=f"Reset cooldowns for **{reset_count}** users.",
-            color=discord.Color.green()
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-        print(f"Admin {interaction.user.name} reset cooldowns for {reset_count} users")
-    
-    elif type == "cryptoprices":
-        # Reset crypto prices to base prices
-        base_prices = {coin["symbol"]: coin["base_price"] for coin in CRYPTO_COINS}
-        update_crypto_prices(base_prices)
-        
-        # Also reset price history
-        initialize_crypto_history()
-        
-        embed = discord.Embed(
-            title="✅ Crypto Prices Reset",
-            description="Cryptocurrency prices have been reset to their base values:",
-            color=discord.Color.green()
-        )
-        for coin in CRYPTO_COINS:
-            embed.add_field(
-                name=f"{coin['name']} ({coin['symbol']})",
-                value=f"${coin['base_price']:,.2f}",
-                inline=True
+        if type == "cooldowns":
+            # Get all members in the guild
+            guild = interaction.guild
+            if not guild:
+                await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: Could not get guild information.", ephemeral=True)
+                return
+            
+            members = guild.members
+            reset_count = 0
+            
+            # Reset cooldowns for all members
+            for member in members:
+                if not member.bot:  # Skip bots
+                    reset_user_cooldowns(member.id)
+                    reset_count += 1
+            
+            embed = discord.Embed(
+                title="✅ Cooldowns Reset",
+                description=f"Reset cooldowns for **{reset_count}** users.",
+                color=discord.Color.green()
             )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-        print(f"Admin {interaction.user.name} reset crypto prices to base values")
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+            print(f"Admin {interaction.user.name} reset cooldowns for {reset_count} users")
+        
+        elif type == "cryptoprices":
+            # Reset crypto prices to base prices
+            base_prices = {coin["symbol"]: coin["base_price"] for coin in CRYPTO_COINS}
+            update_crypto_prices(base_prices)
+            
+            # Also reset price history
+            initialize_crypto_history()
+            
+            embed = discord.Embed(
+                title="✅ Crypto Prices Reset",
+                description="Cryptocurrency prices have been reset to their base values:",
+                color=discord.Color.green()
+            )
+            for coin in CRYPTO_COINS:
+                embed.add_field(
+                    name=f"{coin['name']} ({coin['symbol']})",
+                    value=f"${coin['base_price']:,.2f}",
+                    inline=True
+                )
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+            print(f"Admin {interaction.user.name} reset crypto prices to base values")
+    except Exception as e:
+        print(f"Error in reset command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # Wipe command - Admin only, #hidden channel
@@ -3583,185 +4116,290 @@ async def reset(interaction: discord.Interaction, type: str):
     app_commands.Choice(name="all", value="all")
 ])
 async def wipe(interaction: discord.Interaction, type: str):
-    await interaction.response.defer(ephemeral=True)
-    
-    # Check if user has administrator permissions
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
-        return
-    
-    # Check if command is being used in the #hidden channel
-    if not hasattr(interaction.channel, 'name') or interaction.channel.name != "hidden":
-        await interaction.followup.send(
-            f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
-            ephemeral=True
-        )
-        return
-    
-    # Get all members in the guild
-    guild = interaction.guild
-    if not guild:
-        await interaction.followup.send("❌ **Error**: Could not get guild information.", ephemeral=True)
-        return
-    
-    members = guild.members
-    wiped_count = 0
-    
-    if type == "money":
-        # Reset money to default, keep upgrades
-        for member in members:
-            if not member.bot:  # Skip bots
-                wipe_user_money(member.id)
-                wiped_count += 1
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
         
-        embed = discord.Embed(
-            title="✅ Money Wiped",
-            description=f"Reset money to default for **{wiped_count}** users in this server.\n\n**Stock market has been reset** - all shares returned, making all stocks available at max capacity.",
-            color=discord.Color.orange()
-        )
-        embed.add_field(name="What was reset", value="• Money (balance)\n• Stock holdings (shares)\n• Crypto holdings (portfolio)", inline=False)
-        embed.add_field(name="What was kept", value="• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Plants", inline=False)
-    elif type == "plants":
-        # Reset plants and update ranks
-        for member in members:
-            if not member.bot:  # Skip bots
-                wipe_user_plants(member.id)
-                # Update their rank to PLANTER I
-                try:
-                    await assign_gatherer_role(member, guild)
-                except Exception as e:
-                    print(f"Error updating role for user {member.id}: {e}")
-                wiped_count += 1
+        # Check if user has administrator permissions
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
         
-        embed = discord.Embed(
-            title="✅ Plants Wiped",
-            description=f"Reset collected plants for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank.",
-            color=discord.Color.orange()
-        )
-        embed.add_field(name="What was reset", value="• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)", inline=False)
-        embed.add_field(name="What was kept", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs", inline=False)
-    elif type == "crypto":
-        # Reset crypto holdings only
-        for member in members:
-            if not member.bot:  # Skip bots
-                wipe_user_crypto(member.id)
-                wiped_count += 1
+        # Check if command is being used in the #hidden channel
+        if not hasattr(interaction.channel, 'name') or interaction.channel.name != "hidden":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
+                ephemeral=True)
+            return
         
-        embed = discord.Embed(
-            title="✅ Crypto Wiped",
-            description=f"Reset crypto holdings to 0 for **{wiped_count}** users in this server.",
-            color=discord.Color.orange()
-        )
-        embed.add_field(name="What was reset", value="• Crypto holdings (portfolio)", inline=False)
-        embed.add_field(name="What was kept", value="• Money (balance)\n• Stock holdings (shares)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Plants", inline=False)
-    else:  # type == "all"
-        # Reset money, all upgrades, and plants
-        for member in members:
-            if not member.bot:  # Skip bots
-                wipe_user_all(member.id)
-                # Update their rank to PLANTER I
-                try:
-                    await assign_gatherer_role(member, guild)
-                except Exception as e:
-                    print(f"Error updating role for user {member.id}: {e}")
-                wiped_count += 1
-        
-        embed = discord.Embed(
-            title="✅ All Data Wiped",
-            description=f"Reset everything for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank.\n\n**Market has been reset** - all shares returned, making all stocks available at max capacity.",
-            color=discord.Color.red()
-        )
-        embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Stock holdings (shares)\n• Crypto holdings (portfolio)\n• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)", inline=False)
+        # Get all members in the guild
+        guild = interaction.guild
+        if not guild:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: Could not get guild information.", ephemeral=True)
+            return
     
-    await interaction.followup.send(embed=embed, ephemeral=True)
-    print(f"Admin {interaction.user.name} wiped {type} data for {wiped_count} users")
+        members = guild.members
+        wiped_count = 0
+        
+        if type == "money":
+            # Reset money to default, keep upgrades
+            for member in members:
+                if not member.bot:  # Skip bots
+                    wipe_user_money(member.id)
+                    wiped_count += 1
+            
+            embed = discord.Embed(
+                title="✅ Money Wiped",
+                description=f"Reset money to default for **{wiped_count}** users in this server.\n\n**Stock market has been reset** - all shares returned, making all stocks available at max capacity.",
+                color=discord.Color.orange()
+            )
+            embed.add_field(name="What was reset", value="• Money (balance)\n• Stock holdings (shares)\n• Crypto holdings (portfolio)", inline=False)
+            embed.add_field(name="What was kept", value="• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Plants", inline=False)
+        elif type == "plants":
+            # Reset plants and update ranks
+            for member in members:
+                if not member.bot:  # Skip bots
+                    wipe_user_plants(member.id)
+                    # Update their rank to PLANTER I
+                    try:
+                        await assign_gatherer_role(member, guild)
+                    except Exception as e:
+                        print(f"Error updating role for user {member.id}: {e}")
+                    wiped_count += 1
+            
+            embed = discord.Embed(
+                title="✅ Plants Wiped",
+                description=f"Reset collected plants for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank.",
+                color=discord.Color.orange()
+            )
+            embed.add_field(name="What was reset", value="• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)", inline=False)
+            embed.add_field(name="What was kept", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs", inline=False)
+        elif type == "crypto":
+            # Reset crypto holdings only
+            for member in members:
+                if not member.bot:  # Skip bots
+                    wipe_user_crypto(member.id)
+                    wiped_count += 1
+            
+            embed = discord.Embed(
+                title="✅ Crypto Wiped",
+                description=f"Reset crypto holdings to 0 for **{wiped_count}** users in this server.",
+                color=discord.Color.orange()
+            )
+            embed.add_field(name="What was reset", value="• Crypto holdings (portfolio)", inline=False)
+            embed.add_field(name="What was kept", value="• Money (balance)\n• Stock holdings (shares)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Plants", inline=False)
+        else:  # type == "all"
+            # Reset money, all upgrades, and plants
+            for member in members:
+                if not member.bot:  # Skip bots
+                    wipe_user_all(member.id)
+                    # Update their rank to PLANTER I
+                    try:
+                        await assign_gatherer_role(member, guild)
+                    except Exception as e:
+                        print(f"Error updating role for user {member.id}: {e}")
+                    wiped_count += 1
+            
+            embed = discord.Embed(
+                title="✅ All Data Wiped",
+                description=f"Reset everything for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank.\n\n**Market has been reset** - all shares returned, making all stocks available at max capacity.",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Stock holdings (shares)\n• Crypto holdings (portfolio)\n• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)", inline=False)
+        
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+        print(f"Admin {interaction.user.name} wiped {type} data for {wiped_count} users")
+    except Exception as e:
+        print(f"Error in wipe command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
-# Billion command - Admin only, #hidden channel
-@bot.tree.command(name="billion", description="[ADMIN] Give yourself 1 billion dollars")
+# Set command - Admin only, #hidden channel
+@bot.tree.command(name="set", description="[ADMIN] Set a user's money, plants, or crypto amount")
 @app_commands.default_permissions(administrator=True)
-async def billion(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    
-    # Check if user has administrator permissions
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
-        return
-    
-    # Check if command is being used in the #hidden channel
-    if not hasattr(interaction.channel, 'name') or interaction.channel.name != "hidden":
-        await interaction.followup.send(
-            f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
-            ephemeral=True
-        )
-        return
-    
-    user_id = interaction.user.id
-    billion = 1000000000.0
-    
-    # Set balance to 1 billion
-    update_user_balance(user_id, billion)
-    
-    embed = discord.Embed(
-        title="✅ Balance Updated",
-        description=f"Your balance has been set to **${billion:,.2f}**!",
-        color=discord.Color.green()
-    )
-    await interaction.followup.send(embed=embed, ephemeral=True)
-    print(f"Admin {interaction.user.name} used /billion to set balance to ${billion:,.2f}")
+@app_commands.describe(
+    user="The user to set the value for (defaults to yourself)",
+    amount="The amount to set",
+    type="The type of value to set: money, plants, or crypto",
+    coin="The crypto coin type (RTC, TER, or CNY) - required if type is crypto"
+)
+@app_commands.choices(type=[
+    app_commands.Choice(name="Money", value="money"),
+    app_commands.Choice(name="Plants", value="plants"),
+    app_commands.Choice(name="Crypto", value="crypto")
+])
+@app_commands.choices(coin=[
+    app_commands.Choice(name="RTC", value="RTC"),
+    app_commands.Choice(name="TER", value="TER"),
+    app_commands.Choice(name="CNY", value="CNY")
+])
+async def set_command(
+    interaction: discord.Interaction,
+    amount: float,
+    type: str,
+    user: discord.Member = None,
+    coin: str = None
+):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        
+        # Check if user has administrator permissions
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+        
+        # Check if command is being used in the #hidden channel
+        if not hasattr(interaction.channel, 'name') or interaction.channel.name != "hidden":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
+                ephemeral=True)
+            return
+        
+        # Determine target user (default to command user if not specified)
+        target_user = user if user else interaction.user
+        user_id = target_user.id
+        
+        # Validate and normalize type
+        type_lower = type.lower()
+        if type_lower not in ["money", "plants", "crypto"]:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: Type must be one of: `money`, `plants`, or `crypto`.",
+                ephemeral=True)
+            return
+        
+        # Validate amount
+        if amount < 0:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: Amount cannot be negative.",
+                ephemeral=True)
+            return
+        
+        users = _get_users_collection()
+        
+        # Handle each type
+        if type_lower == "money":
+            update_user_balance(user_id, amount)
+            embed = discord.Embed(
+                title="✅ Money Set",
+                description=f"{target_user.mention}'s balance has been set to **${amount:,.2f}**!",
+                color=discord.Color.green()
+            )
+            print(f"Admin {interaction.user.name} used /set to set {target_user.name}'s money to ${amount:,.2f}")
+        
+        elif type_lower == "plants":
+            # Set gather_stats.total_items and total_forage_count
+            users.update_one(
+                {"_id": int(user_id)},
+                {
+                    "$set": {
+                        "gather_stats.total_items": int(amount),
+                        "total_forage_count": int(amount)
+                    }
+                },
+                upsert=True
+            )
+            embed = discord.Embed(
+                title="✅ Plants Set",
+                description=f"{target_user.mention}'s plant count has been set to **{int(amount):,}**!",
+                color=discord.Color.green()
+            )
+            print(f"Admin {interaction.user.name} used /set to set {target_user.name}'s plants to {int(amount):,}")
+        
+        elif type_lower == "crypto":
+            # Validate coin parameter
+            if not coin:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ **Error**: `coin` parameter is required when type is `crypto`. Choose from: `RTC`, `TER`, or `CNY`.",
+                    ephemeral=True)
+                return
+            
+            coin_upper = coin.upper()
+            if coin_upper not in ["RTC", "TER", "CNY"]:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ **Error**: Coin must be one of: `RTC`, `TER`, or `CNY`.",
+                    ephemeral=True)
+                return
+            
+            # Set crypto holdings directly
+            users.update_one(
+                {"_id": int(user_id)},
+                {
+                    "$set": {
+                        f"crypto_holdings.{coin_upper}": float(amount)
+                    }
+                },
+                upsert=True
+            )
+            embed = discord.Embed(
+                title="✅ Crypto Set",
+                description=f"{target_user.mention}'s {coin_upper} holdings have been set to **{amount:,.2f}**!",
+                color=discord.Color.green()
+            )
+            print(f"Admin {interaction.user.name} used /set to set {target_user.name}'s {coin_upper} to {amount:,.2f}")
+        
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+    except Exception as e:
+        print(f"Error in set command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # Pay command
 @bot.tree.command(name="pay", description="Pay money to another user!")
 async def pay(interaction: discord.Interaction, amount: float, user: discord.Member):
-    await interaction.response.defer(ephemeral=False)
-    
-    sender_id = interaction.user.id
-    recipient_id = user.id
-    
-    # Can't pay yourself
-    if sender_id == recipient_id:
-        await interaction.followup.send("❌ You can't pay yourself!", ephemeral=True)
-        return
-    
-    # Can't pay the bot
-    if recipient_id == bot.user.id:
-        await interaction.followup.send("❌ You can't pay the bot!", ephemeral=True)
-        return
-    
-    # Validate amount is positive
-    if amount <= 0:
-        await interaction.followup.send("❌ Payment amount must be greater than $0!", ephemeral=True)
-        return
-    
-    # Validate amount has at most 2 decimal places (no fractional cents)
-    if not validate_money_precision(amount):
-        await interaction.followup.send("❌ Invalid payment amount!", ephemeral=True)
-        return
-    
-    # Normalize amount to exactly 2 decimal places
-    amount = normalize_money(amount)
-    
-    # Check sender balance
-    sender_balance = get_user_balance(sender_id)
-    sender_balance = normalize_money(sender_balance)
-    
-    if not can_afford_rounded(sender_balance, amount):
-        await interaction.followup.send(f"❌ You don't have enough balance!", ephemeral=True)
-        return
-    
-    # Get recipient balance
-    recipient_balance = get_user_balance(recipient_id)
-    recipient_balance = normalize_money(recipient_balance)
-    
-    # Transfer money
-    new_sender_balance = normalize_money(sender_balance - amount)
-    new_recipient_balance = normalize_money(recipient_balance + amount)
-    update_user_balance(sender_id, new_sender_balance)
-    update_user_balance(recipient_id, new_recipient_balance)
-    
-    # Send confirmation message
-    await interaction.followup.send(f"{interaction.user.mention} has paid {user.mention} **${amount:.2f}**! 💰")
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        
+        sender_id = interaction.user.id
+        recipient_id = user.id
+        
+        # Can't pay yourself
+        if sender_id == recipient_id:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ You can't pay yourself!", ephemeral=True)
+            return
+        
+        # Can't pay the bot
+        if recipient_id == bot.user.id:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ You can't pay the bot!", ephemeral=True)
+            return
+        
+        # Validate amount is positive
+        if amount <= 0:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Payment amount must be greater than $0!", ephemeral=True)
+            return
+        
+        # Validate amount has at most 2 decimal places (no fractional cents)
+        if not validate_money_precision(amount):
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Invalid payment amount!", ephemeral=True)
+            return
+        
+        # Normalize amount to exactly 2 decimal places
+        amount = normalize_money(amount)
+        
+        # Check sender balance
+        sender_balance = get_user_balance(sender_id)
+        sender_balance = normalize_money(sender_balance)
+        
+        if not can_afford_rounded(sender_balance, amount):
+            await safe_interaction_response(interaction, interaction.followup.send, f"❌ You don't have enough balance!", ephemeral=True)
+            return
+        
+        # Get recipient balance
+        recipient_balance = get_user_balance(recipient_id)
+        recipient_balance = normalize_money(recipient_balance)
+        
+        # Transfer money
+        new_sender_balance = normalize_money(sender_balance - amount)
+        new_recipient_balance = normalize_money(recipient_balance + amount)
+        update_user_balance(sender_id, new_sender_balance)
+        update_user_balance(recipient_id, new_recipient_balance)
+        
+        # Send confirmation message
+        await safe_interaction_response(interaction, interaction.followup.send, f"{interaction.user.mention} has paid {user.mention} **${amount:.2f}**! 💰")
+    except Exception as e:
+        print(f"Error in pay command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # Leaderboard pagination view
@@ -3843,21 +4481,31 @@ class LeaderboardView(discord.ui.View):
     
     @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, disabled=True)
     async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.current_page > 0:
-            self.current_page -= 1
-            self.update_buttons()
-            embed = self.create_embed(self.current_page)
-            await interaction.response.edit_message(embed=embed, view=self)
-        else:
-            await interaction.response.defer()
+        try:
+            if self.current_page > 0:
+                self.current_page -= 1
+                self.update_buttons()
+                embed = self.create_embed(self.current_page)
+                await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+            else:
+                await safe_defer(interaction)
+        except Exception as e:
+            print(f"Error in previous_button (leaderboard): {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.current_page < self.total_pages - 1:
-            self.current_page += 1
-            self.update_buttons()
-            embed = self.create_embed(self.current_page)
-            await interaction.response.edit_message(embed=embed, view=self)
+        try:
+            if self.current_page < self.total_pages - 1:
+                self.current_page += 1
+                self.update_buttons()
+                embed = self.create_embed(self.current_page)
+                await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+            else:
+                await safe_defer(interaction)
+        except Exception as e:
+            print(f"Error in next_button (leaderboard): {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
         else:
             await interaction.response.defer()
     
@@ -4431,43 +5079,111 @@ def initialize_crypto_history():
             base_price = coin["base_price"]
             crypto_price_history[coin["symbol"]] = [base_price] * 6
 
-def update_crypto_prices_market():
-    """Update cryptocurrency prices with market fluctuations."""
+async def fetch_real_crypto_prices() -> dict[str, float] | None:
+    """Fetch real-world cryptocurrency prices from CoinGecko API (free tier, rate-limited).
+    
+    Returns:
+        dict mapping game symbols to prices: {"RTC": btc_price, "TER": eth_price, "CNY": bnb_price}
+        Returns None if API call fails
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            # CoinGecko API endpoint - fetches all three coins in one request
+            # Maps: bitcoin -> RTC, ethereum -> TER, binancecoin -> CNY
+            url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,binancecoin&vs_currencies=usd"
+            
+            # Mapping from CoinGecko coin IDs to game symbols
+            coin_mapping = {
+                "bitcoin": "RTC",
+                "ethereum": "TER",
+                "binancecoin": "CNY"
+            }
+            
+            timeout = aiohttp.ClientTimeout(total=10)  # 10 second timeout
+            
+            try:
+                logging.debug(f"Fetching crypto prices from CoinGecko: {url}")
+                async with session.get(url, timeout=timeout) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        prices = {}
+                        
+                        # Extract prices from CoinGecko response
+                        for coin_id, symbol in coin_mapping.items():
+                            if coin_id in data and "usd" in data[coin_id]:
+                                price = float(data[coin_id]["usd"])
+                                prices[symbol] = price
+                                logging.info(f"Successfully fetched {symbol} price: {price}")
+                            else:
+                                logging.warning(f"CoinGecko response missing data for {coin_id} ({symbol})")
+                        
+                        if not prices:
+                            logging.error("CoinGecko API returned empty price data")
+                            return None
+                        
+                        logging.info(f"Fetched {len(prices)} crypto prices successfully: {prices}")
+                        return prices
+                    elif response.status == 429:
+                        # Rate limit exceeded
+                        logging.warning(f"CoinGecko API rate limit exceeded (429). Will retry on next cycle.")
+                        return None
+                    else:
+                        logging.warning(f"CoinGecko API returned status {response.status}")
+                        return None
+                        
+            except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, ValueError) as e:
+                logging.warning(f"Error fetching crypto prices from CoinGecko: {e}", exc_info=True)
+                return None
+            
+    except Exception as e:
+        logging.error(f"Error in fetch_real_crypto_prices: {e}", exc_info=True)
+        return None
+
+async def update_crypto_prices_market():
+    """Update cryptocurrency prices with real-world prices from CoinGecko API."""
     # Initialize history if needed
     initialize_crypto_history()
     
-    prices = get_crypto_prices()
+    # Get current prices as fallback
+    current_prices = get_crypto_prices()
     
+    # Fetch real-world prices
+    real_prices = await fetch_real_crypto_prices()
+    
+    # If ALL API calls failed, keep current prices and return early
+    if real_prices is None:
+        logging.warning("Failed to fetch real crypto prices, keeping current prices")
+        return current_prices
+    
+    # Log successful fetch
+    logging.info(f"Successfully fetched crypto prices: {real_prices}")
+    
+    # Update prices with real-world data
+    prices = {}
     for coin in CRYPTO_COINS:
         symbol = coin["symbol"]
-        current_price = prices.get(symbol, coin["base_price"])
+        new_price = real_prices.get(symbol)
         
-        # Determine fluctuation percentage: 50% chance for 1%, 30% for 2%, 20% for 3%
-        fluctuation_weights = [0.5, 0.3, 0.2]
-        fluctuation_percent = random.choices([0.01, 0.02, 0.03], weights=fluctuation_weights, k=1)[0]
-        
-        # Random direction: increase or decrease (52% up / 48% down for slight upward bias)
-        direction = random.choices([1, -1], weights=[0.52, 0.48], k=1)[0]
-        
-        # Calculate new price
-        new_price = current_price * (1 + (direction * fluctuation_percent))
-        
-        # Ensure price doesn't go below 0.01
-        if new_price < 0.01:
-            new_price = 0.01
-        
-        prices[symbol] = new_price
+        # If we got a price for this symbol, use it
+        if new_price is not None and new_price > 0:
+            prices[symbol] = new_price
+            logging.info(f"Updated {symbol} price: {current_prices.get(symbol, 'N/A')} -> {new_price}")
+        else:
+            # Keep the previous price if API didn't return a valid price for this symbol
+            prices[symbol] = current_prices.get(symbol, coin["base_price"])
+            logging.warning(f"Keeping previous price for {symbol}: {prices[symbol]} (API didn't return valid price)")
         
         # Update price history (keep last 6 prices)
         if symbol not in crypto_price_history:
             crypto_price_history[symbol] = [coin["base_price"]] * 6
         price_history = crypto_price_history[symbol]
-        price_history.append(new_price)
+        price_history.append(prices[symbol])
         if len(price_history) > 6:
             price_history.pop(0)
     
     # Update prices in database
     update_crypto_prices(prices)
+    logging.info(f"Updated crypto prices in database: {prices}")
     return prices
 
 def get_crypto_5min_change(symbol: str) -> float:
@@ -4575,17 +5291,20 @@ async def update_all_coinbase():
     # Wait a bit for guilds to fully load
     await asyncio.sleep(5)
     
+    logging.info("Coinbase update task started")
+    
     while not bot.is_closed():
         try:
-            # Update prices first
-            update_crypto_prices_market()
+            # Update prices first (now async)
+            logging.info("Starting crypto price update...")
+            await update_crypto_prices_market()
             
             # Update coinbase channels for all guilds the bot is in
             for guild in bot.guilds:
                 await update_coinbase_message(guild)
                 await asyncio.sleep(1)  # Small delay between updates
         except Exception as e:
-            print(f"Error in coinbase update task: {e}")
+            logging.error(f"Error in coinbase update task: {e}", exc_info=True)
         
         # Wait 60 seconds before next update
         await asyncio.sleep(60)
@@ -5116,93 +5835,67 @@ class MiningView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.user_id = user_id
         self.message = message  # Store message reference for timeout updates
-        self.start_time = time.time()  # Track when the view was created
+        self.start_time = None  # Track when the session actually starts (after first button click)
+        self.session_started = False  # Track if session has been started
         self.total_mines = 0
         self.session_mined = {}  # Track coins mined in this session: {symbol: amount}
         self.session_value = 0.0  # Total value mined in this session
+        self.session_base_value = 0.0  # Total base value before bloom multiplier
         self.timed_out = False  # Track if session has timed out
+        self.timeout_task = None  # Background task for checking timeout
         # Ensure GPU boosts are numbers (convert to float/int if needed)
         self.gpu_percent_boost = float(gpu_percent_boost) if gpu_percent_boost else 0.0  # Total percent increase from GPUs
         self.gpu_seconds_boost = int(gpu_seconds_boost) if gpu_seconds_boost else 0  # Total seconds increase from GPUs
         self.gpus_used = gpus_used if gpus_used else []  # List of GPU names being used
     
-    @discord.ui.button(label="MINE!", style=discord.ButtonStyle.success, emoji="⛏️")
-    async def mine_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ This is not your mining session!", ephemeral=True)
+    def start_timeout_checker(self):
+        """Start a background task that updates the timer countdown and handles timeout immediately."""
+        async def check_timeout():
+            max_time = 60 + self.gpu_seconds_boost
+            last_second = -1
+            
+            while not self.timed_out and self.session_started:
+                elapsed_time = time.time() - self.start_time
+                time_remaining = max_time - elapsed_time
+                current_second = int(time_remaining) if time_remaining > 0 else 0
+                
+                # Check if time has expired
+                if time_remaining <= 0 or elapsed_time >= max_time:
+                    # Time has expired - update message immediately
+                    if self.message and not self.timed_out:
+                        await self._handle_timeout()
+                    break
+                
+                # Update embed every second with countdown
+                if self.message and not self.timed_out and current_second != last_second:
+                    try:
+                        await self._update_timer_embed(time_remaining, max_time)
+                        last_second = current_second
+                    except Exception as e:
+                        print(f"Error updating timer embed: {e}")
+                
+                # Sleep 1 second for integer countdown
+                await asyncio.sleep(1.0)
+        
+        self.timeout_task = asyncio.create_task(check_timeout())
+    
+    async def _update_timer_embed(self, time_remaining: float, max_time: int):
+        """Update the embed with the current timer countdown."""
+        if self.timed_out or not self.message:
             return
         
-        # Check if session has timed out
-        elapsed_time = time.time() - self.start_time
-        max_time = 60 + self.gpu_seconds_boost
-        if elapsed_time >= max_time or self.timed_out:
-            # Session has expired
-            self.timed_out = True
-            for item in self.children:
-                item.disabled = True
-            
-            await interaction.response.send_message(
-                "⏰ Your mining session has expired! Use `/mine` again after your cooldown.",
-                ephemeral=True
-            )
-            
-            # Update the message if we have a reference
-            if self.message:
-                try:
-                    await self.message.edit(view=self)
-                except:
-                    pass
-            return
+        # Ensure time_remaining is not negative
+        time_remaining = max(0, time_remaining)
         
-        await interaction.response.defer()
-        
-        # Randomly select a coin to mine
-        coin = random.choice(CRYPTO_COINS)
-        symbol = coin["symbol"]
-        base_price = coin["base_price"]
-        
-        # Calculate mining amount based on coin's base price (proportional to old 200.0 base)
-        # Target: $50-60 per session average (assuming up to 60 clicks per 60s session, 1 per second)
-        # This means ~$0.83-$1.00 per click average, so $0.60-$1.40 range with RNG
-        # At $200 base: $0.60-$1.40 = 0.003-0.007 coins = 30-70 thousandths
-        # New system: scale by price ratio (200.0 / base_price)
-        price_ratio = 200.0 / base_price
-        # Reduced range: 30-70 thousandths (0.003-0.007) at $200 base
-        # Scaled range: multiply by price_ratio
-        min_thousandths = int(30 * price_ratio)
-        max_thousandths = int(70 * price_ratio)
-        # Ensure at least 1 thousandth
-        min_thousandths = max(1, min_thousandths)
-        max_thousandths = max(min_thousandths, max_thousandths)
-        random_thousandths = random.randint(min_thousandths, max_thousandths)
-        base_amount = round(random_thousandths / 10000, 4)
-        
-        # Apply GPU percent boost (e.g., 5% = 0.05, so multiply by 1.05)
-        # Ensure gpu_percent_boost is a number (convert to float if needed)
-        gpu_boost = float(self.gpu_percent_boost) if self.gpu_percent_boost else 0.0
-        percent_multiplier = 1.0 + (gpu_boost / 100.0)
-        amount = round(base_amount * percent_multiplier, 4)
-        
-        # Add crypto to user's holdings
-        update_user_crypto_holdings(interaction.user.id, symbol, amount)
-        
-        # Update session tracking
-        self.total_mines += 1
-        if symbol not in self.session_mined:
-            self.session_mined[symbol] = 0.0
-        self.session_mined[symbol] += amount
-        
-        # Calculate value of this mine
+        # Get current data for the embed
+        holdings = get_user_crypto_holdings(self.user_id)
         prices = get_crypto_prices()
-        coin_price = prices.get(symbol, base_price)
-        mine_value = amount * coin_price
-        self.session_value += mine_value
-        
-        # Get current holdings
-        holdings = get_user_crypto_holdings(interaction.user.id)
-        
-        # Calculate total portfolio value
         total_value = sum(holdings[c["symbol"]] * prices.get(c["symbol"], c["base_price"]) for c in CRYPTO_COINS)
+        
+        # Get bloom multiplier for display
+        bloom_multiplier = get_bloom_multiplier(self.user_id)
+        bloom_count = get_user_bloom_count(self.user_id)
+        extra_value_from_bloom = self.session_value - self.session_base_value
         
         # Create session summary
         session_summary = ""
@@ -5210,63 +5903,21 @@ class MiningView(discord.ui.View):
             coin_name = next(c["name"] for c in CRYPTO_COINS if c["symbol"] == sym)
             session_summary += f"{coin_name} ({sym}): {amt:.4f}\n"
         
-        # Calculate time remaining
-        elapsed_time = time.time() - self.start_time
-        max_time = 60 + self.gpu_seconds_boost
-        time_remaining = max(0, max_time - int(elapsed_time))
-        
-        # Check if time has actually expired (not just rounded to 0)
-        if elapsed_time >= max_time or self.timed_out:
-            # Session has expired - show expired embed immediately
-            self.timed_out = True
-            for item in self.children:
-                item.disabled = True
-            
-            # Create and show expired embed
-            timeout_embed = discord.Embed(
-                title="⏰ Mining Session Expired",
-                description="Time's up! Your mining session has ended.",
-                color=discord.Color.orange()
-            )
-            
-            if self.total_mines > 0:
-                timeout_embed.add_field(
-                    name="Session Summary",
-                    value=f"Total Mines: **{self.total_mines}**\nSession Value: **${self.session_value:.2f}**",
-                    inline=False
-                )
-                
-                if self.gpus_used:
-                    timeout_embed.add_field(name="GPUs Used", value="\n".join(self.gpus_used), inline=False)
-                
-                if session_summary:
-                    timeout_embed.add_field(name="Mined This Session", value=session_summary.strip(), inline=False)
-                
-                timeout_embed.add_field(
-                    name="Your Total Holdings",
-                    value=f"RTC: {holdings['RTC']:.4f}\nTER: {holdings['TER']:.4f}\nCNY: {holdings['CNY']:.4f}",
-                    inline=False
-                )
-                timeout_embed.add_field(name="Total Portfolio Value", value=f"**${total_value:.2f}**", inline=False)
-            else:
-                timeout_embed.description = "Time's up! You didn't mine anything this session."
-            
-            timeout_embed.set_footer(text="Use /mine again after your cooldown expires!")
-            
-            await interaction.followup.edit_message(interaction.message.id, embed=timeout_embed, view=self)
-            return
-        
         # Create GPU info text
         gpu_text = ""
         if self.gpus_used:
             gpu_text = "\n".join(self.gpus_used)
         
-        # Create success embed with cumulative results
-        max_time = 60 + self.gpu_seconds_boost
+        # Create description with countdown timer
         description_text = f"Click the button as many times as you can in {max_time} seconds!"
         if self.gpu_percent_boost > 0:
             description_text += f"\n💰 **GPU Boost: +{self.gpu_percent_boost}%**"
-        description_text += f"\n\n⏰ **Time Remaining: {time_remaining} seconds**"
+        if bloom_count > 0 and bloom_multiplier > 1.0:
+            multiplier_percent = (bloom_multiplier - 1.0) * 100
+            description_text += f"\n🌳 **Tree Ring Boost: +{multiplier_percent:.1f}%**"
+        
+        # Show time remaining in integer seconds
+        description_text += f"\n\n⏰ **Time Remaining: {int(time_remaining)} seconds**"
         
         success_embed = discord.Embed(
             title="⛏️ /mine",
@@ -5274,6 +5925,8 @@ class MiningView(discord.ui.View):
             color=discord.Color.light_grey()
         )
         success_embed.add_field(name="This Session", value=f"Total Mines: **{self.total_mines}**\nSession Value: **${self.session_value:.2f}**", inline=True)
+        if bloom_count > 0 and extra_value_from_bloom > 0:
+            success_embed.add_field(name="🌳 Tree Ring Boost", value=f"+${extra_value_from_bloom:.2f} extra value", inline=True)
         if gpu_text:
             success_embed.add_field(name="GPUs Active", value=gpu_text, inline=False)
         if session_summary:
@@ -5282,19 +5935,20 @@ class MiningView(discord.ui.View):
         success_embed.add_field(name="Total Portfolio Value", value=f"**${total_value:.2f}**", inline=False)
         success_embed.set_footer(text="Keep clicking! Use /sell to sell your cryptocurrency!")
         
-        await interaction.followup.edit_message(interaction.message.id, embed=success_embed, view=self)
+        await self.message.edit(embed=success_embed, view=self)
     
-    async def on_timeout(self):
-        # Mark as timed out
+    async def _handle_timeout(self):
+        """Handle timeout by updating the message with timeout embed."""
+        if self.timed_out:
+            return  # Already handled
+        
         self.timed_out = True
         
-        # Cooldown is already set when session starts, no need to set it again
-        
-        # Disable the button if timeout
+        # Disable the button
         for item in self.children:
             item.disabled = True
         
-        # Update the embed to show timeout
+        # Create timeout embed
         timeout_embed = discord.Embed(
             title="⏰ Mining Session Expired",
             description="Time's up! Your mining session has ended.",
@@ -5307,11 +5961,23 @@ class MiningView(discord.ui.View):
             prices = get_crypto_prices()
             total_value = sum(holdings[c["symbol"]] * prices.get(c["symbol"], c["base_price"]) for c in CRYPTO_COINS)
             
+            # Get bloom multiplier for display
+            bloom_multiplier = get_bloom_multiplier(self.user_id)
+            bloom_count = get_user_bloom_count(self.user_id)
+            extra_value_from_bloom = self.session_value - self.session_base_value
+            
             timeout_embed.add_field(
                 name="Session Summary",
                 value=f"Total Mines: **{self.total_mines}**\nSession Value: **${self.session_value:.2f}**",
                 inline=False
             )
+            if bloom_count > 0 and extra_value_from_bloom > 0:
+                multiplier_percent = (bloom_multiplier - 1.0) * 100
+                timeout_embed.add_field(
+                    name="🌳 Tree Ring Boost",
+                    value=f"+{multiplier_percent:.1f}% ({bloom_multiplier:.2f}x) - **+${extra_value_from_bloom:.2f}**",
+                    inline=False
+                )
             
             # Add GPU info if GPUs were used
             if self.gpus_used:
@@ -5342,102 +6008,241 @@ class MiningView(discord.ui.View):
                 await self.message.edit(embed=timeout_embed, view=self)
             except Exception as e:
                 print(f"Error updating timeout message: {e}")
-
-
-@bot.tree.command(name="mine", description="Mine cryptocurrency! (5 minute cooldown)")
-async def mine(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
     
-    user_id = interaction.user.id
-    
-    # Check if user is on Russian Roulette elimination cooldown (dead)
-    is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
-    if is_roulette_cooldown:
-        if roulette_time_left < 60:
-            # Show seconds when less than 1 minute left
-            await interaction.followup.send(
-                f"Sorry, {interaction.user.name}, you're dead. You cannot mine for {roulette_time_left} second(s)", ephemeral=True
-            )
-        else:
-            # Show minutes when 1 minute or more left
-            minutes_left = roulette_time_left // 60
-            await interaction.followup.send(
-                f"Sorry, {interaction.user.name}, you're dead. You cannot mine for {minutes_left} minute(s)", ephemeral=True
-            )
-        return
-    
-    # Check if command is being used in the correct channel
-    if not hasattr(interaction.channel, 'name') or interaction.channel.name != "gathercoin":
-        await interaction.followup.send(
-            f"❌ This command can only be used in the #gathercoin channel, {interaction.user.name}!",
-            ephemeral=True
-        )
-        return
-    
-    user_id = interaction.user.id
-    
-    # Check cooldown
-    last_mine_time = get_user_last_mine_time(user_id)
-    current_time = time.time()
-    
-    if last_mine_time > 0:
-        cooldown_end = last_mine_time + MINE_COOLDOWN
-        if current_time < cooldown_end:
-            time_left = int(cooldown_end - current_time)
-            minutes_left = time_left // 60
-            seconds_left = time_left % 60
-            await interaction.followup.send(
-                f"⏰ You must wait {minutes_left} minutes and {seconds_left} seconds before mining again, {interaction.user.name}.",
-                ephemeral=True
-            )
+    @discord.ui.button(label="MINE!", style=discord.ButtonStyle.success, emoji="⛏️")
+    async def mine_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if interaction.user.id != self.user_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your mining session!", ephemeral=True)
+                return
+            
+            # Start the session on first button click
+            if not self.session_started:
+                self.session_started = True
+                self.start_time = time.time()
+                # Set cooldown when session actually starts
+                update_user_last_mine_time(self.user_id, self.start_time)
+                # Start the timeout checker
+                self.start_timeout_checker()
+                if not await safe_defer(interaction):
+                    return
+                # Update embed to show timer has started
+                await self._update_timer_embed(60 + self.gpu_seconds_boost, 60 + self.gpu_seconds_boost)
+                # Continue to mine on this first click
+            else:
+                # Check if session has timed out
+                elapsed_time = time.time() - self.start_time
+                max_time = 60 + self.gpu_seconds_boost
+                if elapsed_time >= max_time or self.timed_out:
+                    # Session has expired
+                    self.timed_out = True
+                    for item in self.children:
+                        item.disabled = True
+                    
+                    await safe_interaction_response(interaction, interaction.response.send_message,
+                        "⏰ Your mining session has expired! Use `/mine` again after your cooldown.",
+                        ephemeral=True)
+                    
+                    # Update the message if we have a reference
+                    if self.message:
+                        try:
+                            await self.message.edit(view=self)
+                        except:
+                            pass
+                    return
+                
+                if not await safe_defer(interaction):
+                    return
+        except Exception as e:
+            print(f"Error in mine_button: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
             return
+        
+        # Randomly select a coin to mine
+        coin = random.choice(CRYPTO_COINS)
+        symbol = coin["symbol"]
+        base_price = coin["base_price"]
+        
+        # Calculate mining amount based on coin's base price (proportional to old 200.0 base)
+        # Target: $50-60 per session average (assuming up to 60 clicks per 60s session, 1 per second)
+        # This means ~$0.83-$1.00 per click average, so $0.60-$1.40 range with RNG
+        # At $200 base: $0.60-$1.40 = 0.003-0.007 coins = 30-70 thousandths
+        # New system: scale by price ratio (200.0 / base_price)
+        price_ratio = 200.0 / base_price
+        # Reduced range: 30-70 thousandths (0.003-0.007) at $200 base
+        # Scaled range: multiply by price_ratio
+        min_thousandths = int(30 * price_ratio)
+        max_thousandths = int(70 * price_ratio)
+        # Ensure at least 1 thousandth
+        min_thousandths = max(1, min_thousandths)
+        max_thousandths = max(min_thousandths, max_thousandths)
+        random_thousandths = random.randint(min_thousandths, max_thousandths)
+        base_amount = round(random_thousandths / 10000, 4)
+        
+        # Apply GPU percent boost (e.g., 5% = 0.05, so multiply by 1.05)
+        # Ensure gpu_percent_boost is a number (convert to float if needed)
+        gpu_boost = float(self.gpu_percent_boost) if self.gpu_percent_boost else 0.0
+        percent_multiplier = 1.0 + (gpu_boost / 100.0)
+        amount = round(base_amount * percent_multiplier, 4)
+        
+        # Apply bloom multiplier to amount mined
+        bloom_multiplier = get_bloom_multiplier(interaction.user.id)
+        base_amount_before_bloom = amount
+        amount = round(amount * bloom_multiplier, 4)
+        extra_from_bloom = amount - base_amount_before_bloom
+        
+        # Add crypto to user's holdings
+        update_user_crypto_holdings(interaction.user.id, symbol, amount)
+        
+        # Update session tracking
+        self.total_mines += 1
+        if symbol not in self.session_mined:
+            self.session_mined[symbol] = 0.0
+        self.session_mined[symbol] += amount
+        
+        # Calculate value of this mine
+        prices = get_crypto_prices()
+        coin_price = prices.get(symbol, base_price)
+        mine_value = amount * coin_price
+        base_mine_value = base_amount_before_bloom * coin_price
+        self.session_value += mine_value
+        self.session_base_value += base_mine_value
+        
+        # Get current holdings
+        holdings = get_user_crypto_holdings(interaction.user.id)
+        
+        # Calculate total portfolio value
+        total_value = sum(holdings[c["symbol"]] * prices.get(c["symbol"], c["base_price"]) for c in CRYPTO_COINS)
+        
+        # Create session summary
+        session_summary = ""
+        for sym, amt in self.session_mined.items():
+            coin_name = next(c["name"] for c in CRYPTO_COINS if c["symbol"] == sym)
+            session_summary += f"{coin_name} ({sym}): {amt:.4f}\n"
+        
+        # Calculate time remaining and check if expired (only if session has started)
+        if self.session_started:
+            elapsed_time = time.time() - self.start_time
+            max_time = 60 + self.gpu_seconds_boost
+            time_remaining = max(0, max_time - elapsed_time)
+            
+            # Check if time has actually expired
+            if elapsed_time >= max_time or self.timed_out:
+                # Session has expired - show expired embed immediately
+                await self._handle_timeout()
+                return
+            
+            # Update the embed with current timer and mining results
+            # This uses the shared method to ensure timer is always accurate
+            await self._update_timer_embed(time_remaining, max_time)
     
-    # Set cooldown when session starts (not when it ends)
-    update_user_last_mine_time(user_id, current_time)
-    
-    # Get user's GPUs and calculate bonuses
-    user_gpus = get_user_gpus(user_id)
-    total_percent_boost = 0
-    total_seconds_boost = 0
-    gpus_used = []
-    
-    for gpu_name in user_gpus:
-        # Find GPU info in shop
-        gpu_info = next((gpu for gpu in GPU_SHOP if gpu["name"] == gpu_name), None)
-        if gpu_info:
-            total_percent_boost += gpu_info["percent_increase"]
-            total_seconds_boost += gpu_info["seconds_increase"]
-            gpus_used.append(gpu_name)
-    
-    # Create mining embed with button
-    base_time = 60
-    total_time = base_time + total_seconds_boost
-    description_text = f"Click the **Mine** button below to mine cryptocurrency!\n\nYou have **{total_time} seconds** to click as many times as you can!"
-    if total_percent_boost > 0:
-        description_text += f"\n💰 **GPU Boost: +{total_percent_boost}%**"
-    if total_seconds_boost > 0:
-        description_text += f"\n⏱️ **Time Boost: +{total_seconds_boost} seconds**"
-    
-    embed = discord.Embed(
-        title="⛏️ Cryptocurrency Mining",
-        description=description_text,
-        color=discord.Color.blue()
-    )
-    
-    # Add GPU info if user has GPUs
-    if gpus_used:
-        embed.add_field(name="GPUs Active", value="\n".join(gpus_used), inline=False)
-    
-    # Set footer text
-    footer_text = "Each click mines a coin-specific amount based on the cryptocurrency's value!"
-    if total_percent_boost > 0:
-        footer_text += f" GPUs boost your mining by +{total_percent_boost}%!"
-    embed.set_footer(text=footer_text)
-    
-    view = MiningView(user_id, timeout=total_time, gpu_percent_boost=total_percent_boost, gpu_seconds_boost=total_seconds_boost, gpus_used=gpus_used)
-    message = await interaction.followup.send(embed=embed, view=view)
-    # Store message reference in view for timeout handling
-    view.message = message
+    async def on_timeout(self):
+        # Discord's timeout callback - use shared handler
+        # Note: This may be called with some delay, but our background task should have already handled it
+        if not self.timed_out:
+            await self._handle_timeout()
+        
+        # Cancel the background timeout checker task if it's still running
+        if self.timeout_task and not self.timeout_task.done():
+            self.timeout_task.cancel()
+
+
+@bot.tree.command(name="mine", description="Mine cryptocurrency! (1 hour cooldown)")
+async def mine(interaction: discord.Interaction):
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        
+        user_id = interaction.user.id
+        
+        # Check if user is on Russian Roulette elimination cooldown (dead)
+        is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+        if is_roulette_cooldown:
+            if roulette_time_left < 60:
+                # Show seconds when less than 1 minute left
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"Sorry, {interaction.user.name}, you're dead. You cannot mine for {roulette_time_left} second(s)", ephemeral=True)
+            else:
+                # Show minutes when 1 minute or more left
+                minutes_left = roulette_time_left // 60
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"Sorry, {interaction.user.name}, you're dead. You cannot mine for {minutes_left} minute(s)", ephemeral=True)
+            return
+        
+        # Check if command is being used in the correct channel
+        if not hasattr(interaction.channel, 'name') or interaction.channel.name != "gathercoin":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ This command can only be used in the #gathercoin channel, {interaction.user.name}!",
+                ephemeral=True)
+            return
+        
+        user_id = interaction.user.id
+        
+        # Check cooldown
+        last_mine_time = get_user_last_mine_time(user_id)
+        current_time = time.time()
+        
+        if last_mine_time > 0:
+            cooldown_end = last_mine_time + MINE_COOLDOWN
+            if current_time < cooldown_end:
+                time_left = int(cooldown_end - current_time)
+                minutes_left = time_left // 60
+                seconds_left = time_left % 60
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"⏰ You must wait {minutes_left} minutes and {seconds_left} seconds before mining again, {interaction.user.name}.",
+                    ephemeral=True)
+                return
+        
+        # Don't set cooldown here - it will be set when the user clicks the button to start the session
+        
+        # Get user's GPUs and calculate bonuses
+        user_gpus = get_user_gpus(user_id)
+        total_percent_boost = 0
+        total_seconds_boost = 0
+        gpus_used = []
+        
+        for gpu_name in user_gpus:
+            # Find GPU info in shop
+            gpu_info = next((gpu for gpu in GPU_SHOP if gpu["name"] == gpu_name), None)
+            if gpu_info:
+                total_percent_boost += gpu_info["percent_increase"]
+                total_seconds_boost += gpu_info["seconds_increase"]
+                gpus_used.append(gpu_name)
+        
+        # Create mining embed with button
+        base_time = 60
+        total_time = base_time + total_seconds_boost
+        description_text = f"Click the **MINE!** button below to start mining!\n\nYou will have **{total_time} seconds** to click as many times as you can once you start!"
+        if total_percent_boost > 0:
+            description_text += f"\n💰 **GPU Boost: +{total_percent_boost}%**"
+        if total_seconds_boost > 0:
+            description_text += f"\n⏱️ **Time Boost: +{total_seconds_boost} seconds**"
+        
+        embed = discord.Embed(
+            title="⛏️ Cryptocurrency Mining",
+            description=description_text,
+            color=discord.Color.blue()
+        )
+        
+        # Add GPU info if user has GPUs
+        if gpus_used:
+            embed.add_field(name="GPUs Active", value="\n".join(gpus_used), inline=False)
+        
+        # Set footer text
+        footer_text = "Click the MINE! button to start your session! Each click mines a coin-specific amount based on the cryptocurrency's value!"
+        if total_percent_boost > 0:
+            footer_text += f" GPUs boost your mining by +{total_percent_boost}%!"
+        embed.set_footer(text=footer_text)
+        
+        view = MiningView(user_id, timeout=total_time, gpu_percent_boost=total_percent_boost, gpu_seconds_boost=total_seconds_boost, gpus_used=gpus_used)
+        message = await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
+        # Store message reference in view for timeout handling
+        if message:
+            view.message = message
+        # Don't start the timeout checker here - it will start when the user clicks the button
+    except Exception as e:
+        print(f"Error in mine command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 @bot.tree.command(name="sell", description="Sell your cryptocurrency holdings")
@@ -5447,178 +6252,185 @@ async def mine(interaction: discord.Interaction):
     app_commands.Choice(name="Canopy (CNY)", value="CNY"),
 ])
 async def sell(interaction: discord.Interaction, coin: str, amount: float = None):
-    await interaction.response.defer(ephemeral=False)
-    
-    user_id = interaction.user.id
-    holdings = get_user_crypto_holdings(user_id)
-    prices = get_crypto_prices()
-    
-    # Check if user has any of this coin
-    user_holding = holdings.get(coin, 0.0)
-    
-    if user_holding <= 0:
-        await interaction.followup.send(
-            f"❌ You don't have any {coin} to sell, {interaction.user.name}!",
-            ephemeral=True
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        
+        user_id = interaction.user.id
+        holdings = get_user_crypto_holdings(user_id)
+        prices = get_crypto_prices()
+        
+        # Check if user has any of this coin
+        user_holding = holdings.get(coin, 0.0)
+        
+        if user_holding <= 0:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ You don't have any {coin} to sell, {interaction.user.name}!",
+                ephemeral=True)
+            return
+        
+        # If amount not specified, sell all
+        if amount is None:
+            amount = user_holding
+        elif amount > user_holding:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ You only have {user_holding:.4f} {coin}, but tried to sell {amount:.4f} {coin}!",
+                ephemeral=True)
+            return
+        elif amount <= 0:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ Invalid amount! Please sell a positive amount.",
+                ephemeral=True)
+            return
+        
+        # Calculate sale value
+        # Get base price for the coin
+        coin_info = next((c for c in CRYPTO_COINS if c["symbol"] == coin), None)
+        coin_base_price = coin_info["base_price"] if coin_info else 855.0
+        coin_price = prices.get(coin, coin_base_price)
+        sale_value = amount * coin_price
+        
+        # Update holdings (subtract)
+        update_user_crypto_holdings(user_id, coin, -amount)
+        
+        # Add money to balance
+        current_balance = get_user_balance(user_id)
+        new_balance = current_balance + sale_value
+        update_user_balance(user_id, new_balance)
+        
+        # Get updated holdings
+        updated_holdings = get_user_crypto_holdings(user_id)
+        
+        # Create success embed
+        embed = discord.Embed(
+            title="💰 Sale Successful!",
+            description=f"You sold **{amount:.4f} {coin}** for **${sale_value:.2f}**!",
+            color=discord.Color.green()
         )
-        return
-    
-    # If amount not specified, sell all
-    if amount is None:
-        amount = user_holding
-    elif amount > user_holding:
-        await interaction.followup.send(
-            f"❌ You only have {user_holding:.4f} {coin}, but tried to sell {amount:.4f} {coin}!",
-            ephemeral=True
-        )
-        return
-    elif amount <= 0:
-        await interaction.followup.send(
-            f"❌ Invalid amount! Please sell a positive amount.",
-            ephemeral=True
-        )
-        return
-    
-    # Calculate sale value
-    # Get base price for the coin
-    coin_info = next((c for c in CRYPTO_COINS if c["symbol"] == coin), None)
-    coin_base_price = coin_info["base_price"] if coin_info else 855.0
-    coin_price = prices.get(coin, coin_base_price)
-    sale_value = amount * coin_price
-    
-    # Update holdings (subtract)
-    update_user_crypto_holdings(user_id, coin, -amount)
-    
-    # Add money to balance
-    current_balance = get_user_balance(user_id)
-    new_balance = current_balance + sale_value
-    update_user_balance(user_id, new_balance)
-    
-    # Get updated holdings
-    updated_holdings = get_user_crypto_holdings(user_id)
-    
-    # Create success embed
-    embed = discord.Embed(
-        title="💰 Sale Successful!",
-        description=f"You sold **{amount:.4f} {coin}** for **${sale_value:.2f}**!",
-        color=discord.Color.green()
-    )
-    embed.add_field(name="Remaining Holdings", value=f"RTC: {updated_holdings['RTC']:.4f}\nTER: {updated_holdings['TER']:.4f}\nCNY: {updated_holdings['CNY']:.4f}", inline=False)
-    embed.add_field(name="New Balance", value=f"${new_balance:.2f}", inline=False)
-    
-    await interaction.followup.send(embed=embed)
+        embed.add_field(name="Remaining Holdings", value=f"RTC: {updated_holdings['RTC']:.4f}\nTER: {updated_holdings['TER']:.4f}\nCNY: {updated_holdings['CNY']:.4f}", inline=False)
+        embed.add_field(name="New Balance", value=f"${new_balance:.2f}", inline=False)
+        
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+    except Exception as e:
+        print(f"Error in sell command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 @bot.tree.command(name="portfolio", description="View your cryptocurrency and stock portfolio")
 async def portfolio(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    
-    user_id = interaction.user.id
-    guild_id = interaction.guild.id if interaction.guild else None
-    
-    # Get crypto holdings and prices
-    crypto_holdings = get_user_crypto_holdings(user_id)
-    crypto_prices = get_crypto_prices()
-    
-    # Get stock holdings
-    stock_holdings = get_user_stock_holdings(user_id)
-    
-    # Initialize stocks for guild if needed to get current prices
-    if guild_id:
-        initialize_stocks(guild_id)
-        stock_prices = {}
-        for ticker in STOCK_TICKERS:
-            symbol = ticker["symbol"]
-            if symbol in stock_data.get(guild_id, {}):
-                stock_prices[symbol] = stock_data[guild_id][symbol]["price"]
-            else:
-                stock_prices[symbol] = ticker["base_price"]
-    else:
-        # Fallback to base prices if no guild
-        stock_prices = {ticker["symbol"]: ticker["base_price"] for ticker in STOCK_TICKERS}
-    
-    # Calculate crypto values
-    crypto_values = {}
-    crypto_total = 0.0
-    
-    for coin in CRYPTO_COINS:
-        symbol = coin["symbol"]
-        amount = crypto_holdings.get(symbol, 0.0)
-        price = crypto_prices.get(symbol, coin["base_price"])
-        value = amount * price
-        crypto_values[symbol] = value
-        crypto_total += value
-    
-    # Calculate stock values
-    stock_values = {}
-    stock_total = 0.0
-    
-    for ticker in STOCK_TICKERS:
-        symbol = ticker["symbol"]
-        shares = stock_holdings.get(symbol, 0)
-        price = stock_prices.get(symbol, ticker["base_price"])
-        value = shares * price
-        stock_values[symbol] = value
-        stock_total += value
-    
-    # Total portfolio value
-    total_value = crypto_total + stock_total
-    
-    # Create portfolio embed
-    embed = discord.Embed(
-        title="💼 Your Portfolio",
-        description=f"**Total Portfolio Value: ${total_value:.2f}**",
-        color=discord.Color.blue()
-    )
-    
-    # Add cryptocurrency section
-    if crypto_total > 0:
-        embed.description += "\n**💰 Cryptocurrency:**"
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+        
+        # Get crypto holdings and prices
+        crypto_holdings = get_user_crypto_holdings(user_id)
+        crypto_prices = get_crypto_prices()
+        
+        # Get stock holdings
+        stock_holdings = get_user_stock_holdings(user_id)
+        
+        # Initialize stocks for guild if needed to get current prices
+        if guild_id:
+            initialize_stocks(guild_id)
+            stock_prices = {}
+            for ticker in STOCK_TICKERS:
+                symbol = ticker["symbol"]
+                if symbol in stock_data.get(guild_id, {}):
+                    stock_prices[symbol] = stock_data[guild_id][symbol]["price"]
+                else:
+                    stock_prices[symbol] = ticker["base_price"]
+        else:
+            # Fallback to base prices if no guild
+            stock_prices = {ticker["symbol"]: ticker["base_price"] for ticker in STOCK_TICKERS}
+        
+        # Calculate crypto values
+        crypto_values = {}
+        crypto_total = 0.0
+        
         for coin in CRYPTO_COINS:
             symbol = coin["symbol"]
             amount = crypto_holdings.get(symbol, 0.0)
-            if amount > 0:
-                price = crypto_prices.get(symbol, coin["base_price"])
-                value = crypto_values.get(symbol, 0.0)
-                embed.add_field(
-                    name=f"{coin['name']} ({symbol})",
-                    value=f"Amount: {amount:.4f}\nValue: ${value:.2f}",
-                    inline=True
-                )
-        # Add total as a field right after crypto holdings
-        embed.add_field(
-            name="\u200b",
-            value=f"**Total: ${crypto_total:.2f}**",
-            inline=False
-        )
-    
-    # Add stock section
-    if stock_total > 0:
-        embed.description += "\n**📈 Stocks:**"
+            price = crypto_prices.get(symbol, coin["base_price"])
+            value = amount * price
+            crypto_values[symbol] = value
+            crypto_total += value
+        
+        # Calculate stock values
+        stock_values = {}
+        stock_total = 0.0
+        
         for ticker in STOCK_TICKERS:
             symbol = ticker["symbol"]
             shares = stock_holdings.get(symbol, 0)
-            if shares > 0:
-                price = stock_prices.get(symbol, ticker["base_price"])
-                value = stock_values.get(symbol, 0.0)
-                embed.add_field(
-                    name=f"{ticker['name']} ({symbol})",
-                    value=f"Shares: {shares:,}\nValue: ${value:.2f}",
-                    inline=True
-                )
-        # Add total as a field right after stock holdings
-        embed.add_field(
-            name="\u200b",
-            value=f"**Total: ${stock_total:.2f}**",
-            inline=False
+            price = stock_prices.get(symbol, ticker["base_price"])
+            value = shares * price
+            stock_values[symbol] = value
+            stock_total += value
+        
+        # Total portfolio value
+        total_value = crypto_total + stock_total
+        
+        # Create portfolio embed
+        embed = discord.Embed(
+            title="💼 Your Portfolio",
+            description=f"**Total Portfolio Value: ${total_value:.2f}**",
+            color=discord.Color.blue()
         )
-    
-    if total_value == 0:
-        embed.description = "You don't have any holdings yet!\n\nUse `/mine` to mine cryptocurrency or buy stocks to get started!"
-    
-    embed.set_footer(text="Do /mine to get crypto, /sell to sell it, and /stocks to buy/sell shares!")
-    
-    await interaction.followup.send(embed=embed)
+        
+        # Add cryptocurrency section
+        if crypto_total > 0:
+            embed.description += "\n**💰 Cryptocurrency:**"
+            for coin in CRYPTO_COINS:
+                symbol = coin["symbol"]
+                amount = crypto_holdings.get(symbol, 0.0)
+                if amount > 0:
+                    price = crypto_prices.get(symbol, coin["base_price"])
+                    value = crypto_values.get(symbol, 0.0)
+                    embed.add_field(
+                        name=f"{coin['name']} ({symbol})",
+                        value=f"Amount: {amount:.4f}\nValue: ${value:.2f}",
+                        inline=True
+                    )
+            # Add total as a field right after crypto holdings
+            embed.add_field(
+                name="\u200b",
+                value=f"**Total: ${crypto_total:.2f}**",
+                inline=False
+            )
+        
+        # Add stock section
+        if stock_total > 0:
+            embed.description += "\n**📈 Stocks:**"
+            for ticker in STOCK_TICKERS:
+                symbol = ticker["symbol"]
+                shares = stock_holdings.get(symbol, 0)
+                if shares > 0:
+                    price = stock_prices.get(symbol, ticker["base_price"])
+                    value = stock_values.get(symbol, 0.0)
+                    embed.add_field(
+                        name=f"{ticker['name']} ({symbol})",
+                        value=f"Shares: {shares:,}\nValue: ${value:.2f}",
+                        inline=True
+                    )
+            # Add total as a field right after stock holdings
+            embed.add_field(
+                name="\u200b",
+                value=f"**Total: ${stock_total:.2f}**",
+                inline=False
+            )
+        
+        if total_value == 0:
+            embed.description = "You don't have any holdings yet!\n\nUse `/mine` to mine cryptocurrency or buy stocks to get started!"
+        
+        embed.set_footer(text="Do /mine to get crypto, /sell to sell it, and /stocks to buy/sell shares!")
+        
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+    except Exception as e:
+        print(f"Error in portfolio command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 @bot.tree.command(name="stocks", description="Buy or sell stocks")
@@ -5639,146 +6451,144 @@ async def portfolio(interaction: discord.Interaction):
     app_commands.Choice(name="Sproutify (SPRT)", value="SPRT"),
 ])
 async def stocks(interaction: discord.Interaction, action: str, ticker: str, amount: int):
-    await interaction.response.defer(ephemeral=False)
-    
-    user_id = interaction.user.id
-    
-    # Check if user is on Russian Roulette elimination cooldown (dead)
-    is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
-    if is_roulette_cooldown:
-        minutes_left = roulette_time_left // 60
-        await interaction.followup.send(
-            f"Sorry, {interaction.user.name}, you're dead. You cannot buy or sell stocks for {minutes_left} minute(s)", ephemeral=True
-        )
-        return
-    
-    guild_id = interaction.guild.id if interaction.guild else None
-    
-    # Validate amount
-    if amount <= 0:
-        await interaction.followup.send(
-            f"❌ Invalid amount! Please buy or sell a positive number of shares.",
-            ephemeral=True
-        )
-        return
-    
-    # Find the ticker info
-    ticker_info = None
-    for t in STOCK_TICKERS:
-        if t["symbol"] == ticker:
-            ticker_info = t
-            break
-    
-    if not ticker_info:
-        await interaction.followup.send(
-            f"❌ Invalid ticker symbol!",
-            ephemeral=True
-        )
-        return
-    
-    # Initialize stocks for guild if needed to get current prices
-    if not guild_id:
-        await interaction.followup.send(
-            f"❌ This command must be used in a server!",
-            ephemeral=True
-        )
-        return
-    
-    initialize_stocks(guild_id)
-    
-    # Get current stock price
-    if ticker not in stock_data.get(guild_id, {}):
-        current_price = ticker_info["base_price"]
-    else:
-        current_price = stock_data[guild_id][ticker]["price"]
-    
-    # Get user's current stock holdings
-    stock_holdings = get_user_stock_holdings(user_id)
-    current_shares = stock_holdings.get(ticker, 0)
-    
-    if action == "buy":
-        # Calculate total cost
-        total_cost = amount * current_price
-        
-        # Check if user has enough balance
-        user_balance = get_user_balance(user_id)
-        if user_balance < total_cost:
-            await interaction.followup.send(
-                f"❌ You don't have enough balance to buy {amount} share(s) of {ticker_info['name']} ({ticker})!\n\n"
-                f"You need **${total_cost:.2f}** but only have **${user_balance:.2f}**.",
-                ephemeral=True
-            )
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
             return
         
-        # Check if user would exceed max shares (per user limit)
-        max_shares = ticker_info["max_shares"]
-        if (current_shares + amount) > max_shares:
-            await interaction.followup.send(
-                f"❌ You cannot buy {amount:,} share(s)! Maximum shares per user for {ticker_info['name']} is {max_shares:,}.\n\n"
-                f"You currently own {current_shares:,} share(s).",
-                ephemeral=True
-            )
+        user_id = interaction.user.id
+        
+        # Check if user is on Russian Roulette elimination cooldown (dead)
+        is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+        if is_roulette_cooldown:
+            minutes_left = roulette_time_left // 60
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"Sorry, {interaction.user.name}, you're dead. You cannot buy or sell stocks for {minutes_left} minute(s)", ephemeral=True)
             return
         
-        # Deduct money and add shares
-        new_balance = user_balance - total_cost
-        update_user_balance(user_id, new_balance)
-        update_user_stock_holdings(user_id, ticker, amount)
+        guild_id = interaction.guild.id if interaction.guild else None
         
-        # Create success embed
-        embed = discord.Embed(
-            title="✅ Purchase Successful!",
-            description=f"You bought **{amount:,} share(s)** of **{ticker_info['name']} ({ticker})** at **${current_price:.2f}** each.",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Cost", value=f"**${total_cost:.2f}**", inline=True)
-        embed.add_field(name="New Balance", value=f"**${new_balance:.2f}**", inline=True)
-        embed.add_field(name="Total Shares Owned", value=f"**{current_shares + amount:,}**", inline=False)
-        
-        # Update marketboard immediately
-        try:
-            await update_marketboard_message(interaction.guild)
-        except Exception as e:
-            print(f"Error updating marketboard after buy: {e}")
-        
-    else:  # sell
-        # Check if user has enough shares
-        if current_shares < amount:
-            await interaction.followup.send(
-                f"❌ You don't have enough shares to sell!\n\n"
-                f"You only have **{current_shares:,} share(s)** of {ticker_info['name']} ({ticker}), "
-                f"but tried to sell **{amount:,} share(s)**.",
-                ephemeral=True
-            )
+        # Validate amount
+        if amount <= 0:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ Invalid amount! Please buy or sell a positive number of shares.",
+                ephemeral=True)
             return
         
-        # Calculate total value
-        total_value = amount * current_price
+        # Find the ticker info
+        ticker_info = None
+        for t in STOCK_TICKERS:
+            if t["symbol"] == ticker:
+                ticker_info = t
+                break
         
-        # Add money and remove shares
-        user_balance = get_user_balance(user_id)
-        new_balance = user_balance + total_value
-        update_user_balance(user_id, new_balance)
-        update_user_stock_holdings(user_id, ticker, -amount)
+        if not ticker_info:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ Invalid ticker symbol!",
+                ephemeral=True)
+            return
         
-        # Create success embed
-        embed = discord.Embed(
-            title="✅ Sale Successful!",
-            description=f"You sold **{amount:,} share(s)** of **{ticker_info['name']} ({ticker})** at **${current_price:.2f}** each.",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Revenue", value=f"**${total_value:.2f}**", inline=True)
-        embed.add_field(name="New Balance", value=f"**${new_balance:.2f}**", inline=True)
-        embed.add_field(name="Remaining Shares", value=f"**{current_shares - amount:,}**", inline=False)
-        
-        # Update marketboard immediately
-        try:
-            await update_marketboard_message(interaction.guild)
-        except Exception as e:
-            print(f"Error updating marketboard after sell: {e}")
+        # Initialize stocks for guild if needed to get current prices
+        if not guild_id:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ This command must be used in a server!",
+                ephemeral=True)
+            return
     
-    embed.set_footer(text=f"Use /portfolio to view all your holdings")
-    await interaction.followup.send(embed=embed)
+        initialize_stocks(guild_id)
+        
+        # Get current stock price
+        if ticker not in stock_data.get(guild_id, {}):
+            current_price = ticker_info["base_price"]
+        else:
+            current_price = stock_data[guild_id][ticker]["price"]
+        
+        # Get user's current stock holdings
+        stock_holdings = get_user_stock_holdings(user_id)
+        current_shares = stock_holdings.get(ticker, 0)
+        
+        if action == "buy":
+            # Calculate total cost
+            total_cost = amount * current_price
+            
+            # Check if user has enough balance
+            user_balance = get_user_balance(user_id)
+            if user_balance < total_cost:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ You don't have enough balance to buy {amount} share(s) of {ticker_info['name']} ({ticker})!\n\n"
+                    f"You need **${total_cost:.2f}** but only have **${user_balance:.2f}**.",
+                    ephemeral=True)
+                return
+            
+            # Check if user would exceed max shares (per user limit)
+            max_shares = ticker_info["max_shares"]
+            if (current_shares + amount) > max_shares:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ You cannot buy {amount:,} share(s)! Maximum shares per user for {ticker_info['name']} is {max_shares:,}.\n\n"
+                    f"You currently own {current_shares:,} share(s).",
+                    ephemeral=True)
+                return
+            
+            # Deduct money and add shares
+            new_balance = user_balance - total_cost
+            update_user_balance(user_id, new_balance)
+            update_user_stock_holdings(user_id, ticker, amount)
+            
+            # Create success embed
+            embed = discord.Embed(
+                title="✅ Purchase Successful!",
+                description=f"You bought **{amount:,} share(s)** of **{ticker_info['name']} ({ticker})** at **${current_price:.2f}** each.",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Cost", value=f"**${total_cost:.2f}**", inline=True)
+            embed.add_field(name="New Balance", value=f"**${new_balance:.2f}**", inline=True)
+            embed.add_field(name="Total Shares Owned", value=f"**{current_shares + amount:,}**", inline=False)
+            
+            # Update marketboard immediately
+            try:
+                await update_marketboard_message(interaction.guild)
+            except Exception as e:
+                print(f"Error updating marketboard after buy: {e}")
+            
+        else:  # sell
+            # Check if user has enough shares
+            if current_shares < amount:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ You don't have enough shares to sell!\n\n"
+                    f"You only have **{current_shares:,} share(s)** of {ticker_info['name']} ({ticker}), "
+                    f"but tried to sell **{amount:,} share(s)**.",
+                    ephemeral=True)
+                return
+            
+            # Calculate total value
+            total_value = amount * current_price
+            
+            # Add money and remove shares
+            user_balance = get_user_balance(user_id)
+            new_balance = user_balance + total_value
+            update_user_balance(user_id, new_balance)
+            update_user_stock_holdings(user_id, ticker, -amount)
+            
+            # Create success embed
+            embed = discord.Embed(
+                title="✅ Sale Successful!",
+                description=f"You sold **{amount:,} share(s)** of **{ticker_info['name']} ({ticker})** at **${current_price:.2f}** each.",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Revenue", value=f"**${total_value:.2f}**", inline=True)
+            embed.add_field(name="New Balance", value=f"**${new_balance:.2f}**", inline=True)
+            embed.add_field(name="Remaining Shares", value=f"**{current_shares - amount:,}**", inline=False)
+            
+            # Update marketboard immediately
+            try:
+                await update_marketboard_message(interaction.guild)
+            except Exception as e:
+                print(f"Error updating marketboard after sell: {e}")
+        
+        embed.set_footer(text=f"Use /portfolio to view all your holdings")
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+    except Exception as e:
+        print(f"Error in stocks command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # gambling commands
@@ -5791,173 +6601,175 @@ async def russian(
     bet: float,
     players: int = 1 # default 1
 ):
-    await interaction.response.defer()
-    #start russian roullette
-    user_id = interaction.user.id
-    user_name = interaction.user.name
-    channel_id = interaction.channel.id
-    channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
+    try:
+        if not await safe_defer(interaction):
+            return
+        #start russian roullette
+        user_id = interaction.user.id
+        user_name = interaction.user.name
+        channel_id = interaction.channel.id
+        channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
 
-    # Check if user is on Russian Roulette elimination cooldown
-    is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
-    if is_roulette_cooldown:
-        minutes_left = roulette_time_left // 60
-        await interaction.followup.send(
-            f"Sorry, {interaction.user.name}, you're dead. You cannot /russian for {minutes_left} minute(s)", ephemeral=True
+        # Check if user is on Russian Roulette elimination cooldown
+        is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+        if is_roulette_cooldown:
+            minutes_left = roulette_time_left // 60
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"Sorry, {interaction.user.name}, you're dead. You cannot /russian for {minutes_left} minute(s)", ephemeral=True)
+            return
+
+        # Check if this is a Russian Roulette channel (by name pattern)
+        is_roulette_channel = "russian" in channel_name or "roulette" in channel_name
+        
+        # If in a Russian Roulette channel, require Planter II or above
+        if is_roulette_channel:
+            planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V", "PLANTER VI", "PLANTER VII", "PLANTER VIII", "PLANTER IX", "PLANTER X"]
+            user_roles = [role.name for role in interaction.user.roles]
+            has_planter_role = any(role in planter_roles for role in user_roles)
+            
+            if not has_planter_role:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ You must be at least **Planter II** to play Russian Roulette. (Go /gather!!)\n\n",
+                    ephemeral=True)
+                return
+            
+            # Check if they have Planter II or higher (not Planter I)
+            planter_levels = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V", "PLANTER VI", "PLANTER VII", "PLANTER VIII", "PLANTER IX", "PLANTER X"]
+            user_planter_role = next((role for role in user_roles if role in planter_levels), None)
+            
+            if user_planter_role == "PLANTER I":
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ You must be at least **Planter II** to play Russian Roulette. (Go /gather!!)\n\n",
+                    ephemeral=True)
+                return
+
+        # make sure game is actually valid and the person can do it
+
+        # first, check if game already in channel
+        if channel_id in active_roulette_channel_games:
+            existing_game_id = active_roulette_channel_games[channel_id]
+            if existing_game_id in active_roulette_games:
+                await safe_interaction_response(interaction, interaction.followup.send, f"There's already a Russian Roulette game running in this channel!", ephemeral=True)
+                return
+            else:
+                #clean up orphaned ref
+                del active_roulette_channel_games[channel_id]
+        
+
+        # make sure user is not already in a game
+        if user_id in user_active_games:
+            existing_game_id = user_active_games[user_id]
+            if existing_game_id in active_roulette_games:
+                await safe_interaction_response(interaction, interaction.followup.send, f"You're already in a game! Finish it or cash out first!", ephemeral=True)
+                return
+            else:
+                #clean up orphaned ref
+                del user_active_games[user_id]
+
+
+        if bullets < 1 or bullets > 5:
+            await safe_interaction_response(interaction, interaction.followup.send, f"Invalid number of bullets", ephemeral=True)
+            return
+
+        if players < 1 or players > 6:
+            await safe_interaction_response(interaction, interaction.followup.send, f"Invalid number of players", ephemeral=True)
+            return
+        if bet <= 0:
+            await safe_interaction_response(interaction, interaction.followup.send, f"❌ Bet amount must be greater than $0.00!", ephemeral=True)
+            return
+
+        # Validate bet has at most 2 decimal places (no fractional cents)
+        if not validate_money_precision(bet):
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Bet amount must be in dollars and cents (maximum 2 decimal places)!", ephemeral=True)
+            return
+
+        # Normalize bet to exactly 2 decimal places
+        bet = normalize_money(bet)
+
+        # get user balance
+        user_balance = get_user_balance(user_id)
+        user_balance = normalize_money(user_balance)
+        
+        if not can_afford_rounded(user_balance, bet):
+            await safe_interaction_response(interaction, interaction.followup.send, f"You don't have enough balance to play Russian Roulette.", ephemeral=True)
+            return
+
+        #create unique game ID
+        game_id = str(uuid.uuid4())[:8]
+
+        #create new game (bet is already normalized)
+        game = RouletteGame(game_id, user_id, user_name, bullets, bet, players)
+        active_roulette_games[game_id] = game
+        user_active_games[user_id] = game_id
+        active_roulette_channel_games[channel_id] = game_id
+
+        # deduct bet from host
+        new_balance = normalize_money(user_balance - bet)
+        update_user_balance(user_id, new_balance)
+        # increase bullet multiplier
+        bullet_multiplier = 1.2 ** bullets
+
+        # # SOLO MODE
+        # if players == 1:
+        #     game.game_started = True
+        #     game.pot = bet
+
+        #     embed = discord.Embed(
+        #         title="🎲 RUSSIAN ROULETTE 🎲",
+        #         description=f"**{user_name}** is playing!\n\n*How long can you survive?*",
+        #         color=discord.Color.dark_red()
+        #     )
+
+        #     embed.add_field(name="🔫 Bullets", value=f"{bullets}/6", inline=True)
+        #     embed.add_field(name="💰 Buy-in", value=f"${bet:.2f}", inline=True)
+        #     embed.add_field(name="📈 Base Multiplier", value=f"{bullet_multiplier:.2f}x", inline=True)
+        #     embed.add_field(name="💀 Death Chance", value=f"{(bullets/6)*100:.1f}%", inline=True)
+        #     embed.add_field(name="✅ Survival Chance", value=f"{((6-bullets)/6)*100:.1f}%", inline=True)
+        #     embed.add_field(name="🎮 Game ID", value=f"`{game_id}`", inline=True)
+
+        #     embed.add_field(
+        #         name="ℹ️ Rules", 
+        #         value="Each round you survive increases your winnings by **1.3x**!\nCash out anytime to keep your winnings, or keep playing for more!",
+        #         inline=False
+        #     )
+
+        #     await interaction.followup.send(embed=embed)
+
+        #     # auto-start first round after delay
+        #     await asyncio.sleep(3)
+        #     await start_roulette_game(interaction.channel, game_id)
+        #     return
+
+        # MULTIPLAYER MODE
+        embed = discord.Embed(
+            title="🎲 RUSSIAN ROULETTE 🎲",
+            description=f"**{user_name}** is playing with **{len(game.players)}/{players}** players!\n\n*How long can you survive?*",
+            color = discord.Color.red()
         )
-        return
-
-    # Check if this is a Russian Roulette channel (by name pattern)
-    is_roulette_channel = "russian" in channel_name or "roulette" in channel_name
-    
-    # If in a Russian Roulette channel, require Planter II or above
-    if is_roulette_channel:
-        planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V", "PLANTER VI", "PLANTER VII", "PLANTER VIII", "PLANTER IX", "PLANTER X"]
-        user_roles = [role.name for role in interaction.user.roles]
-        has_planter_role = any(role in planter_roles for role in user_roles)
-        
-        if not has_planter_role:
-            await interaction.followup.send(
-                f"❌ You must be at least **Planter II** to play Russian Roulette. (Go /gather!!)\n\n",
-                ephemeral=True
-            )
-            return
-        
-        # Check if they have Planter II or higher (not Planter I)
-        planter_levels = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V", "PLANTER VI", "PLANTER VII", "PLANTER VIII", "PLANTER IX", "PLANTER X"]
-        user_planter_role = next((role for role in user_roles if role in planter_levels), None)
-        
-        if user_planter_role == "PLANTER I":
-            await interaction.followup.send(
-                f"❌ You must be at least **Planter II** to play Russian Roulette. (Go /gather!!)\n\n",
-                ephemeral=True
-            )
-            return
-
-    # make sure game is actually valid and the person can do it
-
-    # first, check if game already in channel
-    if channel_id in active_roulette_channel_games:
-        existing_game_id = active_roulette_channel_games[channel_id]
-        if existing_game_id in active_roulette_games:
-            await interaction.followup.send(f"There's already a Russian Roulette game running in this channel!", ephemeral=True)
-            return
-        else:
-            #clean up orphaned ref
-            del active_roulette_channel_games[channel_id]
-    
-
-    # make sure user is not already in a game
-    if user_id in user_active_games:
-        existing_game_id = user_active_games[user_id]
-        if existing_game_id in active_roulette_games:
-            await interaction.followup.send(f"You're already in a game! Finish it or cash out first!", ephemeral=True)
-            return
-        else:
-            #clean up orphaned ref
-            del user_active_games[user_id]
-
-
-    if bullets < 1 or bullets > 5:
-        await interaction.followup.send(f"Invalid number of bullets", ephemeral=True)
-        return
-
-    if players < 1 or players > 6:
-        await interaction.followup.send(f"Invalid number of players", ephemeral=True)
-        return
-    if bet <= 0:
-        await interaction.followup.send(f"❌ Bet amount must be greater than $0.00!", ephemeral=True)
-        return
-
-    # Validate bet has at most 2 decimal places (no fractional cents)
-    if not validate_money_precision(bet):
-        await interaction.followup.send("❌ Bet amount must be in dollars and cents (maximum 2 decimal places)!", ephemeral=True)
-        return
-
-    # Normalize bet to exactly 2 decimal places
-    bet = normalize_money(bet)
-
-    # get user balance
-    user_balance = get_user_balance(user_id)
-    user_balance = normalize_money(user_balance)
-    
-    if not can_afford_rounded(user_balance, bet):
-        await interaction.followup.send(f"You don't have enough balance to play Russian Roulette.", ephemeral=True)
-        return
-
-    #create unique game ID
-    game_id = str(uuid.uuid4())[:8]
-
-    #create new game (bet is already normalized)
-    game = RouletteGame(game_id, user_id, user_name, bullets, bet, players)
-    active_roulette_games[game_id] = game
-    user_active_games[user_id] = game_id
-    active_roulette_channel_games[channel_id] = game_id
-
-    # deduct bet from host
-    new_balance = normalize_money(user_balance - bet)
-    update_user_balance(user_id, new_balance)
-    # increase bullet multiplier
-    bullet_multiplier = 1.2 ** bullets
-
-    # # SOLO MODE
-    # if players == 1:
-    #     game.game_started = True
-    #     game.pot = bet
-
-    #     embed = discord.Embed(
-    #         title="🎲 RUSSIAN ROULETTE 🎲",
-    #         description=f"**{user_name}** is playing!\n\n*How long can you survive?*",
-    #         color=discord.Color.dark_red()
-    #     )
-
-    #     embed.add_field(name="🔫 Bullets", value=f"{bullets}/6", inline=True)
-    #     embed.add_field(name="💰 Buy-in", value=f"${bet:.2f}", inline=True)
-    #     embed.add_field(name="📈 Base Multiplier", value=f"{bullet_multiplier:.2f}x", inline=True)
-    #     embed.add_field(name="💀 Death Chance", value=f"{(bullets/6)*100:.1f}%", inline=True)
-    #     embed.add_field(name="✅ Survival Chance", value=f"{((6-bullets)/6)*100:.1f}%", inline=True)
-    #     embed.add_field(name="🎮 Game ID", value=f"`{game_id}`", inline=True)
-
-    #     embed.add_field(
-    #         name="ℹ️ Rules", 
-    #         value="Each round you survive increases your winnings by **1.3x**!\nCash out anytime to keep your winnings, or keep playing for more!",
-    #         inline=False
-    #     )
-
-    #     await interaction.followup.send(embed=embed)
-
-    #     # auto-start first round after delay
-    #     await asyncio.sleep(3)
-    #     await start_roulette_game(interaction.channel, game_id)
-    #     return
-
-    # MULTIPLAYER MODE
-    embed = discord.Embed(
-        title="🎲 RUSSIAN ROULETTE 🎲",
-        description=f"**{user_name}** is playing with **{len(game.players)}/{players}** players!\n\n*How long can you survive?*",
-        color = discord.Color.red()
+        embed.add_field(name="🔫 Bullets", value=f"{bullets}/6", inline=True)
+        embed.add_field(name="💰 Buy-in", value=f"${bet:.2f}", inline=True)
+        embed.add_field(name="📈 Base Multiplier", value=f"{bullet_multiplier:.2f}x", inline=True)
+        embed.add_field(name="💀 Death Chance", value=f"{(bullets/6)*100:.1f}%", inline=True)
+        embed.add_field(name="✅ Survival Chance", value=f"{((6-bullets)/6)*100:.1f}%", inline=True)
+        #embed.add_field(name="🎮 Game ID", value=f"`{game_id}`", inline=True)
+        embed.add_field(
+        name="📋 Rules",
+        value="Cash out anytime to keep your winnings, or keep playing for more!",
+        inline=False
     )
-    embed.add_field(name="🔫 Bullets", value=f"{bullets}/6", inline=True)
-    embed.add_field(name="💰 Buy-in", value=f"${bet:.2f}", inline=True)
-    embed.add_field(name="📈 Base Multiplier", value=f"{bullet_multiplier:.2f}x", inline=True)
-    embed.add_field(name="💀 Death Chance", value=f"{(bullets/6)*100:.1f}%", inline=True)
-    embed.add_field(name="✅ Survival Chance", value=f"{((6-bullets)/6)*100:.1f}%", inline=True)
-    #embed.add_field(name="🎮 Game ID", value=f"`{game_id}`", inline=True)
-    embed.add_field(
-    name="📋 Rules",
-    value="Cash out anytime to keep your winnings, or keep playing for more!",
-    inline=False
-)
-    
-    #create join button
-    view = RouletteJoinView(game_id, user_id,timeout = 300)
+        
+        #create join button
+        view = RouletteJoinView(game_id, user_id,timeout = 300)
 
-    if players == 1:
-        embed.add_field(name="ℹ️ How to Play", value="Click **Start Game** to begin your solo adventure!", inline=False)
-    else:
-        embed.add_field(name="ℹ️ How to Play", value=f"Waiting for {players-1} more players to join! Host can click **Start Game** when ready!", inline=False)
+        if players == 1:
+            embed.add_field(name="ℹ️ How to Play", value="Click **Start Game** to begin your solo adventure!", inline=False)
+        else:
+            embed.add_field(name="ℹ️ How to Play", value=f"Waiting for {players-1} more players to join! Host can click **Start Game** when ready!", inline=False)
 
-    await interaction.followup.send(embed=embed, view=view)
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
+    except Exception as e:
+        print(f"Error in russian command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 

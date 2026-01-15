@@ -106,7 +106,9 @@ def _ensure_user_document(user_id: int) -> None:
         },
         "gardeners": [],
         "gpus": [],
-        "notification_channel_id": None
+        "notification_channel_id": None,
+        "tree_rings": 0,
+        "bloom_count": 0
     }
     users.update_one(
         {"_id": int(user_id)},
@@ -131,7 +133,7 @@ def increment_gather_stats(userid: int, category: str, item: str) -> None:
 
 
 def perform_gather_update(user_id: int, balance_increment: float, item_name: str, 
-                          ripeness_name: str, category: str, apply_cooldown: bool = True) -> None:
+                          ripeness_name: str, category: str, apply_cooldown: bool = True) -> bool:
     """
     Perform all gather-related database updates in a single MongoDB operation.
     This batches: balance update, item addition, ripeness stat, gather stats, and cooldown.
@@ -147,6 +149,16 @@ def perform_gather_update(user_id: int, balance_increment: float, item_name: str
     users = _get_users_collection()
     _ensure_user_document(user_id)
     
+    # Get current total_items to check for Tree Ring milestone
+    doc = users.find_one({"_id": int(user_id)}, {"gather_stats.total_items": 1})
+    current_total = 0
+    if doc and "gather_stats" in doc:
+        current_total = int(doc.get("gather_stats", {}).get("total_items", 0))
+    
+    # Check if this gather will cross a 200-plant milestone
+    new_total = current_total + 1
+    should_award_tree_ring = (new_total % 200 == 0) and new_total > 0
+    
     # Build the update operation with all increments and sets
     update_ops = {
         "$inc": {
@@ -160,15 +172,24 @@ def perform_gather_update(user_id: int, balance_increment: float, item_name: str
         }
     }
     
+    # Award Tree Ring if milestone reached
+    if should_award_tree_ring:
+        update_ops["$inc"]["tree_rings"] = 1
+    
     # Add cooldown update if requested
     if apply_cooldown:
-        update_ops["$set"] = {"last_gather_time": float(time.time())}
+        if "$set" not in update_ops:
+            update_ops["$set"] = {}
+        update_ops["$set"]["last_gather_time"] = float(time.time())
     
     users.update_one(
         {"_id": int(user_id)},
         update_ops,
         upsert=True,
     )
+    
+    # Return whether a Tree Ring was awarded
+    return should_award_tree_ring
 
 def init_database() -> None:
     """Initialise MongoDB indexes and verify connectivity."""
@@ -645,6 +666,140 @@ def update_user_stock_holdings(user_id: int, symbol: str, amount: int) -> None:
     users.update_one(
         {"_id": int(user_id)},
         {"$inc": {f"stock_holdings.{symbol}": int(amount)}},
+        upsert=True,
+    )
+
+
+# Bloom system functions
+def get_user_tree_rings(user_id: int) -> int:
+    """Get user's Tree Rings."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"tree_rings": 1})
+    if not doc:
+        return 0
+    return int(doc.get("tree_rings", 0))
+
+
+def increment_tree_rings(user_id: int, amount: int) -> None:
+    """Add Tree Rings to user."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$inc": {"tree_rings": int(amount)}},
+        upsert=True,
+    )
+
+
+def get_bloom_multiplier(user_id: int) -> float:
+    """Calculate money multiplier based on Tree Rings. Formula: 1.0 + (tree_rings * 0.005)"""
+    tree_rings = get_user_tree_rings(user_id)
+    return 1.0 + (tree_rings * 0.005)
+
+
+def get_bloom_rank(user_id: int) -> str:
+    """Get user's current Bloom Rank based on bloom_count."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"bloom_count": 1})
+    if not doc:
+        return "PINE I"
+    
+    bloom_count = int(doc.get("bloom_count", 0))
+    
+    # Bloom Rank progression
+    if bloom_count >= 18:
+        return "REDWOOD"
+    elif bloom_count == 17:
+        return "FIR III"
+    elif bloom_count == 16:
+        return "FIR II"
+    elif bloom_count == 15:
+        return "FIR I"
+    elif bloom_count == 14:
+        return "OAK III"
+    elif bloom_count == 13:
+        return "OAK II"
+    elif bloom_count == 12:
+        return "OAK I"
+    elif bloom_count == 11:
+        return "MAPLE III"
+    elif bloom_count == 10:
+        return "MAPLE II"
+    elif bloom_count == 9:
+        return "MAPLE I"
+    elif bloom_count == 8:
+        return "BIRCH III"
+    elif bloom_count == 7:
+        return "BIRCH II"
+    elif bloom_count == 6:
+        return "BIRCH I"
+    elif bloom_count == 5:
+        return "CEDAR III"
+    elif bloom_count == 4:
+        return "CEDAR II"
+    elif bloom_count == 3:
+        return "CEDAR I"
+    elif bloom_count == 2:
+        return "PINE III"
+    elif bloom_count == 1:
+        return "PINE II"
+    else:  # bloom_count == 0
+        return "PINE I"
+
+
+def get_user_bloom_count(user_id: int) -> int:
+    """Get user's bloom count."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"bloom_count": 1})
+    if not doc:
+        return 0
+    return int(doc.get("bloom_count", 0))
+
+
+def perform_bloom(user_id: int) -> None:
+    """Reset user's progress while keeping Tree Rings and incrementing bloom_count."""
+    users = _get_users_collection()
+    default_balance = _get_default_balance()
+    users.update_one(
+        {"_id": int(user_id)},
+        {
+            "$set": {
+                "balance": float(default_balance),
+                "basket_upgrades": {
+                    "basket": 0,
+                    "shoes": 0,
+                    "gloves": 0,
+                    "soil": 0
+                },
+                "harvest_upgrades": {
+                    "car": 0,
+                    "chain": 0,
+                    "fertilizer": 0,
+                    "cooldown": 0
+                },
+                "gardeners": [],
+                "gpus": [],
+                "items": {},
+                "ripeness_stats": {},
+                "gather_stats": {
+                    "total_items": 0,
+                    "categories": {},
+                    "items": {}
+                },
+                "total_forage_count": 0,
+                "stock_holdings": {},
+                "crypto_holdings": {
+                    "RTC": 0.0,
+                    "TER": 0.0,
+                    "CNY": 0.0
+                }
+            },
+            "$inc": {
+                "bloom_count": 1
+            }
+        },
         upsert=True,
     )
 
