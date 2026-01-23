@@ -371,6 +371,37 @@ def get_all_users_total_items() -> list[tuple[int, int]]:
     return results
 
 
+def _get_rank_sort_value(rank_tuple: tuple[int, str]) -> int:
+    """Helper function to get the sort value for a rank. Higher ranks have higher values."""
+    rank = rank_tuple[1]
+    # Rank hierarchy from highest to lowest
+    rank_hierarchy = {
+        "REDWOOD": 18,
+        "FIR III": 17, "FIR II": 16, "FIR I": 15,
+        "OAK III": 14, "OAK II": 13, "OAK I": 12,
+        "MAPLE III": 11, "MAPLE II": 10, "MAPLE I": 9,
+        "BIRCH III": 8, "BIRCH II": 7, "BIRCH I": 6,
+        "CEDAR III": 5, "CEDAR II": 4, "CEDAR I": 3,
+        "PINE III": 2, "PINE II": 1, "PINE I": 0
+    }
+    return rank_hierarchy.get(rank, 0)
+
+
+def get_all_users_ranks() -> list[tuple[int, str]]:
+    """Get all users with their bloom ranks, sorted by rank descending (REDWOOD -> PINE I)."""
+    users = _get_users_collection()
+    cursor = users.find({}, {"_id": 1, "bloom_count": 1})
+    results = []
+    for doc in cursor:
+        user_id = doc.get("_id")
+        bloom_count = int(doc.get("bloom_count", 0))
+        rank = get_bloom_rank(user_id)
+        results.append((user_id, rank))
+    # Sort by rank descending (highest rank first)
+    results.sort(key=_get_rank_sort_value, reverse=True)
+    return results
+
+
 def get_user_basket_upgrades(user_id: int) -> Dict[str, int]:
     """Get user's basket upgrade levels. Returns dict with keys: basket, shoes, gloves, soil."""
     users = _get_users_collection()

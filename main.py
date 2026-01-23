@@ -66,6 +66,7 @@ from database import (
     add_ripeness_stat,
     get_all_users_balance,
     get_all_users_total_items,
+    get_all_users_ranks,
     get_user_total_items,
     get_user_items,
     get_user_basket_upgrades,
@@ -577,6 +578,76 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
 
 
 
+def get_rank_perma_buff_multiplier(user_id):
+    """
+    Calculate the rank perma buff multiplier based on bloom rank.
+    Returns a multiplier (e.g., 1.015 for 1.5% boost).
+    
+    PINE I: 0% (no boost, returns 1.0)
+    PINE II: 1.5%
+    PINE III: 3%
+    CEDAR I: 6%
+    CEDAR II: 9%
+    CEDAR III: 12%
+    BIRCH I: 17%
+    BIRCH II: 22%
+    BIRCH III: 27%
+    MAPLE I: 34.5%
+    MAPLE II: 42%
+    MAPLE III: 50%
+    OAK I: 60%
+    OAK II: 70%
+    OAK III: 80%
+    FIR I: 95%
+    FIR II: 110%
+    FIR III: 125%
+    REDWOOD: 200%
+    """
+    bloom_rank = get_bloom_rank(user_id)
+    
+    if bloom_rank == "PINE I":
+        return 1.0  # No boost for PINE I
+    elif bloom_rank == "PINE II":
+        return 1.015  # 1.5%
+    elif bloom_rank == "PINE III":
+        return 1.03  # 3%
+    elif bloom_rank == "CEDAR I":
+        return 1.06  # 6%
+    elif bloom_rank == "CEDAR II":
+        return 1.09  # 9%
+    elif bloom_rank == "CEDAR III":
+        return 1.12  # 12%
+    elif bloom_rank == "BIRCH I":
+        return 1.17  # 17%
+    elif bloom_rank == "BIRCH II":
+        return 1.22  # 22%
+    elif bloom_rank == "BIRCH III":
+        return 1.27  # 27%
+    elif bloom_rank == "MAPLE I":
+        return 1.345  # 34.5%
+    elif bloom_rank == "MAPLE II":
+        return 1.42  # 42%
+    elif bloom_rank == "MAPLE III":
+        return 1.50  # 50%
+    elif bloom_rank == "OAK I":
+        return 1.60  # 60%
+    elif bloom_rank == "OAK II":
+        return 1.70  # 70%
+    elif bloom_rank == "OAK III":
+        return 1.80  # 80%
+    elif bloom_rank == "FIR I":
+        return 1.95  # 95%
+    elif bloom_rank == "FIR II":
+        return 2.10  # 110%
+    elif bloom_rank == "FIR III":
+        return 2.25  # 125%
+    elif bloom_rank == "REDWOOD":
+        return 3.0  # 200% (flat increase)
+    else:
+        # Default to no boost if rank is unknown
+        return 1.0
+
+
 def can_gather(user_id, user_data=None, active_events=None):
     """
     Check if user can gather. Returns (can_gather: bool, time_left: int, is_roulette_cooldown: bool).
@@ -821,6 +892,12 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
     water_multiplier = get_water_multiplier(user_id)
     final_value *= water_multiplier
     
+    # Apply rank perma buff multiplier
+    rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
+    base_value_before_rank = final_value
+    final_value *= rank_perma_buff_multiplier
+    extra_money_from_rank = final_value - base_value_before_rank
+    
     # Apply daily bonus multiplier (1% per consecutive day)
     daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
     base_value_before_daily = final_value
@@ -847,6 +924,8 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
         "base_value": base_final_value,
         "extra_money_from_bloom": extra_money_from_bloom,
         "bloom_multiplier": bloom_multiplier,
+        "extra_money_from_rank": extra_money_from_rank,
+        "rank_perma_buff_multiplier": rank_perma_buff_multiplier,
         "extra_money_from_daily": extra_money_from_daily,
         "daily_bonus_multiplier": daily_bonus_multiplier,
         "ripeness": ripeness["name"],
@@ -2304,7 +2383,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.3.2 :3"
+            name="running /gather on V0.3.3 :3"
         )
     )
     try:
@@ -2466,6 +2545,16 @@ async def gather(interaction: discord.Interaction):
             embed.add_field(
                 name="🌳 Tree Ring Boost", 
                 value=f"+{multiplier_percent:.1f}% - **+${gather_result['extra_money_from_bloom']:.2f}**", 
+                inline=False
+            )
+        
+        # Show rank perma buff if applicable (only if not PINE I)
+        bloom_rank = get_bloom_rank(user_id)
+        if bloom_rank != "PINE I" and gather_result.get('extra_money_from_rank', 0) > 0:
+            rank_perma_buff_percent = (gather_result['rank_perma_buff_multiplier'] - 1.0) * 100
+            embed.add_field(
+                name="⭐ Rank Boost",
+                value=f"+{rank_perma_buff_percent:.1f}% - **+${gather_result['extra_money_from_rank']:.2f}**",
                 inline=False
             )
         
@@ -2820,6 +2909,10 @@ async def harvest(interaction: discord.Interaction):
             # Apply water multiplier (1.01x per water, cumulative)
             final_value *= water_multiplier
             
+            # Apply rank perma buff multiplier
+            rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
+            final_value *= rank_perma_buff_multiplier
+            
             # Apply daily bonus multiplier (1% per consecutive day)
             daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
             value_before_daily = final_value
@@ -2930,6 +3023,20 @@ async def harvest(interaction: discord.Interaction):
             embed.add_field(
                 name="🌳 Tree Ring Boost", 
                 value=f"+{multiplier_percent:.1f}% - **+${extra_money_from_bloom:.2f}**", 
+                inline=False
+            )
+        
+        # Show rank perma buff if applicable (only if not PINE I)
+        bloom_rank = get_bloom_rank(user_id)
+        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
+        # Calculate extra money from rank: value after water * (rank_multiplier - 1)
+        value_after_water = total_base_value * bloom_multiplier * water_multiplier
+        extra_money_from_rank = value_after_water * (rank_perma_buff_multiplier - 1.0)
+        if bloom_rank != "PINE I" and extra_money_from_rank > 0:
+            rank_perma_buff_percent = (rank_perma_buff_multiplier - 1.0) * 100
+            embed.add_field(
+                name="⭐ Rank Boost",
+                value=f"+{rank_perma_buff_percent:.1f}% - **+${extra_money_from_rank:.2f}**",
                 inline=False
             )
         
@@ -3097,6 +3204,12 @@ async def userstats(interaction: discord.Interaction):
         bloom_multiplier = get_bloom_multiplier(user_id)
         embed.add_field(name="🌲 Bloom Rank", value=f"**{bloom_rank}**", inline=True)
         embed.add_field(name="🌳 Tree Rings", value=f"**{tree_rings}** ({bloom_multiplier:.2f}x)", inline=True)
+        
+        # Add Rank Perma Buff (only if not PINE I)
+        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
+        if bloom_rank != "PINE I":
+            rank_perma_buff_percent = (rank_perma_buff_multiplier - 1.0) * 100
+            embed.add_field(name="⭐ Rank Boost", value=f"**+{rank_perma_buff_percent:.1f}%**", inline=True)
         
         # Add Water Streak
         water_streak = get_user_consecutive_water_days(user_id)
@@ -4597,7 +4710,7 @@ async def pay(interaction: discord.Interaction, amount: float, user: discord.Mem
 
 # Leaderboard pagination view
 class LeaderboardView(discord.ui.View):
-    def __init__(self, leaderboard_data: list[tuple[int, float | int]], leaderboard_type: str, guild: discord.Guild, timeout=300):
+    def __init__(self, leaderboard_data: list[tuple[int, float | int | str]], leaderboard_type: str, guild: discord.Guild, timeout=300):
         super().__init__(timeout=timeout)
         self.leaderboard_data = leaderboard_data
         self.leaderboard_type = leaderboard_type
@@ -4606,7 +4719,7 @@ class LeaderboardView(discord.ui.View):
         self.items_per_page = 10
         self.total_pages = (len(leaderboard_data) + self.items_per_page - 1) // self.items_per_page
         
-    def get_page_data(self, page: int) -> list[tuple[int, float | int]]:
+    def get_page_data(self, page: int) -> list[tuple[int, float | int | str]]:
         """Get the data for a specific page."""
         start_idx = page * self.items_per_page
         end_idx = start_idx + self.items_per_page
@@ -4627,10 +4740,14 @@ class LeaderboardView(discord.ui.View):
             title = "**🌱 PLANTS**"
             description = ""
             value_name = "Items"
-        else:  # money
+        elif self.leaderboard_type == "money":
             title = "**💰 MONEY**"
             description = ""
             value_name = "Balance"
+        else:  # ranks
+            title = "**🏆 RANKS**"
+            description = ""
+            value_name = "Rank"
         
         embed = discord.Embed(
             title=title,
@@ -4656,13 +4773,24 @@ class LeaderboardView(discord.ui.View):
                 else:
                     emoji = "🌱"
                 leaderboard_text += f"{emoji} **{rank}.** {username}: **{value}** items\n"
-            else:  # money
+            elif self.leaderboard_type == "money":
                 # Top 3 get money bag, bottom 7 get cash emoji
                 if rank <= 3:
                     emoji = "💰"
                 else:
                     emoji = "💵"
                 leaderboard_text += f"{emoji} **{rank}.** {username}: **${value:.2f}**\n"
+            else:  # ranks
+                # Top 3 get trophy emojis, bottom 7 get medal emoji
+                if rank == 1:
+                    emoji = "🥇"
+                elif rank == 2:
+                    emoji = "🥈"
+                elif rank == 3:
+                    emoji = "🥉"
+                else:
+                    emoji = "🏅"
+                leaderboard_text += f"{emoji} **{rank}.** {username}: **{value}**\n"
         
         if not leaderboard_text:
             leaderboard_text = "No data available"
@@ -4709,7 +4837,7 @@ class LeaderboardView(discord.ui.View):
 
 
 # Store leaderboard message IDs per guild and type
-leaderboard_messages = {}  # {guild_id: {"plants": message_id, "money": message_id}}
+leaderboard_messages = {}  # {guild_id: {"plants": message_id, "money": message_id, "ranks": message_id}}
 
 async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str):
     """Update or create a leaderboard message in the #leaderboard channel."""
@@ -4725,8 +4853,10 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
     # Get leaderboard data
     if leaderboard_type == "plants":
         all_data = get_all_users_total_items()
-    else:  # money
+    elif leaderboard_type == "money":
         all_data = get_all_users_balance()
+    else:  # ranks
+        all_data = get_all_users_ranks()
     
     # Filter to only include users in the guild
     leaderboard_data = [(user_id, value) for user_id, value in all_data if user_id in guild_member_ids]
@@ -4738,8 +4868,11 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
     if leaderboard_type == "plants":
         title = "**🌱 PLANTS**"
         description = ""
-    else:  # money
+    elif leaderboard_type == "money":
         title = "**💰 MONEY**"
+        description = ""
+    else:  # ranks
+        title = "**🏆 RANKS**"
         description = ""
     
     embed = discord.Embed(
@@ -4766,13 +4899,24 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
             else:
                 emoji = "🌱"
             leaderboard_text += f"{emoji} **{rank}.** {username}: **{value}** items\n"
-        else:  # money
+        elif leaderboard_type == "money":
             # Top 3 get money bag, bottom 7 get cash emoji
             if rank <= 3:
                 emoji = "💰"
             else:
                 emoji = "💵"
             leaderboard_text += f"{emoji} **{rank}.** {username}: **${value:.2f}**\n"
+        else:  # ranks
+            # Top 3 get trophy emojis, bottom 7 get medal emoji
+            if rank == 1:
+                emoji = "🥇"
+            elif rank == 2:
+                emoji = "🥈"
+            elif rank == 3:
+                emoji = "🥉"
+            else:
+                emoji = "🏅"
+            leaderboard_text += f"{emoji} **{rank}.** {username}: **{value}**\n"
     
     if not leaderboard_text:
         leaderboard_text = "No data available"
@@ -4794,36 +4938,32 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
             try:
                 message = await leaderboard_channel.fetch_message(message_id)
                 
-                # Check if message is older than 1 hour (Discord rate limit for old messages)
-                message_age = (discord.utils.utcnow() - message.created_at).total_seconds()
-                if message_age > 3600:  # 1 hour in seconds
-                    # Message is too old, create a new one instead
-                    logging.info(f"Leaderboard message for {leaderboard_type} in {guild.name} is older than 1 hour, creating new message")
-                    message_id = None
-                else:
-                    # Message is recent enough, try to edit
-                    try:
-                        await message.edit(embed=embed)
+                # Always try to edit the existing message, regardless of age
+                try:
+                    await message.edit(embed=embed)
+                    return
+                except discord.HTTPException as e:
+                    # Check if it's a rate limit error
+                    if e.status == 429:
+                        # Rate limited, wait and retry once
+                        retry_after = e.retry_after if hasattr(e, 'retry_after') else 1.0
+                        await asyncio.sleep(retry_after)
+                        try:
+                            await message.edit(embed=embed)
+                            return
+                        except discord.HTTPException as retry_e:
+                            # If retry also fails, log but don't create new message
+                            logging.warning(f"Rate limited retry failed for {leaderboard_type} leaderboard in {guild.name}: {retry_e}")
+                            return  # Skip this update rather than creating new message
+                    elif e.code == 30046:  # Maximum edits to old messages reached
+                        # Discord limit reached, but we still want to keep the message
+                        # Log and skip this update rather than creating new message
+                        logging.warning(f"Maximum edits reached for {leaderboard_type} leaderboard message in {guild.name}, skipping update")
                         return
-                    except discord.HTTPException as e:
-                        # Check if it's a rate limit error
-                        if e.status == 429:
-                            # Rate limited, wait and retry once
-                            retry_after = e.retry_after if hasattr(e, 'retry_after') else 1.0
-                            await asyncio.sleep(retry_after)
-                            try:
-                                await message.edit(embed=embed)
-                                return
-                            except:
-                                # Still failed, create new message
-                                message_id = None
-                        elif e.code == 30046:  # Maximum edits to old messages reached
-                            logging.warning(f"Maximum edits reached for old leaderboard message in {guild.name}, creating new one")
-                            message_id = None
-                        else:
-                            # Other error, log and try to find existing or create new
-                            logging.warning(f"Error editing {leaderboard_type} leaderboard in {guild.name}: {e}")
-                            message_id = None
+                    else:
+                        # Other error, log but don't create new message
+                        logging.warning(f"Error editing {leaderboard_type} leaderboard in {guild.name}: {e}")
+                        return  # Skip this update rather than creating new message
             except discord.NotFound:
                 # Message was deleted, search for existing one
                 message_id = None
@@ -4845,14 +4985,9 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
                         embed_title = message.embeds[0].title if message.embeds[0].title else ""
                         # Check if this is the leaderboard message we're looking for
                         if (leaderboard_type == "plants" and "🌱 PLANTS" in embed_title) or \
-                           (leaderboard_type == "money" and "💰 MONEY" in embed_title):
-                            # Check message age
-                            message_age = (discord.utils.utcnow() - message.created_at).total_seconds()
-                            if message_age > 3600:
-                                # Too old, skip and create new
-                                continue
-                            
-                            # Found existing message, update it
+                           (leaderboard_type == "money" and "💰 MONEY" in embed_title) or \
+                           (leaderboard_type == "ranks" and "🏆 RANKS" in embed_title):
+                            # Found existing message, update it (regardless of age)
                             message_id = message.id
                             leaderboard_messages[guild_id][leaderboard_type] = message_id
                             try:
@@ -4861,14 +4996,14 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
                             except discord.HTTPException as e:
                                 if e.status == 429:
                                     # Rate limited, skip
-                                    logging.warning(f"Rate limited while editing leaderboard in {guild.name}, skipping update")
+                                    logging.warning(f"Rate limited while editing {leaderboard_type} leaderboard in {guild.name}, skipping update")
                                     return
                                 elif e.code == 30046:
-                                    # Max edits reached, create new
-                                    message_id = None
-                                    break
+                                    # Max edits reached, skip this update but keep the message
+                                    logging.warning(f"Maximum edits reached for {leaderboard_type} leaderboard message in {guild.name}, skipping update")
+                                    return
                                 else:
-                                    # Other error, try next message or create new
+                                    # Other error, try next message or skip
                                     continue
             except discord.HTTPException as e:
                 if e.status == 429:
@@ -4878,13 +5013,15 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
             except Exception as e:
                 logging.error(f"Unexpected error searching for leaderboard message in {guild.name}: {e}", exc_info=True)
         
-        # Create new message only if we couldn't find or edit existing one
+        # Create new message only if we truly couldn't find an existing one (message was deleted)
+        # This should be rare - we only create if no message exists at all
         try:
             message = await leaderboard_channel.send(embed=embed)
             leaderboard_messages[guild_id][leaderboard_type] = message.id
+            logging.info(f"Created new {leaderboard_type} leaderboard message in {guild.name} (no existing message found)")
         except discord.HTTPException as e:
             if e.status == 429:
-                logging.warning(f"Rate limited while creating new leaderboard message in {guild.name}, skipping update")
+                logging.warning(f"Rate limited while creating new {leaderboard_type} leaderboard message in {guild.name}, skipping update")
             else:
                 logging.error(f"Error creating new {leaderboard_type} leaderboard message in {guild.name}: {e}")
     except Exception as e:
@@ -4905,6 +5042,8 @@ async def update_all_leaderboards():
                     await update_leaderboard_message(guild, "plants")
                     await asyncio.sleep(2)  # Delay between updates to avoid rate limits
                     await update_leaderboard_message(guild, "money")
+                    await asyncio.sleep(2)  # Delay between updates
+                    await update_leaderboard_message(guild, "ranks")
                     await asyncio.sleep(2)  # Delay between updates
                 except Exception as e:
                     logging.error(f"Error updating leaderboards for guild {guild.name}: {e}", exc_info=True)
@@ -5241,36 +5380,32 @@ async def update_marketboard_message(guild: discord.Guild):
             try:
                 message = await market_channel.fetch_message(message_id)
                 
-                # Check if message is older than 1 hour (Discord rate limit for old messages)
-                message_age = (discord.utils.utcnow() - message.created_at).total_seconds()
-                if message_age > 3600:  # 1 hour in seconds
-                    # Message is too old, create a new one instead
-                    logging.info(f"Marketboard message in {guild.name} is older than 1 hour, creating new message")
-                    message_id = None
-                else:
-                    # Message is recent enough, try to edit
-                    try:
-                        await message.edit(embed=embed)
+                # Always try to edit the existing message, regardless of age
+                try:
+                    await message.edit(embed=embed)
+                    return
+                except discord.HTTPException as e:
+                    # Check if it's a rate limit error
+                    if e.status == 429:
+                        # Rate limited, wait and retry once
+                        retry_after = e.retry_after if hasattr(e, 'retry_after') else 1.0
+                        await asyncio.sleep(retry_after)
+                        try:
+                            await message.edit(embed=embed)
+                            return
+                        except discord.HTTPException as retry_e:
+                            # If retry also fails, log but don't create new message
+                            logging.warning(f"Rate limited retry failed for marketboard in {guild.name}: {retry_e}")
+                            return  # Skip this update rather than creating new message
+                    elif e.code == 30046:  # Maximum edits to old messages reached
+                        # Discord limit reached, but we still want to keep the message
+                        # Log and skip this update rather than creating new message
+                        logging.warning(f"Maximum edits reached for marketboard message in {guild.name}, skipping update")
                         return
-                    except discord.HTTPException as e:
-                        # Check if it's a rate limit error
-                        if e.status == 429:
-                            # Rate limited, wait and retry once
-                            retry_after = e.retry_after if hasattr(e, 'retry_after') else 1.0
-                            await asyncio.sleep(retry_after)
-                            try:
-                                await message.edit(embed=embed)
-                                return
-                            except:
-                                # Still failed, create new message
-                                message_id = None
-                        elif e.code == 30046:  # Maximum edits to old messages reached
-                            logging.warning(f"Maximum edits reached for old marketboard message in {guild.name}, creating new one")
-                            message_id = None
-                        else:
-                            # Other error, log and try to find existing or create new
-                            logging.warning(f"Error editing marketboard in {guild.name}: {e}")
-                            message_id = None
+                    else:
+                        # Other error, log but don't create new message
+                        logging.warning(f"Error editing marketboard in {guild.name}: {e}")
+                        return  # Skip this update rather than creating new message
             except discord.NotFound:
                 # Message was deleted, search for existing one
                 message_id = None
@@ -5292,13 +5427,7 @@ async def update_marketboard_message(guild: discord.Guild):
                         embed_title = message.embeds[0].title if message.embeds[0].title else ""
                         # Check if this is the marketboard message
                         if "GROW JONES INDUSTRIAL AVERAGE" in embed_title:
-                            # Check message age
-                            message_age = (discord.utils.utcnow() - message.created_at).total_seconds()
-                            if message_age > 3600:
-                                # Too old, skip and create new
-                                continue
-                            
-                            # Found existing message, update it
+                            # Found existing message, update it (regardless of age)
                             message_id = message.id
                             leaderboard_messages[guild_id]["marketboard"] = message_id
                             try:
@@ -5310,11 +5439,11 @@ async def update_marketboard_message(guild: discord.Guild):
                                     logging.warning(f"Rate limited while editing marketboard in {guild.name}, skipping update")
                                     return
                                 elif e.code == 30046:
-                                    # Max edits reached, create new
-                                    message_id = None
-                                    break
+                                    # Max edits reached, skip this update but keep the message
+                                    logging.warning(f"Maximum edits reached for marketboard message in {guild.name}, skipping update")
+                                    return
                                 else:
-                                    # Other error, try next message or create new
+                                    # Other error, try next message or skip
                                     continue
             except discord.HTTPException as e:
                 if e.status == 429:
@@ -5324,10 +5453,12 @@ async def update_marketboard_message(guild: discord.Guild):
             except Exception as e:
                 logging.error(f"Unexpected error searching for marketboard message in {guild.name}: {e}", exc_info=True)
         
-        # Create new message only if we couldn't find or edit existing one
+        # Create new message only if we truly couldn't find an existing one (message was deleted)
+        # This should be rare - we only create if no message exists at all
         try:
             message = await market_channel.send(embed=embed)
             leaderboard_messages[guild_id]["marketboard"] = message.id
+            logging.info(f"Created new marketboard message in {guild.name} (no existing message found)")
         except discord.HTTPException as e:
             if e.status == 429:
                 logging.warning(f"Rate limited while creating new marketboard message in {guild.name}, skipping update")
@@ -5354,6 +5485,8 @@ async def update_all_marketboards():
                     await update_leaderboard_message(guild, "plants")
                     await asyncio.sleep(2)  # Delay between updates to avoid rate limits
                     await update_leaderboard_message(guild, "money")
+                    await asyncio.sleep(2)  # Delay between updates
+                    await update_leaderboard_message(guild, "ranks")
                     await asyncio.sleep(2)  # Delay between updates
                 except Exception as e:
                     logging.error(f"Error updating marketboard/leaderboards for guild {guild.name}: {e}", exc_info=True)
@@ -6323,10 +6456,40 @@ class MiningView(discord.ui.View):
         self.session_value = 0.0  # Total value mined in this session (base value only)
         self.timed_out = False  # Track if session has timed out
         self.last_embed_update = 0.0  # Track last embed update time for rate limiting
+        self.timer_task = None  # Background task for monitoring timer
         # Ensure GPU boosts are numbers (convert to float/int if needed)
         self.gpu_percent_boost = float(gpu_percent_boost) if gpu_percent_boost else 0.0  # Total percent increase from GPUs
         self.gpu_seconds_boost = int(gpu_seconds_boost) if gpu_seconds_boost else 0  # Total seconds increase from GPUs
         self.gpus_used = gpus_used if gpus_used else []  # List of GPU names being used
+    
+    async def _timer_monitor_task(self):
+        """Background task that monitors the timer and disables button when time expires."""
+        max_time = 60 + self.gpu_seconds_boost
+        
+        while not self.timed_out and self.session_started and self.start_time:
+            current_time = time.time()
+            elapsed_time = current_time - self.start_time
+            time_remaining = max_time - elapsed_time
+            
+            if time_remaining <= 0:
+                # Time expired - disable button and show expiration message instantly
+                if not self.timed_out:
+                    # Disable the button immediately
+                    for item in self.children:
+                        item.disabled = True
+                    # Update the message with disabled button state immediately
+                    if self.message:
+                        try:
+                            await self.message.edit(view=self)
+                        except Exception as e:
+                            print(f"Error disabling button: {e}")
+                    # Handle timeout (this will set timed_out and show the expiration message)
+                    await self._handle_timeout()
+                break
+            
+            # Update embed periodically (every 0.5 seconds) to show countdown
+            await self._update_timer_embed(time_remaining, max_time)
+            await asyncio.sleep(0.5)
     
     async def _update_timer_embed(self, time_remaining: float, max_time: int, force_update: bool = False):
         """Update the embed with the current timer countdown. Rate limited to avoid spam."""
@@ -6387,6 +6550,14 @@ class MiningView(discord.ui.View):
         
         self.timed_out = True
         
+        # Cancel timer task if it's still running
+        if self.timer_task and not self.timer_task.done():
+            self.timer_task.cancel()
+            try:
+                await self.timer_task
+            except asyncio.CancelledError:
+                pass
+        
         # Disable the button
         for item in self.children:
             item.disabled = True
@@ -6394,19 +6565,14 @@ class MiningView(discord.ui.View):
         # Create timeout embed
         timeout_embed = discord.Embed(
             title="⏰ Mining Session Expired",
-            description="",
+            description="Time's up! Your mining session has ended.",
             color=discord.Color.orange()
         )
         
         if self.total_mines > 0:
-            # Get current holdings for final display
-            holdings = get_user_crypto_holdings(self.user_id)
-            prices = get_crypto_prices()
-            total_value = sum(holdings[c["symbol"]] * prices.get(c["symbol"], c["base_price"]) for c in CRYPTO_COINS)
-            
             timeout_embed.add_field(
                 name="Session Summary",
-                value=f"Total Mines: **{self.total_mines}**\nValue: **${self.session_value:.2f}**",
+                value=f"Total Mines: **{self.total_mines}**",
                 inline=False
             )
             
@@ -6421,13 +6587,8 @@ class MiningView(discord.ui.View):
             
             if session_summary:
                 timeout_embed.add_field(name="Mined This Session", value=session_summary.strip(), inline=False)
-            
-            timeout_embed.add_field(
-                name="Total Holdings",
-                value=f"RTC: {holdings['RTC']:.4f}\nTER: {holdings['TER']:.4f}\nCNY: {holdings['CNY']:.4f}",
-                inline=False
-            )
-            timeout_embed.add_field(name="Total Portfolio Value", value=f"**${total_value:.2f}**", inline=False)
+
+            timeout_embed.set_footer(text="Use /sell to sell your cryptocurrency!")
         else:
             timeout_embed.description = "Time's up! You didn't mine anything this session."
         
@@ -6460,21 +6621,18 @@ class MiningView(discord.ui.View):
                 self.start_time = time.time()
                 # Set cooldown when session actually starts
                 update_user_last_mine_time(self.user_id, self.start_time)
+                # Start the timer monitor task
+                self.timer_task = asyncio.create_task(self._timer_monitor_task())
                 # Update embed to show timer has started (force update on first click)
                 await self._update_timer_embed(60 + self.gpu_seconds_boost, 60 + self.gpu_seconds_boost, force_update=True)
                 # Continue to mine on this first click
             else:
                 # Check if session has timed out - early check before processing
+                # The timer task handles the main timeout, but we check here as a safety measure
                 elapsed_time = time.time() - self.start_time
                 max_time = 60 + self.gpu_seconds_boost
                 if elapsed_time >= max_time:
-                    # Session has expired - disable button and show timeout
-                    if not self.timed_out:
-                        self.timed_out = True
-                        for item in self.children:
-                            item.disabled = True
-                        # Handle timeout asynchronously - don't block
-                        asyncio.create_task(self._handle_timeout())
+                    # Session has expired - return early (timer task will handle the rest)
                     return
             
             # Randomly select a coin to mine
@@ -6520,19 +6678,9 @@ class MiningView(discord.ui.View):
             self.session_value += mine_value
             
             # Check timeout again after processing (in case processing took time)
-            if self.session_started and not self.timed_out:
-                elapsed_time = time.time() - self.start_time
-                max_time = 60 + self.gpu_seconds_boost
-                
-                if elapsed_time >= max_time:
-                    # Time expired during processing - disable button
-                    if not self.timed_out:
-                        self.timed_out = True
-                        for item in self.children:
-                            item.disabled = True
-                        # Handle timeout asynchronously - don't block
-                        asyncio.create_task(self._handle_timeout())
-                    return
+            # The timer task handles the main timeout, but we check here as a safety measure
+            if self.timed_out:
+                return
             
             # Update embed only if not timed out (rate limited to avoid slowing down clicks)
             if self.session_started and not self.timed_out:
@@ -6557,6 +6705,13 @@ class MiningView(discord.ui.View):
         # Discord's timeout callback - use shared handler
         if not self.timed_out:
             await self._handle_timeout()
+    
+    def stop(self):
+        """Stop the view and cancel any running tasks."""
+        # Cancel timer task if it's still running
+        if self.timer_task and not self.timer_task.done():
+            self.timer_task.cancel()
+        super().stop()
 
 
 @bot.tree.command(name="mine", description="Mine cryptocurrency! (1 hour cooldown)")
@@ -6697,17 +6852,20 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             # Apply boosts to sale value
             bloom_multiplier = get_bloom_multiplier(user_id)
             water_multiplier = get_water_multiplier(user_id)
+            rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
             daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
             
             # Calculate boosted value (apply all multipliers)
             value_after_bloom = base_sale_value * bloom_multiplier
             value_after_water = value_after_bloom * water_multiplier
-            total_sale_value = value_after_water * daily_bonus_multiplier
+            value_after_rank = value_after_water * rank_perma_buff_multiplier
+            total_sale_value = value_after_rank * daily_bonus_multiplier
             
             # Calculate extra value from boosts (only show tree ring and water streak)
             extra_from_bloom = value_after_bloom - base_sale_value
             # Water multiplier is applied but not shown separately
-            extra_from_daily = total_sale_value - value_after_water
+            extra_from_rank = value_after_rank - value_after_water
+            extra_from_daily = total_sale_value - value_after_rank
             
             # Add money to balance (with boosts)
             current_balance = get_user_balance(user_id)
@@ -6732,6 +6890,15 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
                 embed.add_field(
                     name="🌳 Tree Ring Boost",
                     value=f"+{multiplier_percent:.1f}% - **+${extra_from_bloom:.2f}**",
+                    inline=False
+                )
+            # Show rank perma buff if applicable (only if not PINE I)
+            bloom_rank = get_bloom_rank(user_id)
+            if bloom_rank != "PINE I" and extra_from_rank > 0:
+                rank_perma_buff_percent = (rank_perma_buff_multiplier - 1.0) * 100
+                embed.add_field(
+                    name="⭐ Rank Boost",
+                    value=f"+{rank_perma_buff_percent:.1f}% - **+${extra_from_rank:.2f}**",
                     inline=False
                 )
             if extra_from_daily > 0:
@@ -6782,17 +6949,20 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         # Apply boosts to sale value
         bloom_multiplier = get_bloom_multiplier(user_id)
         water_multiplier = get_water_multiplier(user_id)
+        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
         daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
         
         # Calculate boosted value (apply all multipliers)
         value_after_bloom = base_sale_value * bloom_multiplier
         value_after_water = value_after_bloom * water_multiplier
-        sale_value = value_after_water * daily_bonus_multiplier
+        value_after_rank = value_after_water * rank_perma_buff_multiplier
+        sale_value = value_after_rank * daily_bonus_multiplier
         
         # Calculate extra value from boosts (only show tree ring and water streak)
         extra_from_bloom = value_after_bloom - base_sale_value
         # Water multiplier is applied but not shown separately
-        extra_from_daily = sale_value - value_after_water
+        extra_from_rank = value_after_rank - value_after_water
+        extra_from_daily = sale_value - value_after_rank
         
         # Update holdings (subtract)
         update_user_crypto_holdings(user_id, coin, -amount)
@@ -6819,6 +6989,15 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             embed.add_field(
                 name="🌳 Tree Ring Boost",
                 value=f"+{multiplier_percent:.1f}% - **+${extra_from_bloom:.2f}**",
+                inline=False
+            )
+        # Show rank perma buff if applicable (only if not PINE I)
+        bloom_rank = get_bloom_rank(user_id)
+        if bloom_rank != "PINE I" and extra_from_rank > 0:
+            rank_perma_buff_percent = (rank_perma_buff_multiplier - 1.0) * 100
+            embed.add_field(
+                name="⭐ Rank Boost",
+                value=f"+{rank_perma_buff_percent:.1f}% - **+${extra_from_rank:.2f}**",
                 inline=False
             )
         if extra_from_daily > 0:
