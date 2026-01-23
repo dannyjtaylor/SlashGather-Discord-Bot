@@ -108,7 +108,10 @@ def _ensure_user_document(user_id: int) -> None:
         "gpus": [],
         "notification_channel_id": None,
         "tree_rings": 0,
-        "bloom_count": 0
+        "bloom_count": 0,
+        "last_water_time": 0.0,
+        "consecutive_water_days": 0,
+        "water_count": 0
     }
     users.update_one(
         {"_id": int(user_id)},
@@ -461,6 +464,72 @@ def update_user_last_mine_time(user_id: int, timestamp: float) -> None:
         {"$set": {"last_mine_time": float(timestamp)}},
         upsert=True,
     )
+
+
+def get_user_last_water_time(user_id: int) -> float:
+    """Get user's last water time."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"last_water_time": 1})
+    return float(doc.get("last_water_time", 0.0)) if doc else 0.0
+
+
+def update_user_last_water_time(user_id: int, timestamp: float) -> None:
+    """Update user's last water time."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"last_water_time": float(timestamp)}},
+        upsert=True,
+    )
+
+
+def get_user_consecutive_water_days(user_id: int) -> int:
+    """Get user's consecutive water days."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"consecutive_water_days": 1})
+    return int(doc.get("consecutive_water_days", 0)) if doc else 0
+
+
+def set_user_consecutive_water_days(user_id: int, days: int) -> None:
+    """Set user's consecutive water days."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"consecutive_water_days": int(days)}},
+        upsert=True,
+    )
+
+
+def get_user_water_count(user_id: int) -> int:
+    """Get user's water count (total times watered)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"water_count": 1})
+    return int(doc.get("water_count", 0)) if doc else 0
+
+
+def increment_user_water_count(user_id: int) -> None:
+    """Increment user's water count by 1."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$inc": {"water_count": 1}},
+        upsert=True,
+    )
+
+
+def get_water_multiplier(user_id: int) -> float:
+    """Calculate money multiplier based on water count. Formula: 1.0 + (water_count * 0.01) - 1% per water (additive, similar to Tree Rings)."""
+    water_count = get_user_water_count(user_id)
+    return 1.0 + (water_count * 0.01)
+
+
+def get_daily_bonus_multiplier(user_id: int) -> float:
+    """Calculate daily streak bonus multiplier based on consecutive water days. Formula: 1.0 + (consecutive_days * 0.01) - 1% per consecutive day."""
+    consecutive_days = get_user_consecutive_water_days(user_id)
+    return 1.0 + (consecutive_days * 0.01)
 
 
 def get_crypto_prices() -> Dict[str, float]:
@@ -961,7 +1030,7 @@ def get_user_gather_data(user_id: int) -> Dict:
 
 
 def reset_user_cooldowns(user_id: int) -> None:
-    """Reset all cooldowns for a user (gather, harvest, mine, Russian Roulette elimination)."""
+    """Reset all cooldowns for a user (gather, harvest, mine, Russian Roulette elimination, water)."""
     users = _get_users_collection()
     users.update_one(
         {"_id": int(user_id)},
@@ -969,7 +1038,9 @@ def reset_user_cooldowns(user_id: int) -> None:
             "last_gather_time": 0.0,
             "last_harvest_time": 0.0,
             "last_mine_time": 0.0,
-            "last_roulette_elimination_time": 0.0
+            "last_roulette_elimination_time": 0.0,
+            "last_water_time": 0.0,
+            "consecutive_water_days": 0
         }},
         upsert=True,
     )
@@ -1064,7 +1135,8 @@ def wipe_user_all(user_id: int) -> None:
                 "RTC": 0.0,
                 "TER": 0.0,
                 "CNY": 0.0
-            }
+            },
+            "bloom_count": 0
         }},
         upsert=True,
     )

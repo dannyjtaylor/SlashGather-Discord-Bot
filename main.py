@@ -11,6 +11,7 @@ import uuid
 import threading
 import datetime
 import aiohttp
+import yfinance as yf
 
 # Load environment variables FIRST
 load_dotenv(override=True)
@@ -102,6 +103,14 @@ from database import (
     get_bloom_rank,
     get_user_bloom_count,
     perform_bloom,
+    get_user_last_water_time,
+    update_user_last_water_time,
+    get_user_consecutive_water_days,
+    set_user_consecutive_water_days,
+    get_user_water_count,
+    increment_user_water_count,
+    get_water_multiplier,
+    get_daily_bonus_multiplier,
     reset_user_cooldowns,
     wipe_user_money,
     wipe_user_plants,
@@ -234,16 +243,16 @@ GARDENER_CHANCES = {
 
 # GPU shop definitions
 GPU_SHOP = [
-    {"name": "NATIVIDIA RooTX 3050", "percent_increase": 10, "seconds_increase": 3, "price": 600},
-    {"name": "NATIVIDIA RooTX 2060", "percent_increase": 14, "seconds_increase": 4, "price": 1500},
-    {"name": "Plantel Barc B580", "percent_increase": 20, "seconds_increase": 5, "price": 4000},
-    {"name": "NATIVIDIA RooTX 3070", "percent_increase": 30, "seconds_increase": 8, "price": 10000},
-    {"name": "RayMD RX 5700XT", "percent_increase": 60, "seconds_increase": 12, "price": 50000},
-    {"name": "NATIVIDIA GrowTX 1080-Ti", "percent_increase": 100, "seconds_increase": 20, "price": 110000},
-    {"name": "RayMD RX 9060-XT", "percent_increase": 180, "seconds_increase": 30, "price": 200000},
-    {"name": "NATIVIDIA RooTX 4070 Ti Super", "percent_increase": 300, "seconds_increase": 45, "price": 400000},
-    {"name": "NATIVIDIA RooTX 4090", "percent_increase": 500, "seconds_increase": 60, "price": 1000000},
-    {"name": "NATIVIDIA RooTX 5090", "percent_increase": 1554, "seconds_increase": 100, "price": 2000000},
+    {"name": "NATIVIDIA RooTX 3050", "percent_increase": 30, "seconds_increase": 3, "price": 600},
+    {"name": "NATIVIDIA RooTX 2060", "percent_increase": 40, "seconds_increase": 4, "price": 1500},
+    {"name": "Plantel Barc B580", "percent_increase": 60, "seconds_increase": 5, "price": 4000},
+    {"name": "NATIVIDIA RooTX 3070", "percent_increase": 90, "seconds_increase": 8, "price": 10000},
+    {"name": "RayMD RX 5700XT", "percent_increase": 180, "seconds_increase": 12, "price": 50000},
+    {"name": "NATIVIDIA GrowTX 1080-Ti", "percent_increase": 300, "seconds_increase": 20, "price": 110000},
+    {"name": "RayMD RX 9060-XT", "percent_increase": 540, "seconds_increase": 30, "price": 200000},
+    {"name": "NATIVIDIA RooTX 4070 Ti Super", "percent_increase": 900, "seconds_increase": 45, "price": 400000},
+    {"name": "NATIVIDIA RooTX 4090", "percent_increase": 1500, "seconds_increase": 60, "price": 1000000},
+    {"name": "NATIVIDIA RooTX 5090", "percent_increase": 5000, "seconds_increase": 100, "price": 2000000},
 ]
 
 # BASKET UPGRADE PATHS
@@ -807,6 +816,16 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
     base_final_value = final_value
     final_value *= bloom_multiplier
     extra_money_from_bloom = final_value - base_final_value
+    
+    # Apply water multiplier (1.01x per water, cumulative)
+    water_multiplier = get_water_multiplier(user_id)
+    final_value *= water_multiplier
+    
+    # Apply daily bonus multiplier (1% per consecutive day)
+    daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
+    base_value_before_daily = final_value
+    final_value *= daily_bonus_multiplier
+    extra_money_from_daily = final_value - base_value_before_daily
 
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
@@ -828,6 +847,8 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
         "base_value": base_final_value,
         "extra_money_from_bloom": extra_money_from_bloom,
         "bloom_multiplier": bloom_multiplier,
+        "extra_money_from_daily": extra_money_from_daily,
+        "daily_bonus_multiplier": daily_bonus_multiplier,
         "ripeness": ripeness["name"],
         "is_gmo": is_gmo,
         "category": item["category"],
@@ -2283,7 +2304,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.3.1 :3"
+            name="running /gather on V0.3.2 :3"
         )
     )
     try:
@@ -2405,9 +2426,17 @@ async def gather(interaction: discord.Interaction):
         if new_role:
             # Special message for Planter I advancement (when old_role is None)
             if new_role == "PLANTER I" and old_role is None:
+                # Assign PINE I bloom rank role
+                try:
+                    await assign_bloom_rank_role(interaction.user, interaction.guild)
+                except Exception as e:
+                    print(f"Error assigning bloom rank role to user {user_id}: {e}")
+                
+                # Get the bloom rank to display
+                bloom_rank = get_bloom_rank(user_id)
                 rankup_embed = discord.Embed(
                     title="🌱 Rank Up!",
-                    description=f"{interaction.user.mention} advanced to **PLANTER I**!",
+                    description=f"{interaction.user.mention} advanced to **PLANTER I** and is ranked **PINE I**!",
                     color=discord.Color.gold(),
                 )
             else:
@@ -2436,7 +2465,16 @@ async def gather(interaction: discord.Interaction):
             multiplier_percent = (gather_result['bloom_multiplier'] - 1.0) * 100
             embed.add_field(
                 name="🌳 Tree Ring Boost", 
-                value=f"+{multiplier_percent:.1f}% ({gather_result['bloom_multiplier']:.2f}x) - **+${gather_result['extra_money_from_bloom']:.2f}**", 
+                value=f"+{multiplier_percent:.1f}% - **+${gather_result['extra_money_from_bloom']:.2f}**", 
+                inline=False
+            )
+        
+        # Show daily bonus if applicable (1% per consecutive day)
+        if gather_result.get('extra_money_from_daily', 0) > 0:
+            daily_bonus_percent = (gather_result['daily_bonus_multiplier'] - 1.0) * 100
+            embed.add_field(
+                name="💧 Water Streak Boost",
+                value=f"+{daily_bonus_percent:.1f}% - **+${gather_result['extra_money_from_daily']:.2f}**",
                 inline=False
             )
         
@@ -2471,6 +2509,115 @@ async def gather(interaction: discord.Interaction):
     except Exception as e:
         print(f"Error in gather command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+#/water command - daily watering system
+@bot.tree.command(name="water", description="Water your plants daily for bonus rewards! (Resets at midnight)")
+async def water(interaction: discord.Interaction):
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        
+        user_id = interaction.user.id
+        current_time = time.time()
+        last_water_time = get_user_last_water_time(user_id)
+        
+        # Convert to EST (UTC-5)
+        EST_OFFSET = datetime.timedelta(hours=-5)
+        now_utc = datetime.datetime.utcnow()
+        now_est = now_utc + EST_OFFSET
+        
+        # Get next midnight in EST
+        next_midnight_est = (now_est + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        time_until_midnight = (next_midnight_est - now_est).total_seconds()
+        
+        # Check if user has already watered today
+        if last_water_time > 0:
+            # Check if last water was today (same calendar day in EST)
+            last_water_utc = datetime.datetime.utcfromtimestamp(last_water_time)
+            last_water_est = last_water_utc + EST_OFFSET
+            last_water_date = last_water_est.date()
+            current_date = now_est.date()
+            
+            if last_water_date == current_date:
+                # Already watered today, show time until midnight
+                time_left = int(time_until_midnight)
+                
+                # Format time remaining based on duration
+                if time_left < 60:
+                    # Less than 1 minute - show seconds only
+                    time_msg = f"{time_left} second{'s' if time_left != 1 else ''}"
+                elif time_left < 3600:
+                    # Less than 1 hour - show minutes and seconds
+                    minutes_left = time_left // 60
+                    seconds_left = time_left % 60
+                    time_msg = f"{minutes_left} minute{'s' if minutes_left != 1 else ''} and {seconds_left} second{'s' if seconds_left != 1 else ''}"
+                else:
+                    # 1 hour or more - show hours, minutes, and seconds
+                    hours_left = time_left // 3600
+                    minutes_left = (time_left % 3600) // 60
+                    seconds_left = time_left % 60
+                    time_msg = f"{hours_left} hour{'s' if hours_left != 1 else ''}, {minutes_left} minute{'s' if minutes_left != 1 else ''}, and {seconds_left} second{'s' if seconds_left != 1 else ''}"
+                
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"💧 {interaction.user.mention}, you need to wait **{time_msg}** before watering your plants again!", ephemeral=False)
+                return
+        
+        # Calculate consecutive days
+        consecutive_days = get_user_consecutive_water_days(user_id)
+        
+        # Check if streak should be reset (last water was not yesterday)
+        if last_water_time > 0:
+            last_water_utc = datetime.datetime.utcfromtimestamp(last_water_time)
+            last_water_est = last_water_utc + EST_OFFSET
+            last_water_date = last_water_est.date()
+            yesterday_date = (now_est - datetime.timedelta(days=1)).date()
+            
+            # If last water was not yesterday, reset streak
+            if last_water_date != yesterday_date:
+                consecutive_days = 0  # Reset streak
+        else:
+            consecutive_days = 0  # First time watering
+        
+        # Increment consecutive days
+        consecutive_days += 1
+        set_user_consecutive_water_days(user_id, consecutive_days)
+        
+        # Update last water time and increment water count
+        update_user_last_water_time(user_id, current_time)
+        increment_user_water_count(user_id)
+        
+        # Calculate money reward: $7,500 per day (day 1 = $7.5k, day 2 = $15k, etc.)
+        money_reward = consecutive_days * 7500.0
+        money_reward = normalize_money(money_reward)
+        
+        # Update user balance with reward
+        current_balance = get_user_balance(user_id)
+        new_balance = normalize_money(current_balance + money_reward)
+        update_user_balance(user_id, new_balance)
+        
+        # Get water count and multiplier
+        water_count = get_user_water_count(user_id)
+        water_multiplier = get_water_multiplier(user_id)
+        
+        # Award 10 Tree Rings on 5th consecutive day
+        tree_rings_awarded = 0
+        if consecutive_days == 5:
+            increment_tree_rings(user_id, 10)
+            tree_rings_awarded = 10
+        
+        # Build the message
+        message = f"{interaction.user.mention}, you've been rewarded with **${money_reward:,.2f}**. Your streak is **{consecutive_days}**! (**{water_multiplier:.2f}x**)"
+        
+        # Add Tree Rings message if it's the 5th day
+        if tree_rings_awarded > 0:
+            message += f' "You\'ve been awarded {tree_rings_awarded} Tree Rings!"'
+        
+        await safe_interaction_response(interaction, interaction.followup.send, message, ephemeral=False)
+    except Exception as e:
+        print(f"Error in water command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
 
 #/harvest command, basically /castnet
 @bot.tree.command(name="harvest", description="Harvest a bunch of plants at once!")
@@ -2568,6 +2715,9 @@ async def harvest(interaction: discord.Interaction):
         # Get bloom multiplier
         bloom_multiplier = get_bloom_multiplier(user_id)
         
+        # Get water multiplier (calculate once before loop)
+        water_multiplier = get_water_multiplier(user_id)
+
         # Get total items before harvest to check for Tree Ring milestones
         plants_before_harvest = get_user_total_items(user_id)
         
@@ -2575,6 +2725,7 @@ async def harvest(interaction: discord.Interaction):
         gathered_items = []
         total_value = 0.0
         total_base_value = 0.0
+        total_value_before_daily = 0.0
         current_balance = get_user_balance(user_id)
 
         for i in range(total_items_to_harvest):
@@ -2665,11 +2816,20 @@ async def harvest(interaction: discord.Interaction):
             
             # Apply bloom multiplier
             final_value *= bloom_multiplier
+            
+            # Apply water multiplier (1.01x per water, cumulative)
+            final_value *= water_multiplier
+            
+            # Apply daily bonus multiplier (1% per consecutive day)
+            daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
+            value_before_daily = final_value
+            final_value *= daily_bonus_multiplier
 
             #update new balance
             current_balance += final_value
             total_value += final_value
             total_base_value += base_value_before_bloom
+            total_value_before_daily += value_before_daily
 
             #store items and stats
             add_user_item(user_id, name)
@@ -2714,9 +2874,17 @@ async def harvest(interaction: discord.Interaction):
         if new_role:
             # Special message for Planter I advancement (when old_role is None)
             if new_role == "PLANTER I" and old_role is None:
+                # Assign PINE I bloom rank role
+                try:
+                    await assign_bloom_rank_role(interaction.user, interaction.guild)
+                except Exception as e:
+                    print(f"Error assigning bloom rank role to user {user_id}: {e}")
+                
+                # Get the bloom rank to display
+                bloom_rank = get_bloom_rank(user_id)
                 rankup_embed = discord.Embed(
                     title="🌾 Rank Up!",
-                    description=f"{interaction.user.mention} advanced to **PLANTER I**!",
+                    description=f"{interaction.user.mention} advanced to **PLANTER I** and is ranked **PINE I**!",
                     color=discord.Color.gold(),
                 )
             else:
@@ -2753,13 +2921,26 @@ async def harvest(interaction: discord.Interaction):
         
         # Show bloom multiplier if applicable (only after first bloom)
         bloom_count = get_user_bloom_count(user_id)
-        extra_money_from_bloom = total_value - total_base_value
+        # Calculate extra money from bloom correctly: base * (bloom_multiplier - 1) * water_multiplier
+        # This accounts for water multiplier being applied after bloom
+        extra_money_from_bloom = total_base_value * (bloom_multiplier - 1.0) * water_multiplier
         if bloom_count > 0 and extra_money_from_bloom > 0:
             tree_rings = get_user_tree_rings(user_id)
             multiplier_percent = (bloom_multiplier - 1.0) * 100
             embed.add_field(
                 name="🌳 Tree Ring Boost", 
-                value=f"+{multiplier_percent:.1f}% **+(${extra_money_from_bloom:.2f})**", 
+                value=f"+{multiplier_percent:.1f}% - **+${extra_money_from_bloom:.2f}**", 
+                inline=False
+            )
+        
+        # Show daily bonus if applicable (1% per consecutive day)
+        daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
+        extra_money_from_daily = total_value_before_daily * (daily_bonus_multiplier - 1.0)
+        if extra_money_from_daily > 0:
+            daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
+            embed.add_field(
+                name="💧 Water Streak Boost",
+                value=f"+{daily_bonus_percent:.1f}% - **+${extra_money_from_daily:.2f}**",
                 inline=False
             )
         
@@ -2913,8 +3094,15 @@ async def userstats(interaction: discord.Interaction):
         # Add Bloom Rank and Tree Rings
         bloom_rank = get_bloom_rank(user_id)
         tree_rings = get_user_tree_rings(user_id)
+        bloom_multiplier = get_bloom_multiplier(user_id)
         embed.add_field(name="🌲 Bloom Rank", value=f"**{bloom_rank}**", inline=True)
-        embed.add_field(name="🌳 Tree Rings", value=f"**{tree_rings}**", inline=True)
+        embed.add_field(name="🌳 Tree Rings", value=f"**{tree_rings}** ({bloom_multiplier:.2f}x)", inline=True)
+        
+        # Add Water Streak
+        water_streak = get_user_consecutive_water_days(user_id)
+        daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
+        day_text = "day" if water_streak == 1 else "days"
+        embed.add_field(name="💧 Water Streak", value=f"**{water_streak}** {day_text} ({daily_bonus_multiplier:.2f}x)", inline=True)
         
         if items_needed == 0:
             embed.add_field(name="🏆 Rank Status", value=f"**{next_rank}** - You've reached the maximum rank!", inline=False)
@@ -3200,7 +3388,7 @@ class HarvestUpgradeView(discord.ui.View):
             car_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_car} (+{current_extra} extra items)"
         
         embed.add_field(
-            name="🚗 PATH 1: CAR",
+            name="🚗 PATH 1: VEHICLE",
             value=car_text,
             inline=False
         )
@@ -3317,10 +3505,10 @@ class HarvestUpgradeView(discord.ui.View):
         
         return embed
     
-    @discord.ui.button(label="🚗 Buy Car", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="🚗 Buy Vehicle", style=discord.ButtonStyle.primary, row=0)
     async def buy_car(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            await self.handle_purchase(interaction, "car", HARVEST_CAR_UPGRADES, HARVEST_CAR_PRICES, "Car")
+            await self.handle_purchase(interaction, "car", HARVEST_CAR_UPGRADES, HARVEST_CAR_PRICES, "Vehicle")
         except Exception as e:
             print(f"Error in buy_car: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
@@ -4197,15 +4385,20 @@ async def wipe(interaction: discord.Interaction, type: str):
                     try:
                         await assign_gatherer_role(member, guild)
                     except Exception as e:
-                        print(f"Error updating role for user {member.id}: {e}")
+                        print(f"Error updating gatherer role for user {member.id}: {e}")
+                    # Update their Bloom rank to PINE I
+                    try:
+                        await assign_bloom_rank_role(member, guild)
+                    except Exception as e:
+                        print(f"Error updating bloom rank role for user {member.id}: {e}")
                     wiped_count += 1
             
             embed = discord.Embed(
                 title="✅ All Data Wiped",
-                description=f"Reset everything for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank.\n\n**Market has been reset** - all shares returned, making all stocks available at max capacity.",
+                description=f"Reset everything for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank and **PINE I** Bloom rank.\n\n**Market has been reset** - all shares returned, making all stocks available at max capacity.",
                 color=discord.Color.red()
             )
-            embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Stock holdings (shares)\n• Crypto holdings (portfolio)\n• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)", inline=False)
+            embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Stock holdings (shares)\n• Crypto holdings (portfolio)\n• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)\n• Bloom rank (set to PINE I)", inline=False)
         
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
         print(f"Admin {interaction.user.name} wiped {type} data for {wiped_count} users")
@@ -4585,7 +4778,7 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
         leaderboard_text = "No data available"
     
     embed.add_field(name="Top 10 Rankings", value=leaderboard_text, inline=False)
-    embed.set_footer(text=f"Updates every minute | Total: {len(leaderboard_data)} users")
+    embed.set_footer(text=f"Total: {len(leaderboard_data)} users")
     embed.timestamp = discord.utils.utcnow()
     
     # Try to edit existing message, or create new one
@@ -4600,14 +4793,47 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
             # Try to edit existing message
             try:
                 message = await leaderboard_channel.fetch_message(message_id)
-                await message.edit(embed=embed)
-                return
+                
+                # Check if message is older than 1 hour (Discord rate limit for old messages)
+                message_age = (discord.utils.utcnow() - message.created_at).total_seconds()
+                if message_age > 3600:  # 1 hour in seconds
+                    # Message is too old, create a new one instead
+                    logging.info(f"Leaderboard message for {leaderboard_type} in {guild.name} is older than 1 hour, creating new message")
+                    message_id = None
+                else:
+                    # Message is recent enough, try to edit
+                    try:
+                        await message.edit(embed=embed)
+                        return
+                    except discord.HTTPException as e:
+                        # Check if it's a rate limit error
+                        if e.status == 429:
+                            # Rate limited, wait and retry once
+                            retry_after = e.retry_after if hasattr(e, 'retry_after') else 1.0
+                            await asyncio.sleep(retry_after)
+                            try:
+                                await message.edit(embed=embed)
+                                return
+                            except:
+                                # Still failed, create new message
+                                message_id = None
+                        elif e.code == 30046:  # Maximum edits to old messages reached
+                            logging.warning(f"Maximum edits reached for old leaderboard message in {guild.name}, creating new one")
+                            message_id = None
+                        else:
+                            # Other error, log and try to find existing or create new
+                            logging.warning(f"Error editing {leaderboard_type} leaderboard in {guild.name}: {e}")
+                            message_id = None
             except discord.NotFound:
                 # Message was deleted, search for existing one
                 message_id = None
             except discord.HTTPException as e:
                 # Other error (permissions, etc.), search for existing one
-                print(f"Error editing {leaderboard_type} leaderboard in {guild.name}: {e}")
+                if e.status == 429:
+                    # Rate limited, skip this update
+                    logging.warning(f"Rate limited while fetching leaderboard message in {guild.name}, skipping update")
+                    return
+                logging.warning(f"Error fetching {leaderboard_type} leaderboard message in {guild.name}: {e}")
                 message_id = None
         
         # If no valid message_id, search for existing leaderboard message in channel
@@ -4620,19 +4846,49 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
                         # Check if this is the leaderboard message we're looking for
                         if (leaderboard_type == "plants" and "🌱 PLANTS" in embed_title) or \
                            (leaderboard_type == "money" and "💰 MONEY" in embed_title):
+                            # Check message age
+                            message_age = (discord.utils.utcnow() - message.created_at).total_seconds()
+                            if message_age > 3600:
+                                # Too old, skip and create new
+                                continue
+                            
                             # Found existing message, update it
                             message_id = message.id
                             leaderboard_messages[guild_id][leaderboard_type] = message_id
-                            await message.edit(embed=embed)
-                            return
+                            try:
+                                await message.edit(embed=embed)
+                                return
+                            except discord.HTTPException as e:
+                                if e.status == 429:
+                                    # Rate limited, skip
+                                    logging.warning(f"Rate limited while editing leaderboard in {guild.name}, skipping update")
+                                    return
+                                elif e.code == 30046:
+                                    # Max edits reached, create new
+                                    message_id = None
+                                    break
+                                else:
+                                    # Other error, try next message or create new
+                                    continue
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    logging.warning(f"Rate limited while searching for leaderboard message in {guild.name}, skipping update")
+                    return
+                logging.warning(f"Error searching for existing leaderboard message in {guild.name}: {e}")
             except Exception as e:
-                print(f"Error searching for existing leaderboard message: {e}")
+                logging.error(f"Unexpected error searching for leaderboard message in {guild.name}: {e}", exc_info=True)
         
         # Create new message only if we couldn't find or edit existing one
-        message = await leaderboard_channel.send(embed=embed)
-        leaderboard_messages[guild_id][leaderboard_type] = message.id
+        try:
+            message = await leaderboard_channel.send(embed=embed)
+            leaderboard_messages[guild_id][leaderboard_type] = message.id
+        except discord.HTTPException as e:
+            if e.status == 429:
+                logging.warning(f"Rate limited while creating new leaderboard message in {guild.name}, skipping update")
+            else:
+                logging.error(f"Error creating new {leaderboard_type} leaderboard message in {guild.name}: {e}")
     except Exception as e:
-        print(f"Error updating {leaderboard_type} leaderboard in {guild.name}: {e}")
+        logging.error(f"Unexpected error updating {leaderboard_type} leaderboard in {guild.name}: {e}", exc_info=True)
 
 async def update_all_leaderboards():
     """Background task to update all leaderboards every minute."""
@@ -4645,18 +4901,37 @@ async def update_all_leaderboards():
         try:
             # Update leaderboards for all guilds the bot is in
             for guild in bot.guilds:
-                await update_leaderboard_message(guild, "plants")
-                await asyncio.sleep(1)  # Small delay between updates
-                await update_leaderboard_message(guild, "money")
+                try:
+                    await update_leaderboard_message(guild, "plants")
+                    await asyncio.sleep(2)  # Delay between updates to avoid rate limits
+                    await update_leaderboard_message(guild, "money")
+                    await asyncio.sleep(2)  # Delay between updates
+                except Exception as e:
+                    logging.error(f"Error updating leaderboards for guild {guild.name}: {e}", exc_info=True)
+                # Delay between guilds to prevent rate limiting
                 await asyncio.sleep(1)
         except Exception as e:
-            print(f"Error in leaderboard update task: {e}")
+            logging.error(f"Error in leaderboard update task: {e}", exc_info=True)
         
         # Wait 60 seconds before next update
         await asyncio.sleep(60)
 
 
 # STALK MARKET - Stock Market System
+# Mapping from fictional stock symbols to real-world stock tickers
+REAL_STOCK_MAPPING = {
+    "M": "M",        # Maizy's -> Macy's
+    "MEDO": "META",  # Meadow -> Meta Platforms
+    "IVM": "IBM",    # IVM -> IBM
+    "CSGO": "CSCO",  # CisGrow -> Cisco
+    "SWNY": "SONY",  # Sowny -> Sony Group
+    "GM": "GM",      # General Mowers -> General Motors
+    "RTH": "RTX",    # Raytheorn -> Raytheon
+    "WFG": "WFC",    # Wells Fargrow -> Wells Fargo
+    "AAPL": "AAPL",  # Apple -> Apple
+    "SPRT": "SPOT"   # Sproutify -> Spotify
+}
+
 # Stock ticker definitions
 STOCK_TICKERS = [
     {"name": "Maizy's", "symbol": "M", "base_price": 50.0, "max_shares": 10000},
@@ -4671,53 +4946,160 @@ STOCK_TICKERS = [
     {"name": "Sproutify", "symbol": "SPRT", "base_price": 55.0, "max_shares": 16000},
 ]
 
-# Stock data storage: {guild_id: {ticker_symbol: {"price": float, "price_history": [float], "available_shares": int}}}
+# Stock data storage: {guild_id: {ticker_symbol: {"price": float, "price_history": [float], "available_shares": int, "real_price": float, "shares_outstanding": int, "market_cap": float, "news_multiplier": float, "last_api_fetch": float}}}
 stock_data = {}
 
-def initialize_stocks(guild_id: int):
-    """Initialize stock data for a guild if it doesn't exist."""
+def fetch_real_stock_data(real_ticker: str) -> dict:
+    """Fetch real-world stock data from yfinance API.
+    
+    Args:
+        real_ticker: Real stock ticker symbol (e.g., "AAPL", "META")
+    
+    Returns:
+        dict with keys: price, shares_outstanding, market_cap, company_name
+        Returns None if API call fails
+    """
+    try:
+        ticker = yf.Ticker(real_ticker)
+        info = ticker.info
+        
+        # Extract data from yfinance info
+        price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose')
+        shares_outstanding = info.get('sharesOutstanding') or info.get('impliedSharesOutstanding')
+        market_cap = info.get('marketCap')
+        company_name = info.get('longName') or info.get('shortName') or real_ticker
+        
+        if price is None or price <= 0:
+            logging.warning(f"Invalid price for {real_ticker}: {price}")
+            return None
+        
+        if shares_outstanding is None or shares_outstanding <= 0:
+            logging.warning(f"Invalid shares outstanding for {real_ticker}: {shares_outstanding}")
+            return None
+        
+        return {
+            "price": float(price),
+            "shares_outstanding": int(shares_outstanding),
+            "market_cap": float(market_cap) if market_cap else None,
+            "company_name": str(company_name)
+        }
+    except Exception as e:
+        logging.error(f"Error fetching stock data for {real_ticker}: {e}", exc_info=True)
+        return None
+
+async def initialize_stocks(guild_id: int):
+    """Initialize stock data for a guild if it doesn't exist, fetching real stock data."""
     if guild_id not in stock_data:
         stock_data[guild_id] = {}
+        current_time = time.time()
+        
         for ticker in STOCK_TICKERS:
-            stock_data[guild_id][ticker["symbol"]] = {
+            symbol = ticker["symbol"]
+            real_ticker = REAL_STOCK_MAPPING.get(symbol)
+            
+            # Initialize with base values
+            stock_data[guild_id][symbol] = {
                 "price": ticker["base_price"],
-                "price_history": [ticker["base_price"]] * 6,  # Keep last 6 minutes (5 + current)
-                "available_shares": 0  # Start with 0 available shares
+                "price_history": [ticker["base_price"]] * 6,
+                "real_price": ticker["base_price"],
+                "shares_outstanding": ticker.get("max_shares", 0),
+                "market_cap": None,
+                "news_multiplier": 1.0,
+                "last_api_fetch": 0,
+                "available_shares": 0
             }
+            
+            # Try to fetch real data immediately
+            if real_ticker:
+                real_data = await asyncio.to_thread(fetch_real_stock_data, real_ticker)
+                if real_data:
+                    stock_data[guild_id][symbol]["real_price"] = real_data["price"]
+                    stock_data[guild_id][symbol]["shares_outstanding"] = real_data["shares_outstanding"]
+                    stock_data[guild_id][symbol]["market_cap"] = real_data.get("market_cap")
+                    stock_data[guild_id][symbol]["price"] = real_data["price"]  # Initial price is real price
+                    stock_data[guild_id][symbol]["price_history"] = [real_data["price"]] * 6
+                    stock_data[guild_id][symbol]["last_api_fetch"] = current_time
 
-def update_stock_prices(guild_id: int):
-    """Update stock prices with random changes."""
+async def update_stock_prices(guild_id: int):
+    """Update stock prices with real-world data from API, then apply market news multipliers."""
     if guild_id not in stock_data:
-        initialize_stocks(guild_id)
+        await initialize_stocks(guild_id)
+    
+    current_time = time.time()
+    cache_duration = 120  # Cache for 120 seconds (2 minutes)
     
     for ticker in STOCK_TICKERS:
         symbol = ticker["symbol"]
+        real_ticker = REAL_STOCK_MAPPING.get(symbol)
+        
+        if not real_ticker:
+            logging.warning(f"No real ticker mapping found for {symbol}")
+            continue
+        
+        # Initialize stock data structure if needed
         if symbol not in stock_data[guild_id]:
             stock_data[guild_id][symbol] = {
                 "price": ticker["base_price"],
                 "price_history": [ticker["base_price"]] * 6,
-                "available_shares": 0  # Start with 0 available shares
+                "real_price": ticker["base_price"],
+                "shares_outstanding": ticker.get("max_shares", 0),
+                "market_cap": None,
+                "news_multiplier": 1.0,
+                "last_api_fetch": 0,
+                "available_shares": 0
             }
         
-        current_price = stock_data[guild_id][symbol]["price"]
+        stock_info = stock_data[guild_id][symbol]
         
-        # Random change: 1%, 2%, or 3% (equal chance for each)
-        change_percent = random.choice([0.01, 0.02, 0.03])
+        # Check if we need to fetch new data (cache expired or missing)
+        last_fetch = stock_info.get("last_api_fetch", 0)
+        needs_fetch = (current_time - last_fetch) > cache_duration or stock_info.get("real_price") is None
         
-        # Random direction: increase or decrease (50/50)
-        direction = random.choice([1, -1])
+        if needs_fetch:
+            # Fetch real stock data (run in thread since yfinance is synchronous)
+            # Add small delay between API calls to avoid rate limiting
+            try:
+                real_data = await asyncio.to_thread(fetch_real_stock_data, real_ticker)
+                
+                if real_data:
+                    # Update real price and market data
+                    stock_info["real_price"] = real_data["price"]
+                    stock_info["shares_outstanding"] = real_data["shares_outstanding"]
+                    stock_info["market_cap"] = real_data.get("market_cap")
+                    stock_info["last_api_fetch"] = current_time
+                    logging.info(f"Fetched real stock data for {symbol} ({real_ticker}): price=${real_data['price']:.2f}, shares={real_data['shares_outstanding']:,}")
+                else:
+                    # API failed, use fallback
+                    if stock_info.get("real_price") is None:
+                        stock_info["real_price"] = ticker["base_price"]
+                        stock_info["shares_outstanding"] = ticker.get("max_shares", 0)
+                    logging.warning(f"Failed to fetch stock data for {symbol} ({real_ticker}), using cached/fallback data")
+            except Exception as e:
+                # Handle any unexpected errors during API fetch
+                logging.error(f"Unexpected error fetching stock data for {symbol} ({real_ticker}): {e}", exc_info=True)
+                if stock_info.get("real_price") is None:
+                    stock_info["real_price"] = ticker["base_price"]
+                    stock_info["shares_outstanding"] = ticker.get("max_shares", 0)
+            
+            # Small delay between API calls to avoid rate limiting (0.1 second)
+            await asyncio.sleep(0.1)
         
-        # Calculate new price
-        new_price = current_price * (1 + (direction * change_percent))
+        # Get current news multiplier (default 1.0)
+        news_multiplier = stock_info.get("news_multiplier", 1.0)
+        
+        # Calculate final price: real_price * news_multiplier
+        real_price = stock_info.get("real_price", ticker["base_price"])
+        final_price = real_price * news_multiplier
         
         # Update price
-        stock_data[guild_id][symbol]["price"] = new_price
+        stock_info["price"] = final_price
         
         # Update price history (keep last 6 minutes)
-        price_history = stock_data[guild_id][symbol]["price_history"]
-        price_history.append(new_price)
+        price_history = stock_info.get("price_history", [ticker["base_price"]] * 6)
+        price_history.append(final_price)
         if len(price_history) > 6:
             price_history.pop(0)
+        stock_info["price_history"] = price_history
 
 def get_5min_change(guild_id: int, symbol: str) -> float:
     """Get the percent change over the last 5 minutes."""
@@ -4749,14 +5131,19 @@ def get_change_emoji(change_5min: float) -> str:
         return "🟢"
 
 def calculate_available_shares(guild_id: int, symbol: str) -> int:
-    """Calculate available shares by summing all user holdings and subtracting from max."""
+    """Calculate available shares by summing all user holdings and subtracting from real shares outstanding."""
     from database import _get_users_collection
     
     ticker_info = next((t for t in STOCK_TICKERS if t["symbol"] == symbol), None)
     if not ticker_info:
         return 0
     
-    max_shares = ticker_info["max_shares"]
+    # Get shares outstanding from stock_data (from API) or fallback to max_shares
+    shares_outstanding = ticker_info.get("max_shares", 0)  # Fallback
+    if guild_id in stock_data and symbol in stock_data[guild_id]:
+        api_shares = stock_data[guild_id][symbol].get("shares_outstanding")
+        if api_shares and api_shares > 0:
+            shares_outstanding = api_shares
     
     # Get all users' stock holdings for this symbol
     users = _get_users_collection()
@@ -4770,7 +5157,7 @@ def calculate_available_shares(guild_id: int, symbol: str) -> int:
         if user_shares > 0:
             total_owned += user_shares
     
-    available = max_shares - total_owned
+    available = shares_outstanding - total_owned
     return max(0, available)  # Ensure it doesn't go negative
 
 async def update_marketboard_message(guild: discord.Guild):
@@ -4782,10 +5169,10 @@ async def update_marketboard_message(guild: discord.Guild):
         return  # Channel doesn't exist, skip
     
     # Initialize stocks for this guild
-    initialize_stocks(guild.id)
+    await initialize_stocks(guild.id)
     
     # Update stock prices
-    update_stock_prices(guild.id)
+    await update_stock_prices(guild.id)
     
     # Create embed
     embed = discord.Embed(
@@ -4802,7 +5189,9 @@ async def update_marketboard_message(guild: discord.Guild):
         stock_info = stock_data[guild.id][symbol]
         current_price = stock_info["price"]
         base_price = ticker["base_price"]
-        max_shares = ticker["max_shares"]
+        
+        # Get shares outstanding from API data or fallback to max_shares
+        shares_outstanding = stock_info.get("shares_outstanding") or ticker.get("max_shares", 0)
         
         # Calculate available shares from database
         available_shares = calculate_available_shares(guild.id, symbol)
@@ -4825,8 +5214,8 @@ async def update_marketboard_message(guild: discord.Guild):
         # Format price
         price_str = f"${current_price:.2f}"
         
-        # Format shares as available/max
-        shares_str = f"{available_shares:,}/{max_shares:,}"
+        # Format shares as available/max (using real shares outstanding)
+        shares_str = f"{available_shares:,}/{shares_outstanding:,}"
         
         # Create stock line
         stock_line = f"**{ticker['name']} ({symbol})**\n"
@@ -4851,14 +5240,47 @@ async def update_marketboard_message(guild: discord.Guild):
             # Try to edit existing message
             try:
                 message = await market_channel.fetch_message(message_id)
-                await message.edit(embed=embed)
-                return
+                
+                # Check if message is older than 1 hour (Discord rate limit for old messages)
+                message_age = (discord.utils.utcnow() - message.created_at).total_seconds()
+                if message_age > 3600:  # 1 hour in seconds
+                    # Message is too old, create a new one instead
+                    logging.info(f"Marketboard message in {guild.name} is older than 1 hour, creating new message")
+                    message_id = None
+                else:
+                    # Message is recent enough, try to edit
+                    try:
+                        await message.edit(embed=embed)
+                        return
+                    except discord.HTTPException as e:
+                        # Check if it's a rate limit error
+                        if e.status == 429:
+                            # Rate limited, wait and retry once
+                            retry_after = e.retry_after if hasattr(e, 'retry_after') else 1.0
+                            await asyncio.sleep(retry_after)
+                            try:
+                                await message.edit(embed=embed)
+                                return
+                            except:
+                                # Still failed, create new message
+                                message_id = None
+                        elif e.code == 30046:  # Maximum edits to old messages reached
+                            logging.warning(f"Maximum edits reached for old marketboard message in {guild.name}, creating new one")
+                            message_id = None
+                        else:
+                            # Other error, log and try to find existing or create new
+                            logging.warning(f"Error editing marketboard in {guild.name}: {e}")
+                            message_id = None
             except discord.NotFound:
                 # Message was deleted, search for existing one
                 message_id = None
             except discord.HTTPException as e:
                 # Other error (permissions, etc.), search for existing one
-                print(f"Error editing marketboard in {guild.name}: {e}")
+                if e.status == 429:
+                    # Rate limited, skip this update
+                    logging.warning(f"Rate limited while fetching marketboard message in {guild.name}, skipping update")
+                    return
+                logging.warning(f"Error fetching marketboard message in {guild.name}: {e}")
                 message_id = None
         
         # If no valid message_id, search for existing marketboard message in channel
@@ -4870,22 +5292,49 @@ async def update_marketboard_message(guild: discord.Guild):
                         embed_title = message.embeds[0].title if message.embeds[0].title else ""
                         # Check if this is the marketboard message
                         if "GROW JONES INDUSTRIAL AVERAGE" in embed_title:
+                            # Check message age
+                            message_age = (discord.utils.utcnow() - message.created_at).total_seconds()
+                            if message_age > 3600:
+                                # Too old, skip and create new
+                                continue
+                            
                             # Found existing message, update it
                             message_id = message.id
                             leaderboard_messages[guild_id]["marketboard"] = message_id
-                            await message.edit(embed=embed)
-                            return
+                            try:
+                                await message.edit(embed=embed)
+                                return
+                            except discord.HTTPException as e:
+                                if e.status == 429:
+                                    # Rate limited, skip
+                                    logging.warning(f"Rate limited while editing marketboard in {guild.name}, skipping update")
+                                    return
+                                elif e.code == 30046:
+                                    # Max edits reached, create new
+                                    message_id = None
+                                    break
+                                else:
+                                    # Other error, try next message or create new
+                                    continue
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    logging.warning(f"Rate limited while searching for marketboard message in {guild.name}, skipping update")
+                    return
+                logging.warning(f"Error searching for existing marketboard message in {guild.name}: {e}")
             except Exception as e:
-                print(f"Error searching for existing marketboard message: {e}")
+                logging.error(f"Unexpected error searching for marketboard message in {guild.name}: {e}", exc_info=True)
         
         # Create new message only if we couldn't find or edit existing one
-        message = await market_channel.send(embed=embed)
-        if "marketboard" not in leaderboard_messages[guild_id]:
+        try:
+            message = await market_channel.send(embed=embed)
             leaderboard_messages[guild_id]["marketboard"] = message.id
-        else:
-            leaderboard_messages[guild_id]["marketboard"] = message.id
+        except discord.HTTPException as e:
+            if e.status == 429:
+                logging.warning(f"Rate limited while creating new marketboard message in {guild.name}, skipping update")
+            else:
+                logging.error(f"Error creating new marketboard message in {guild.name}: {e}")
     except Exception as e:
-        print(f"Error updating marketboard in {guild.name}: {e}")
+        logging.error(f"Unexpected error updating marketboard in {guild.name}: {e}", exc_info=True)
 
 async def update_all_marketboards():
     """Background task to update all marketboards every minute."""
@@ -4898,16 +5347,20 @@ async def update_all_marketboards():
         try:
             # Update marketboards for all guilds the bot is in
             for guild in bot.guilds:
-                await update_marketboard_message(guild)
-                # Update leaderboards after stock prices change
-                await update_leaderboard_message(guild, "plants")
-                await asyncio.sleep(1)  # Small delay between updates
-                await update_leaderboard_message(guild, "money")
-                await asyncio.sleep(1)  # Small delay between updates
+                try:
+                    await update_marketboard_message(guild)
+                    await asyncio.sleep(2)  # Delay after marketboard update
+                    # Update leaderboards after stock prices change
+                    await update_leaderboard_message(guild, "plants")
+                    await asyncio.sleep(2)  # Delay between updates to avoid rate limits
+                    await update_leaderboard_message(guild, "money")
+                    await asyncio.sleep(2)  # Delay between updates
+                except Exception as e:
+                    logging.error(f"Error updating marketboard/leaderboards for guild {guild.name}: {e}", exc_info=True)
+                # Delay between guilds to prevent rate limiting
+                await asyncio.sleep(1)
         except Exception as e:
-            import traceback
-            print(f"Error in marketboard update task: {e}")
-            traceback.print_exc()
+            logging.error(f"Error in marketboard update task: {e}", exc_info=True)
         
         # Wait 60 seconds before next update
         await asyncio.sleep(60)
@@ -4958,7 +5411,7 @@ async def send_market_news(guild: discord.Guild):
             return
         
         # Initialize stocks for this guild if needed
-        initialize_stocks(guild.id)
+        await initialize_stocks(guild.id)
         
         # Pick a random company
         ticker = random.choice(STOCK_TICKERS)
@@ -4982,19 +5435,47 @@ async def send_market_news(guild: discord.Guild):
             emoji = "📉"
             price_multiplier = 1 - price_change_percent  # Decrease price
         
-        # Apply price change to stock
+        # Apply price change to stock using news multiplier system
         if symbol in stock_data[guild.id]:
-            current_price = stock_data[guild.id][symbol]["price"]
-            new_price = current_price * price_multiplier
+            stock_info = stock_data[guild.id][symbol]
             
-            # Update price
-            stock_data[guild.id][symbol]["price"] = new_price
+            # Ensure we have real_price (fetch if needed)
+            real_price = stock_info.get("real_price")
+            if real_price is None or real_price <= 0:
+                # Try to fetch real price if missing
+                real_ticker = REAL_STOCK_MAPPING.get(symbol)
+                if real_ticker:
+                    real_data = await asyncio.to_thread(fetch_real_stock_data, real_ticker)
+                    if real_data:
+                        real_price = real_data["price"]
+                        stock_info["real_price"] = real_price
+                        stock_info["shares_outstanding"] = real_data["shares_outstanding"]
+                        stock_info["market_cap"] = real_data.get("market_cap")
+                    else:
+                        # Fallback to base_price if API fails
+                        real_price = ticker["base_price"]
+                        stock_info["real_price"] = real_price
+                else:
+                    real_price = ticker["base_price"]
+                    stock_info["real_price"] = real_price
+            
+            # Get current news multiplier (default 1.0)
+            current_multiplier = stock_info.get("news_multiplier", 1.0)
+            
+            # Apply new news multiplier (cumulative)
+            new_multiplier = current_multiplier * price_multiplier
+            stock_info["news_multiplier"] = new_multiplier
+            
+            # Calculate final price: real_price * news_multiplier
+            final_price = real_price * new_multiplier
+            stock_info["price"] = final_price
             
             # Update price history (keep last 6 minutes)
-            price_history = stock_data[guild.id][symbol]["price_history"]
-            price_history.append(new_price)
+            price_history = stock_info.get("price_history", [real_price] * 6)
+            price_history.append(final_price)
             if len(price_history) > 6:
                 price_history.pop(0)
+            stock_info["price_history"] = price_history
             
             price_change_display = f"{'+' if is_positive else '-'}{price_change_percent * 100:.0f}%"
         else:
@@ -5839,63 +6320,28 @@ class MiningView(discord.ui.View):
         self.session_started = False  # Track if session has been started
         self.total_mines = 0
         self.session_mined = {}  # Track coins mined in this session: {symbol: amount}
-        self.session_value = 0.0  # Total value mined in this session
-        self.session_base_value = 0.0  # Total base value before bloom multiplier
+        self.session_value = 0.0  # Total value mined in this session (base value only)
         self.timed_out = False  # Track if session has timed out
-        self.timeout_task = None  # Background task for checking timeout
+        self.last_embed_update = 0.0  # Track last embed update time for rate limiting
         # Ensure GPU boosts are numbers (convert to float/int if needed)
         self.gpu_percent_boost = float(gpu_percent_boost) if gpu_percent_boost else 0.0  # Total percent increase from GPUs
         self.gpu_seconds_boost = int(gpu_seconds_boost) if gpu_seconds_boost else 0  # Total seconds increase from GPUs
         self.gpus_used = gpus_used if gpus_used else []  # List of GPU names being used
     
-    def start_timeout_checker(self):
-        """Start a background task that updates the timer countdown and handles timeout immediately."""
-        async def check_timeout():
-            max_time = 60 + self.gpu_seconds_boost
-            last_second = -1
-            
-            while not self.timed_out and self.session_started:
-                elapsed_time = time.time() - self.start_time
-                time_remaining = max_time - elapsed_time
-                current_second = int(time_remaining) if time_remaining > 0 else 0
-                
-                # Check if time has expired
-                if time_remaining <= 0 or elapsed_time >= max_time:
-                    # Time has expired - update message immediately
-                    if self.message and not self.timed_out:
-                        await self._handle_timeout()
-                    break
-                
-                # Update embed every second with countdown
-                if self.message and not self.timed_out and current_second != last_second:
-                    try:
-                        await self._update_timer_embed(time_remaining, max_time)
-                        last_second = current_second
-                    except Exception as e:
-                        print(f"Error updating timer embed: {e}")
-                
-                # Sleep 1 second for integer countdown
-                await asyncio.sleep(1.0)
-        
-        self.timeout_task = asyncio.create_task(check_timeout())
-    
-    async def _update_timer_embed(self, time_remaining: float, max_time: int):
-        """Update the embed with the current timer countdown."""
+    async def _update_timer_embed(self, time_remaining: float, max_time: int, force_update: bool = False):
+        """Update the embed with the current timer countdown. Rate limited to avoid spam."""
         if self.timed_out or not self.message:
             return
         
+        # Rate limit embed updates: only update every 0.5 seconds or if forced
+        current_time = time.time()
+        if not force_update and (current_time - self.last_embed_update) < 0.5:
+            return
+        
+        self.last_embed_update = current_time
+        
         # Ensure time_remaining is not negative
         time_remaining = max(0, time_remaining)
-        
-        # Get current data for the embed
-        holdings = get_user_crypto_holdings(self.user_id)
-        prices = get_crypto_prices()
-        total_value = sum(holdings[c["symbol"]] * prices.get(c["symbol"], c["base_price"]) for c in CRYPTO_COINS)
-        
-        # Get bloom multiplier for display
-        bloom_multiplier = get_bloom_multiplier(self.user_id)
-        bloom_count = get_user_bloom_count(self.user_id)
-        extra_value_from_bloom = self.session_value - self.session_base_value
         
         # Create session summary
         session_summary = ""
@@ -5912,30 +6358,27 @@ class MiningView(discord.ui.View):
         description_text = f"Click the button as many times as you can in {max_time} seconds!"
         if self.gpu_percent_boost > 0:
             description_text += f"\n💰 **GPU Boost: +{self.gpu_percent_boost}%**"
-        if bloom_count > 0 and bloom_multiplier > 1.0:
-            multiplier_percent = (bloom_multiplier - 1.0) * 100
-            description_text += f"\n🌳 **Tree Ring Boost: +{multiplier_percent:.1f}%**"
         
-        # Show time remaining in integer seconds
-        description_text += f"\n\n⏰ **Time Remaining: {int(time_remaining)} seconds**"
+        # Show time remaining in integer seconds - BOLD THE SECONDS
+        description_text += f"\n\n⏰ Time Remaining: **{int(time_remaining)}** seconds"
         
         success_embed = discord.Embed(
             title="⛏️ /mine",
             description=description_text,
             color=discord.Color.light_grey()
         )
-        success_embed.add_field(name="This Session", value=f"Total Mines: **{self.total_mines}**\nSession Value: **${self.session_value:.2f}**", inline=True)
-        if bloom_count > 0 and extra_value_from_bloom > 0:
-            success_embed.add_field(name="🌳 Tree Ring Boost", value=f"+${extra_value_from_bloom:.2f} extra value", inline=True)
+        success_embed.add_field(name="This Session", value=f"Total Mines: **{self.total_mines}**", inline=True)
         if gpu_text:
             success_embed.add_field(name="GPUs Active", value=gpu_text, inline=False)
         if session_summary:
             success_embed.add_field(name="Session Mined", value=session_summary.strip(), inline=False)
-        success_embed.add_field(name="Your Total Holdings", value=f"RTC: {holdings['RTC']:.4f}\nTER: {holdings['TER']:.4f}\nCNY: {holdings['CNY']:.4f}", inline=False)
-        success_embed.add_field(name="Total Portfolio Value", value=f"**${total_value:.2f}**", inline=False)
-        success_embed.set_footer(text="Keep clicking! Use /sell to sell your cryptocurrency!")
+        success_embed.set_footer(text="Keep clicking! (Use /sell to sell your cryptocurrency!)")
         
-        await self.message.edit(embed=success_embed, view=self)
+        try:
+            await self.message.edit(embed=success_embed, view=self)
+        except Exception as e:
+            # If edit fails (e.g., message deleted), just log and continue
+            print(f"Error updating timer embed: {e}")
     
     async def _handle_timeout(self):
         """Handle timeout by updating the message with timeout embed."""
@@ -5951,7 +6394,7 @@ class MiningView(discord.ui.View):
         # Create timeout embed
         timeout_embed = discord.Embed(
             title="⏰ Mining Session Expired",
-            description="Time's up! Your mining session has ended.",
+            description="",
             color=discord.Color.orange()
         )
         
@@ -5961,23 +6404,11 @@ class MiningView(discord.ui.View):
             prices = get_crypto_prices()
             total_value = sum(holdings[c["symbol"]] * prices.get(c["symbol"], c["base_price"]) for c in CRYPTO_COINS)
             
-            # Get bloom multiplier for display
-            bloom_multiplier = get_bloom_multiplier(self.user_id)
-            bloom_count = get_user_bloom_count(self.user_id)
-            extra_value_from_bloom = self.session_value - self.session_base_value
-            
             timeout_embed.add_field(
                 name="Session Summary",
-                value=f"Total Mines: **{self.total_mines}**\nSession Value: **${self.session_value:.2f}**",
+                value=f"Total Mines: **{self.total_mines}**\nValue: **${self.session_value:.2f}**",
                 inline=False
             )
-            if bloom_count > 0 and extra_value_from_bloom > 0:
-                multiplier_percent = (bloom_multiplier - 1.0) * 100
-                timeout_embed.add_field(
-                    name="🌳 Tree Ring Boost",
-                    value=f"+{multiplier_percent:.1f}% ({bloom_multiplier:.2f}x) - **+${extra_value_from_bloom:.2f}**",
-                    inline=False
-                )
             
             # Add GPU info if GPUs were used
             if self.gpus_used:
@@ -5992,15 +6423,13 @@ class MiningView(discord.ui.View):
                 timeout_embed.add_field(name="Mined This Session", value=session_summary.strip(), inline=False)
             
             timeout_embed.add_field(
-                name="Your Total Holdings",
+                name="Total Holdings",
                 value=f"RTC: {holdings['RTC']:.4f}\nTER: {holdings['TER']:.4f}\nCNY: {holdings['CNY']:.4f}",
                 inline=False
             )
             timeout_embed.add_field(name="Total Portfolio Value", value=f"**${total_value:.2f}**", inline=False)
         else:
             timeout_embed.description = "Time's up! You didn't mine anything this session."
-        
-        timeout_embed.set_footer(text="Use /mine again after your cooldown expires!")
         
         # Update the message with timeout embed if we have a reference
         if self.message:
@@ -6012,8 +6441,17 @@ class MiningView(discord.ui.View):
     @discord.ui.button(label="MINE!", style=discord.ButtonStyle.success, emoji="⛏️")
     async def mine_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            # Check user authorization first
             if interaction.user.id != self.user_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your mining session!", ephemeral=True)
+                return
+            
+            # DEFER IMMEDIATELY - This is critical to prevent interaction timeouts
+            if not await safe_defer(interaction, ephemeral=False):
+                return
+            
+            # Check if already timed out - do this early
+            if self.timed_out:
                 return
             
             # Start the session on first button click
@@ -6022,129 +6460,103 @@ class MiningView(discord.ui.View):
                 self.start_time = time.time()
                 # Set cooldown when session actually starts
                 update_user_last_mine_time(self.user_id, self.start_time)
-                # Start the timeout checker
-                self.start_timeout_checker()
-                if not await safe_defer(interaction):
-                    return
-                # Update embed to show timer has started
-                await self._update_timer_embed(60 + self.gpu_seconds_boost, 60 + self.gpu_seconds_boost)
+                # Update embed to show timer has started (force update on first click)
+                await self._update_timer_embed(60 + self.gpu_seconds_boost, 60 + self.gpu_seconds_boost, force_update=True)
                 # Continue to mine on this first click
             else:
-                # Check if session has timed out
+                # Check if session has timed out - early check before processing
                 elapsed_time = time.time() - self.start_time
                 max_time = 60 + self.gpu_seconds_boost
-                if elapsed_time >= max_time or self.timed_out:
-                    # Session has expired
-                    self.timed_out = True
-                    for item in self.children:
-                        item.disabled = True
-                    
-                    await safe_interaction_response(interaction, interaction.response.send_message,
-                        "⏰ Your mining session has expired! Use `/mine` again after your cooldown.",
-                        ephemeral=True)
-                    
-                    # Update the message if we have a reference
-                    if self.message:
-                        try:
-                            await self.message.edit(view=self)
-                        except:
-                            pass
+                if elapsed_time >= max_time:
+                    # Session has expired - disable button and show timeout
+                    if not self.timed_out:
+                        self.timed_out = True
+                        for item in self.children:
+                            item.disabled = True
+                        # Handle timeout asynchronously - don't block
+                        asyncio.create_task(self._handle_timeout())
                     return
+            
+            # Randomly select a coin to mine
+            coin = random.choice(CRYPTO_COINS)
+            symbol = coin["symbol"]
+            base_price = coin["base_price"]
+            
+            # Calculate mining amount based on coin's base price (proportional to old 200.0 base)
+            # Target: $50-60 per session average (assuming up to 60 clicks per 60s session, 1 per second)
+            # This means ~$0.83-$1.00 per click average, so $0.60-$1.40 range with RNG
+            # At $200 base: $0.60-$1.40 = 0.003-0.007 coins = 30-70 thousandths
+            # New system: scale by price ratio (200.0 / base_price)
+            price_ratio = 200.0 / base_price
+            # Reduced range: 30-70 thousandths (0.003-0.007) at $200 base
+            # Scaled range: multiply by price_ratio
+            min_thousandths = int(30 * price_ratio)
+            max_thousandths = int(70 * price_ratio)
+            # Ensure at least 1 thousandth
+            min_thousandths = max(1, min_thousandths)
+            max_thousandths = max(min_thousandths, max_thousandths)
+            random_thousandths = random.randint(min_thousandths, max_thousandths)
+            base_amount = round(random_thousandths / 10000, 4)
+            
+            # Apply GPU percent boost (e.g., 5% = 0.05, so multiply by 1.05)
+            # Ensure gpu_percent_boost is a number (convert to float if needed)
+            gpu_boost = float(self.gpu_percent_boost) if self.gpu_percent_boost else 0.0
+            percent_multiplier = 1.0 + (gpu_boost / 100.0)
+            amount = round(base_amount * percent_multiplier, 4)
+            
+            # Add crypto to user's holdings (NO BOOSTS APPLIED DURING MINING)
+            update_user_crypto_holdings(interaction.user.id, symbol, amount)
+            
+            # Update session tracking
+            self.total_mines += 1
+            if symbol not in self.session_mined:
+                self.session_mined[symbol] = 0.0
+            self.session_mined[symbol] += amount
+            
+            # Calculate value of this mine (base value only, no boosts)
+            prices = get_crypto_prices()
+            coin_price = prices.get(symbol, base_price)
+            mine_value = amount * coin_price
+            self.session_value += mine_value
+            
+            # Check timeout again after processing (in case processing took time)
+            if self.session_started and not self.timed_out:
+                elapsed_time = time.time() - self.start_time
+                max_time = 60 + self.gpu_seconds_boost
                 
-                if not await safe_defer(interaction):
+                if elapsed_time >= max_time:
+                    # Time expired during processing - disable button
+                    if not self.timed_out:
+                        self.timed_out = True
+                        for item in self.children:
+                            item.disabled = True
+                        # Handle timeout asynchronously - don't block
+                        asyncio.create_task(self._handle_timeout())
                     return
+            
+            # Update embed only if not timed out (rate limited to avoid slowing down clicks)
+            if self.session_started and not self.timed_out:
+                elapsed_time = time.time() - self.start_time
+                max_time = 60 + self.gpu_seconds_boost
+                time_remaining = max(0, max_time - elapsed_time)
+                
+                # Update embed asynchronously - don't block button processing
+                # Use create_task so it doesn't delay the button response
+                asyncio.create_task(self._update_timer_embed(time_remaining, max_time))
+                
         except Exception as e:
             print(f"Error in mine_button: {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
-            return
-        
-        # Randomly select a coin to mine
-        coin = random.choice(CRYPTO_COINS)
-        symbol = coin["symbol"]
-        base_price = coin["base_price"]
-        
-        # Calculate mining amount based on coin's base price (proportional to old 200.0 base)
-        # Target: $50-60 per session average (assuming up to 60 clicks per 60s session, 1 per second)
-        # This means ~$0.83-$1.00 per click average, so $0.60-$1.40 range with RNG
-        # At $200 base: $0.60-$1.40 = 0.003-0.007 coins = 30-70 thousandths
-        # New system: scale by price ratio (200.0 / base_price)
-        price_ratio = 200.0 / base_price
-        # Reduced range: 30-70 thousandths (0.003-0.007) at $200 base
-        # Scaled range: multiply by price_ratio
-        min_thousandths = int(30 * price_ratio)
-        max_thousandths = int(70 * price_ratio)
-        # Ensure at least 1 thousandth
-        min_thousandths = max(1, min_thousandths)
-        max_thousandths = max(min_thousandths, max_thousandths)
-        random_thousandths = random.randint(min_thousandths, max_thousandths)
-        base_amount = round(random_thousandths / 10000, 4)
-        
-        # Apply GPU percent boost (e.g., 5% = 0.05, so multiply by 1.05)
-        # Ensure gpu_percent_boost is a number (convert to float if needed)
-        gpu_boost = float(self.gpu_percent_boost) if self.gpu_percent_boost else 0.0
-        percent_multiplier = 1.0 + (gpu_boost / 100.0)
-        amount = round(base_amount * percent_multiplier, 4)
-        
-        # Apply bloom multiplier to amount mined
-        bloom_multiplier = get_bloom_multiplier(interaction.user.id)
-        base_amount_before_bloom = amount
-        amount = round(amount * bloom_multiplier, 4)
-        extra_from_bloom = amount - base_amount_before_bloom
-        
-        # Add crypto to user's holdings
-        update_user_crypto_holdings(interaction.user.id, symbol, amount)
-        
-        # Update session tracking
-        self.total_mines += 1
-        if symbol not in self.session_mined:
-            self.session_mined[symbol] = 0.0
-        self.session_mined[symbol] += amount
-        
-        # Calculate value of this mine
-        prices = get_crypto_prices()
-        coin_price = prices.get(symbol, base_price)
-        mine_value = amount * coin_price
-        base_mine_value = base_amount_before_bloom * coin_price
-        self.session_value += mine_value
-        self.session_base_value += base_mine_value
-        
-        # Get current holdings
-        holdings = get_user_crypto_holdings(interaction.user.id)
-        
-        # Calculate total portfolio value
-        total_value = sum(holdings[c["symbol"]] * prices.get(c["symbol"], c["base_price"]) for c in CRYPTO_COINS)
-        
-        # Create session summary
-        session_summary = ""
-        for sym, amt in self.session_mined.items():
-            coin_name = next(c["name"] for c in CRYPTO_COINS if c["symbol"] == sym)
-            session_summary += f"{coin_name} ({sym}): {amt:.4f}\n"
-        
-        # Calculate time remaining and check if expired (only if session has started)
-        if self.session_started:
-            elapsed_time = time.time() - self.start_time
-            max_time = 60 + self.gpu_seconds_boost
-            time_remaining = max(0, max_time - elapsed_time)
-            
-            # Check if time has actually expired
-            if elapsed_time >= max_time or self.timed_out:
-                # Session has expired - show expired embed immediately
-                await self._handle_timeout()
-                return
-            
-            # Update the embed with current timer and mining results
-            # This uses the shared method to ensure timer is always accurate
-            await self._update_timer_embed(time_remaining, max_time)
+            # Already deferred, so use followup if needed
+            try:
+                if hasattr(interaction, 'followup'):
+                    await interaction.followup.send("❌ An error occurred. Please try again.", ephemeral=True)
+            except:
+                pass
     
     async def on_timeout(self):
         # Discord's timeout callback - use shared handler
-        # Note: This may be called with some delay, but our background task should have already handled it
         if not self.timed_out:
             await self._handle_timeout()
-        
-        # Cancel the background timeout checker task if it's still running
-        if self.timeout_task and not self.timeout_task.done():
-            self.timeout_task.cancel()
 
 
 @bot.tree.command(name="mine", description="Mine cryptocurrency! (1 hour cooldown)")
@@ -6212,7 +6624,7 @@ async def mine(interaction: discord.Interaction):
         # Create mining embed with button
         base_time = 60
         total_time = base_time + total_seconds_boost
-        description_text = f"Click the **MINE!** button below to start mining!\n\nYou will have **{total_time} seconds** to click as many times as you can once you start!"
+        description_text = f"Click the **MINE!** button below to start mining!\n\nYou will have **{total_time}** seconds to click as many times as you can once you start!"
         if total_percent_boost > 0:
             description_text += f"\n💰 **GPU Boost: +{total_percent_boost}%**"
         if total_seconds_boost > 0:
@@ -6227,12 +6639,6 @@ async def mine(interaction: discord.Interaction):
         # Add GPU info if user has GPUs
         if gpus_used:
             embed.add_field(name="GPUs Active", value="\n".join(gpus_used), inline=False)
-        
-        # Set footer text
-        footer_text = "Click the MINE! button to start your session! Each click mines a coin-specific amount based on the cryptocurrency's value!"
-        if total_percent_boost > 0:
-            footer_text += f" GPUs boost your mining by +{total_percent_boost}%!"
-        embed.set_footer(text=footer_text)
         
         view = MiningView(user_id, timeout=total_time, gpu_percent_boost=total_percent_boost, gpu_seconds_boost=total_seconds_boost, gpus_used=gpus_used)
         message = await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
@@ -6250,6 +6656,7 @@ async def mine(interaction: discord.Interaction):
     app_commands.Choice(name="RootCoin (RTC)", value="RTC"),
     app_commands.Choice(name="Terrarium (TER)", value="TER"),
     app_commands.Choice(name="Canopy (CNY)", value="CNY"),
+    app_commands.Choice(name="All", value="all"),
 ])
 async def sell(interaction: discord.Interaction, coin: str, amount: float = None):
     try:
@@ -6260,6 +6667,88 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         holdings = get_user_crypto_holdings(user_id)
         prices = get_crypto_prices()
         
+        # Handle "all" option
+        if coin == "all":
+            # Sell all crypto holdings
+            base_sale_value = 0.0
+            sold_items = []
+            
+            for crypto_coin in CRYPTO_COINS:
+                symbol = crypto_coin["symbol"]
+                user_holding = holdings.get(symbol, 0.0)
+                
+                if user_holding > 0:
+                    coin_base_price = crypto_coin["base_price"]
+                    coin_price = prices.get(symbol, coin_base_price)
+                    sale_value = user_holding * coin_price
+                    base_sale_value += sale_value
+                    
+                    # Update holdings (subtract)
+                    update_user_crypto_holdings(user_id, symbol, -user_holding)
+                    
+                    sold_items.append(f"{symbol}: {user_holding:.4f} (${sale_value:.2f})")
+            
+            if base_sale_value == 0:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ You don't have any cryptocurrency to sell, {interaction.user.name}!",
+                    ephemeral=True)
+                return
+            
+            # Apply boosts to sale value
+            bloom_multiplier = get_bloom_multiplier(user_id)
+            water_multiplier = get_water_multiplier(user_id)
+            daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
+            
+            # Calculate boosted value (apply all multipliers)
+            value_after_bloom = base_sale_value * bloom_multiplier
+            value_after_water = value_after_bloom * water_multiplier
+            total_sale_value = value_after_water * daily_bonus_multiplier
+            
+            # Calculate extra value from boosts (only show tree ring and water streak)
+            extra_from_bloom = value_after_bloom - base_sale_value
+            # Water multiplier is applied but not shown separately
+            extra_from_daily = total_sale_value - value_after_water
+            
+            # Add money to balance (with boosts)
+            current_balance = get_user_balance(user_id)
+            new_balance = current_balance + total_sale_value
+            update_user_balance(user_id, new_balance)
+            
+            # Get updated holdings
+            updated_holdings = get_user_crypto_holdings(user_id)
+            
+            # Create success embed
+            embed = discord.Embed(
+                title="💰 Sale Successful!",
+                description=f"You sold all your cryptocurrency for **${total_sale_value:.2f}**!",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Sold", value="\n".join(sold_items) if sold_items else "None", inline=False)
+            
+            # Show boosts if applicable (only tree ring and water streak)
+            bloom_count = get_user_bloom_count(user_id)
+            if bloom_count > 0 and extra_from_bloom > 0:
+                multiplier_percent = (bloom_multiplier - 1.0) * 100
+                embed.add_field(
+                    name="🌳 Tree Ring Boost",
+                    value=f"+{multiplier_percent:.1f}% - **+${extra_from_bloom:.2f}**",
+                    inline=False
+                )
+            if extra_from_daily > 0:
+                daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
+                embed.add_field(
+                    name="💧 Water Streak Boost",
+                    value=f"+{daily_bonus_percent:.1f}% - **+${extra_from_daily:.2f}**",
+                    inline=False
+                )
+            
+            embed.add_field(name="Remaining Holdings", value=f"RTC: {updated_holdings['RTC']:.4f}\nTER: {updated_holdings['TER']:.4f}\nCNY: {updated_holdings['CNY']:.4f}", inline=False)
+            embed.add_field(name="New Balance", value=f"${new_balance:.2f}", inline=False)
+            
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+            return
+        
+        # Original logic for selling a specific coin
         # Check if user has any of this coin
         user_holding = holdings.get(coin, 0.0)
         
@@ -6283,17 +6772,32 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
                 ephemeral=True)
             return
         
-        # Calculate sale value
+        # Calculate base sale value
         # Get base price for the coin
         coin_info = next((c for c in CRYPTO_COINS if c["symbol"] == coin), None)
         coin_base_price = coin_info["base_price"] if coin_info else 855.0
         coin_price = prices.get(coin, coin_base_price)
-        sale_value = amount * coin_price
+        base_sale_value = amount * coin_price
+        
+        # Apply boosts to sale value
+        bloom_multiplier = get_bloom_multiplier(user_id)
+        water_multiplier = get_water_multiplier(user_id)
+        daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
+        
+        # Calculate boosted value (apply all multipliers)
+        value_after_bloom = base_sale_value * bloom_multiplier
+        value_after_water = value_after_bloom * water_multiplier
+        sale_value = value_after_water * daily_bonus_multiplier
+        
+        # Calculate extra value from boosts (only show tree ring and water streak)
+        extra_from_bloom = value_after_bloom - base_sale_value
+        # Water multiplier is applied but not shown separately
+        extra_from_daily = sale_value - value_after_water
         
         # Update holdings (subtract)
         update_user_crypto_holdings(user_id, coin, -amount)
         
-        # Add money to balance
+        # Add money to balance (with boosts)
         current_balance = get_user_balance(user_id)
         new_balance = current_balance + sale_value
         update_user_balance(user_id, new_balance)
@@ -6307,6 +6811,24 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             description=f"You sold **{amount:.4f} {coin}** for **${sale_value:.2f}**!",
             color=discord.Color.green()
         )
+        
+        # Show boosts if applicable (only tree ring and water streak)
+        bloom_count = get_user_bloom_count(user_id)
+        if bloom_count > 0 and extra_from_bloom > 0:
+            multiplier_percent = (bloom_multiplier - 1.0) * 100
+            embed.add_field(
+                name="🌳 Tree Ring Boost",
+                value=f"+{multiplier_percent:.1f}% - **+${extra_from_bloom:.2f}**",
+                inline=False
+            )
+        if extra_from_daily > 0:
+            daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
+            embed.add_field(
+                name="💧 Water Streak Boost",
+                value=f"+{daily_bonus_percent:.1f}% - **+${extra_from_daily:.2f}**",
+                inline=False
+            )
+        
         embed.add_field(name="Remaining Holdings", value=f"RTC: {updated_holdings['RTC']:.4f}\nTER: {updated_holdings['TER']:.4f}\nCNY: {updated_holdings['CNY']:.4f}", inline=False)
         embed.add_field(name="New Balance", value=f"${new_balance:.2f}", inline=False)
         
@@ -6334,7 +6856,7 @@ async def portfolio(interaction: discord.Interaction):
         
         # Initialize stocks for guild if needed to get current prices
         if guild_id:
-            initialize_stocks(guild_id)
+            await initialize_stocks(guild_id)
             stock_prices = {}
             for ticker in STOCK_TICKERS:
                 symbol = ticker["symbol"]
@@ -6494,7 +7016,7 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
                 ephemeral=True)
             return
     
-        initialize_stocks(guild_id)
+        await initialize_stocks(guild_id)
         
         # Get current stock price
         if ticker not in stock_data.get(guild_id, {}):
@@ -6507,6 +7029,22 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
         current_shares = stock_holdings.get(ticker, 0)
         
         if action == "buy":
+            # Check if enough shares are available in the market
+            available_shares = calculate_available_shares(guild_id, ticker)
+            if available_shares == 0:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ No shares available! All shares of {ticker_info['name']} ({ticker}) have been purchased.",
+                    ephemeral=True)
+                return
+            
+            if available_shares < amount:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ Not enough shares available!\n\n"
+                    f"Only **{available_shares:,} share(s)** of {ticker_info['name']} ({ticker}) are available, "
+                    f"but you tried to buy **{amount:,} share(s)**.",
+                    ephemeral=True)
+                return
+            
             # Calculate total cost
             total_cost = amount * current_price
             
