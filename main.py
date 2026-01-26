@@ -2688,6 +2688,7 @@ async def water(interaction: discord.Interaction):
         # Get water count and multiplier
         water_count = get_user_water_count(user_id)
         water_multiplier = get_water_multiplier(user_id)
+        daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
         
         # Award 10 Tree Rings on 5th consecutive day
         tree_rings_awarded = 0
@@ -2696,11 +2697,11 @@ async def water(interaction: discord.Interaction):
             tree_rings_awarded = 10
         
         # Build the message
-        message = f"{interaction.user.mention}, you've been rewarded with **${money_reward:,.2f}**. Your streak is **{consecutive_days}**! (**{water_multiplier:.2f}x**)"
+        message = f"{interaction.user.mention}, you've been rewarded with **${money_reward:,.2f}**. Your streak is **{consecutive_days}**! (**{daily_bonus_multiplier:.2f}x**)"
         
         # Add Tree Rings message if it's the 5th day
         if tree_rings_awarded > 0:
-            message += f' "You\'ve been awarded {tree_rings_awarded} Tree Rings!"'
+            message += f" You've been awarded **{tree_rings_awarded} Tree Rings**!"
         
         await safe_interaction_response(interaction, interaction.followup.send, message, ephemeral=False)
     except Exception as e:
