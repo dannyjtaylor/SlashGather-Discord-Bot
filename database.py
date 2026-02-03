@@ -111,7 +111,30 @@ def _ensure_user_document(user_id: int) -> None:
         "bloom_count": 0,
         "last_water_time": 0.0,
         "consecutive_water_days": 0,
-        "water_count": 0
+        "water_count": 0,
+        "achievements": {
+            "gatherer": 0,
+            "coinflip_total": 0,
+            "coinflip_win_streak": 0,
+            "harvesting": 0,
+            "planter": 0,
+            "water_streak": 0,
+            "hidden_achievements_discovered": 0,
+            "hidden_achievements": {
+                "john_rockefeller": False,
+                "beating_the_odds": False,
+                "beneficiary": False,
+                "leap_year": False,
+                "ceo": False,
+                "blockchain": False,
+                "almost_got_it": False,
+                "maxed_out": False
+            }
+        },
+        "coinflip_count": 0,
+        "coinflip_win_streak": 0,
+        "gather_command_count": 0,
+        "harvest_command_count": 0
     }
     users.update_one(
         {"_id": int(user_id)},
@@ -233,6 +256,17 @@ def increment_forage_count(user_id: int) -> None:
     users.update_one(
         {"_id": int(user_id)},
         {"$inc": {"total_forage_count": 1}},
+        upsert=True,
+    )
+
+
+def increment_total_items_only(user_id: int) -> None:
+    """Increment only gather_stats.total_items (for harvests to update userstats, but not gatherer achievements)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$inc": {"gather_stats.total_items": 1, "total_forage_count": 1}},
         upsert=True,
     )
 
@@ -633,8 +667,10 @@ def add_gardener(user_id: int, gardener_id: int, price: float) -> bool:
     new_gardener = {
         "id": int(gardener_id),
         "times_gathered": 0,
+        "plants_gathered": 0,
         "total_money_earned": 0.0,
-        "hired_at": time.time()
+        "hired_at": time.time(),
+        "has_tool": False,
     }
     
     users.update_one(
@@ -646,18 +682,46 @@ def add_gardener(user_id: int, gardener_id: int, price: float) -> bool:
     return True
 
 
-def update_gardener_stats(user_id: int, gardener_id: int, money_earned: float) -> None:
-    """Update gardener stats after a successful gather."""
+def update_gardener_stats(user_id: int, gardener_id: int, money_earned: float, plants_count: int = 1) -> None:
+    """Update gardener stats after a successful gather or harvest.
+    
+    Args:
+        user_id: User ID
+        gardener_id: Gardener ID
+        money_earned: Total money earned from this action
+        plants_count: Number of plants gathered (1 for single gather, multiple for harvest)
+    """
     users = _get_users_collection()
     users.update_one(
         {"_id": int(user_id), "gardeners.id": int(gardener_id)},
         {
             "$inc": {
                 "gardeners.$.times_gathered": 1,
+                "gardeners.$.plants_gathered": int(plants_count),
                 "gardeners.$.total_money_earned": float(money_earned)
             }
         }
     )
+
+
+def set_gardener_has_tool(user_id: int, gardener_id: int, tool_price: float) -> bool:
+    """Give a gardener their tool (deduct balance and set has_tool). Returns True if successful."""
+    users = _get_users_collection()
+    current_balance = get_user_balance(user_id)
+    if current_balance < tool_price:
+        return False
+    existing = get_user_gardeners(user_id)
+    if not any(g.get("id") == gardener_id for g in existing):
+        return False
+    if any(g.get("id") == gardener_id and g.get("has_tool") for g in existing):
+        return False  # already has tool
+    new_balance = current_balance - tool_price
+    update_user_balance(user_id, new_balance)
+    users.update_one(
+        {"_id": int(user_id), "gardeners.id": int(gardener_id)},
+        {"$set": {"gardeners.$.has_tool": True}},
+    )
+    return True
 
 
 def get_all_users_with_gardeners() -> list[tuple[int, list[Dict]]]:
@@ -859,7 +923,8 @@ def get_user_bloom_count(user_id: int) -> int:
 
 
 def perform_bloom(user_id: int) -> None:
-    """Reset user's progress while keeping Tree Rings and incrementing bloom_count."""
+    """Reset user's progress while keeping Tree Rings, achievements, and incrementing bloom_count.
+    Note: Achievements persist through bloom, but planter achievement will be recalculated based on new total_items (0)."""
     users = _get_users_collection()
     default_balance = _get_default_balance()
     users.update_one(
@@ -894,7 +959,10 @@ def perform_bloom(user_id: int) -> None:
                     "RTC": 0.0,
                     "TER": 0.0,
                     "CNY": 0.0
-                }
+                },
+                # Reset planter achievement to 0 (Unranked) since total_items is now 0
+                # Other achievements persist (gatherer, harvesting, coinflip, water_streak, hidden)
+                "achievements.planter": 0
             },
             "$inc": {
                 "bloom_count": 1
@@ -1097,7 +1165,7 @@ def wipe_user_money(user_id: int) -> None:
 
 
 def wipe_user_plants(user_id: int) -> None:
-    """Reset user's collected plants (items, gather_stats, ripeness_stats)."""
+    """Reset user's collected plants (items, gather_stats, ripeness_stats), planter achievement, and cooldowns."""
     users = _get_users_collection()
     users.update_one(
         {"_id": int(user_id)},
@@ -1109,7 +1177,15 @@ def wipe_user_plants(user_id: int) -> None:
                 "categories": {},
                 "items": {}
             },
-            "total_forage_count": 0
+            "total_forage_count": 0,
+            # Reset planter achievement since it's based on total_items
+            "achievements.planter": 0,
+            # Reset all cooldowns
+            "last_gather_time": 0.0,
+            "last_harvest_time": 0.0,
+            "last_mine_time": 0.0,
+            "last_roulette_elimination_time": 0.0,
+            "last_water_time": 0.0
         }},
         upsert=True,
     )
@@ -1132,7 +1208,8 @@ def wipe_user_crypto(user_id: int) -> None:
 
 
 def wipe_user_all(user_id: int) -> None:
-    """Reset user's money and all upgrades (basket, shoes, gloves, soil, harvest upgrades, gardeners, GPUs, plants, stocks, crypto)."""
+    """Reset user's money and all upgrades (basket, shoes, gloves, soil, harvest upgrades, gardeners, GPUs, plants, stocks, crypto).
+    Also resets all achievement-related stats and cooldowns."""
     users = _get_users_collection()
     default_balance = _get_default_balance()
     users.update_one(
@@ -1167,7 +1244,195 @@ def wipe_user_all(user_id: int) -> None:
                 "TER": 0.0,
                 "CNY": 0.0
             },
-            "bloom_count": 0
+            "bloom_count": 0,
+            # Reset all achievement-related stats
+            "achievements": {
+                "gatherer": 0,
+                "coinflip_total": 0,
+                "coinflip_win_streak": 0,
+                "harvesting": 0,
+                "planter": 0,
+                "water_streak": 0,
+                "hidden_achievements_discovered": 0,
+                "hidden_achievements": {
+                    "john_rockefeller": False,
+                    "beating_the_odds": False,
+                    "beneficiary": False,
+                    "leap_year": False,
+                    "ceo": False,
+                    "blockchain": False,
+                    "almost_got_it": False,
+                    "maxed_out": False
+                }
+            },
+            "coinflip_count": 0,
+            "coinflip_win_streak": 0,
+            "gather_command_count": 0,
+            "harvest_command_count": 0,
+            "consecutive_water_days": 0,
+            "water_count": 0,
+            # Reset all cooldowns
+            "last_gather_time": 0.0,
+            "last_harvest_time": 0.0,
+            "last_mine_time": 0.0,
+            "last_roulette_elimination_time": 0.0,
+            "last_water_time": 0.0
         }},
+        upsert=True,
+    )
+
+
+# Achievement functions
+def get_user_achievement_level(user_id: int, achievement_name: str) -> int:
+    """Get user's achievement level for a specific achievement. Returns 0 if not set."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"achievements": 1})
+    if not doc:
+        return 0
+    achievements = doc.get("achievements", {})
+    return int(achievements.get(achievement_name, 0))
+
+
+def set_user_achievement_level(user_id: int, achievement_name: str, level: int) -> None:
+    """Set user's achievement level for a specific achievement."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {f"achievements.{achievement_name}": int(level)}},
+        upsert=True,
+    )
+
+
+def get_user_hidden_achievements_count(user_id: int) -> int:
+    """Get user's count of hidden achievements discovered."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"achievements.hidden_achievements_discovered": 1})
+    if not doc:
+        return 0
+    achievements = doc.get("achievements", {})
+    return int(achievements.get("hidden_achievements_discovered", 0))
+
+
+def increment_hidden_achievements_count(user_id: int) -> None:
+    """Increment user's hidden achievements discovered count by 1."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$inc": {"achievements.hidden_achievements_discovered": 1}},
+        upsert=True,
+    )
+
+
+def has_hidden_achievement(user_id: int, achievement_name: str) -> bool:
+    """Check if user has a specific hidden achievement."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"achievements.hidden_achievements": 1})
+    if not doc:
+        return False
+    achievements = doc.get("achievements", {})
+    hidden_achievements = achievements.get("hidden_achievements", {})
+    return bool(hidden_achievements.get(achievement_name, False))
+
+
+def unlock_hidden_achievement(user_id: int, achievement_name: str) -> bool:
+    """Unlock a hidden achievement for a user. Returns True if newly unlocked, False if already had it."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    
+    # Check if already unlocked
+    if has_hidden_achievement(user_id, achievement_name):
+        return False
+    
+    # Unlock the achievement and increment count
+    users.update_one(
+        {"_id": int(user_id)},
+        {
+            "$set": {f"achievements.hidden_achievements.{achievement_name}": True},
+            "$inc": {"achievements.hidden_achievements_discovered": 1}
+        },
+        upsert=True,
+    )
+    return True
+
+
+def get_user_coinflip_count(user_id: int) -> int:
+    """Get user's total coinflip count."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"coinflip_count": 1})
+    if not doc:
+        return 0
+    return int(doc.get("coinflip_count", 0))
+
+
+def increment_user_coinflip_count(user_id: int) -> None:
+    """Increment user's coinflip count by 1."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$inc": {"coinflip_count": 1}},
+        upsert=True,
+    )
+
+
+def get_user_coinflip_win_streak(user_id: int) -> int:
+    """Get user's current coinflip win streak."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"coinflip_win_streak": 1})
+    if not doc:
+        return 0
+    return int(doc.get("coinflip_win_streak", 0))
+
+
+def set_user_coinflip_win_streak(user_id: int, streak: int) -> None:
+    """Set user's coinflip win streak."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"coinflip_win_streak": int(streak)}},
+        upsert=True,
+    )
+
+
+def get_user_gather_command_count(user_id: int) -> int:
+    """Get user's total /gather command count (not including gardeners)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"gather_command_count": 1})
+    if not doc:
+        return 0
+    return int(doc.get("gather_command_count", 0))
+
+
+def increment_user_gather_command_count(user_id: int) -> None:
+    """Increment user's /gather command count by 1."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$inc": {"gather_command_count": 1}},
+        upsert=True,
+    )
+
+
+def get_user_harvest_command_count(user_id: int) -> int:
+    """Get user's total /harvest command count (not including gardeners or auto-harvest)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"harvest_command_count": 1})
+    if not doc:
+        return 0
+    return int(doc.get("harvest_command_count", 0))
+
+
+def increment_user_harvest_command_count(user_id: int) -> None:
+    """Increment user's /harvest command count by 1."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$inc": {"harvest_command_count": 1}},
         upsert=True,
     )
