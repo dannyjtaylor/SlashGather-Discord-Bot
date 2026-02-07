@@ -924,7 +924,7 @@ def get_user_bloom_count(user_id: int) -> int:
 
 def perform_bloom(user_id: int) -> None:
     """Reset user's progress while keeping Tree Rings, achievements, and incrementing bloom_count.
-    Note: Achievements persist through bloom, but planter achievement will be recalculated based on new total_items (0)."""
+    Note: All achievements persist through bloom, including planter achievements."""
     users = _get_users_collection()
     default_balance = _get_default_balance()
     users.update_one(
@@ -959,10 +959,8 @@ def perform_bloom(user_id: int) -> None:
                     "RTC": 0.0,
                     "TER": 0.0,
                     "CNY": 0.0
-                },
-                # Reset planter achievement to 0 (Unranked) since total_items is now 0
-                # Other achievements persist (gatherer, harvesting, coinflip, water_streak, hidden)
-                "achievements.planter": 0
+                }
+                # All achievements persist through bloom (gatherer, planter, harvesting, coinflip, water_streak, hidden)
             },
             "$inc": {
                 "bloom_count": 1

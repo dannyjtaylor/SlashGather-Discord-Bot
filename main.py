@@ -13,6 +13,7 @@ import datetime
 import aiohttp
 import warnings
 import yfinance as yf
+from concurrent.futures import ThreadPoolExecutor
 
 # Suppress Pandas4Warning from yfinance library (deprecated Timestamp.utcnow)
 warnings.filterwarnings("ignore", category=FutureWarning, message=".*Timestamp.utcnow.*")
@@ -148,6 +149,15 @@ except Exception as error:
     logging.exception("Failed to initialise MongoDB connection: %s", error)
     raise
 
+# Parallel processing configuration
+# Thread pool for blocking database operations
+DB_THREAD_POOL_SIZE = min(32, (os.cpu_count() or 1) + 4)
+db_executor = ThreadPoolExecutor(max_workers=DB_THREAD_POOL_SIZE, thread_name_prefix="db")
+
+# Concurrency limits for background tasks
+MAX_CONCURRENT_GARDENER_USERS = 20
+MAX_CONCURRENT_GPU_USERS = 20
+
 # Load the correct token based on environment
 token_env_key = 'DISCORD_TOKEN' if is_production else 'DISCORD_DEV_TOKEN'
 token = os.getenv(token_env_key)
@@ -241,6 +251,12 @@ async def safe_defer(interaction: discord.Interaction, ephemeral: bool = False):
     except Exception as e:
         print(f"Error deferring interaction: {e}")
         return False
+
+# Helper functions to run blocking database operations in thread pool
+async def run_db_operation(func, *args, **kwargs):
+    """Run a blocking database operation in the thread pool."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(db_executor, lambda: func(*args, **kwargs))
 
 # Helper function to send achievement notification
 async def send_achievement_notification(interaction: discord.Interaction, achievement_name: str, level: int):
@@ -1535,12 +1551,12 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
         active_events: Optional pre-fetched active events list
         apply_orchard_fertilizer: If True, apply orchard (harvest) fertilizer multiplier (for gardener auto-gather).
     """
-    # Fetch data if not provided
+    # Fetch data if not provided (run in thread pool to avoid blocking)
     if user_data is None:
-        user_data = get_user_gather_data(user_id)
+        user_data = await run_db_operation(get_user_gather_data, user_id)
     
     if active_events is None:
-        active_events = get_active_events_cached()
+        active_events = await run_db_operation(get_active_events_cached)
     
     hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
     daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
@@ -1697,36 +1713,36 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
 
     # Apply orchard (harvest) fertilizer when e.g. gardener auto-gather
     if apply_orchard_fertilizer:
-        harvest_upgrades = get_user_harvest_upgrades(user_id)
+        harvest_upgrades = await run_db_operation(get_user_harvest_upgrades, user_id)
         fertilizer_tier = harvest_upgrades["fertilizer"]
         if fertilizer_tier > 0:
             fertilizer_multiplier = 1.0 + HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["multiplier"]
             final_value *= fertilizer_multiplier
 
-    # Apply bloom multiplier
-    bloom_multiplier = get_bloom_multiplier(user_id)
+    # Apply bloom multiplier (run in thread pool)
+    bloom_multiplier = await run_db_operation(get_bloom_multiplier, user_id)
     base_final_value = final_value
     final_value *= bloom_multiplier
     extra_money_from_bloom = final_value - base_final_value
     
-    # Apply water multiplier (1.01x per water, cumulative)
-    water_multiplier = get_water_multiplier(user_id)
+    # Apply water multiplier (1.01x per water, cumulative) (run in thread pool)
+    water_multiplier = await run_db_operation(get_water_multiplier, user_id)
     final_value *= water_multiplier
     
-    # Apply rank perma buff multiplier
-    rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
+    # Apply rank perma buff multiplier (run in thread pool)
+    rank_perma_buff_multiplier = await run_db_operation(get_rank_perma_buff_multiplier, user_id)
     base_value_before_rank = final_value
     final_value *= rank_perma_buff_multiplier
     extra_money_from_rank = final_value - base_value_before_rank
     
-    # Apply achievement multiplier
-    achievement_multiplier = get_achievement_multiplier(user_id)
+    # Apply achievement multiplier (run in thread pool)
+    achievement_multiplier = await run_db_operation(get_achievement_multiplier, user_id)
     base_value_before_achievement = final_value
     final_value *= achievement_multiplier
     extra_money_from_achievement = final_value - base_value_before_achievement
     
-    # Apply daily bonus multiplier (1% per consecutive day)
-    daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
+    # Apply daily bonus multiplier (1% per consecutive day) (run in thread pool)
+    daily_bonus_multiplier = await run_db_operation(get_daily_bonus_multiplier, user_id)
     base_value_before_daily = final_value
     final_value *= daily_bonus_multiplier
     extra_money_from_daily = final_value - base_value_before_daily
@@ -1735,8 +1751,9 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
     current_balance = user_data["balance"]
     new_balance = current_balance + final_value
     
-    # Perform all database updates in a single batched operation
-    perform_gather_update(
+    # Perform all database updates in a single batched operation (run in thread pool)
+    await run_db_operation(
+        perform_gather_update,
         user_id=user_id,
         balance_increment=final_value,
         item_name=name,
@@ -2091,8 +2108,7 @@ class RouletteGame:
         if player_id in self.players:
             self.players[player_id]["alive"] = False
             self.pot += self.players[player_id]["current_stake"]
-            # Set 30-minute cooldown on /gather and /harvest for eliminated player
-            update_user_last_roulette_elimination_time(player_id, time.time())
+            # Note: Cooldown is now set in play_roulette_round() using thread pool
         #print the player out
         # print(f"{self.players[player_id]['name']} has been eliminated!")
 
@@ -2260,6 +2276,8 @@ async def play_roulette_round(channel, game_id):
     if shot_fired:
         #player eliminated
         game.eliminate(current_player_id)
+        # Set cooldown in thread pool (non-blocking)
+        await run_db_operation(update_user_last_roulette_elimination_time, current_player_id, time.time())
         game.bullets -= 1
 
         embed = discord.Embed(
@@ -2455,8 +2473,14 @@ class RouletteJoinView(discord.ui.View):
                 
             game = active_roulette_games[self.game_id]
             
-            # Check if user is on Russian Roulette elimination cooldown (dead)
-            is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+            # Check if user is on Russian Roulette elimination cooldown (dead) and balance in parallel
+            cooldown_result, user_balance = await asyncio.gather(
+                run_db_operation(check_roulette_elimination_cooldown, user_id),
+                run_db_operation(get_user_balance, user_id)
+            )
+            # Extract cooldown info from result
+            is_roulette_cooldown, roulette_time_left = cooldown_result
+            
             if is_roulette_cooldown:
                 minutes_left = roulette_time_left // 60
                 await safe_interaction_response(interaction, interaction.response.send_message,
@@ -2482,9 +2506,7 @@ class RouletteJoinView(discord.ui.View):
             if game.game_started:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game already started!", ephemeral=True)
                 return
-                
-            # Check user balance
-            user_balance = get_user_balance(user_id)
+            
             user_balance = normalize_money(user_balance)
             bet_amount = normalize_money(game.bet_amount)
             
@@ -2496,9 +2518,9 @@ class RouletteJoinView(discord.ui.View):
             game.add_player(user_id, interaction.user.name)
             user_active_games[user_id] = self.game_id
             
-            # Deduct bet
+            # Deduct bet (run in thread pool)
             new_balance = normalize_money(user_balance - bet_amount)
-            update_user_balance(user_id, new_balance)
+            await run_db_operation(update_user_balance, user_id, new_balance)
             
             # Update the embed
             embed = interaction.message.embeds[0]
@@ -2692,11 +2714,11 @@ class RouletteContinueView(discord.ui.View):
             player = game.players[current_player_id]
             winnings = normalize_money(player['current_stake'])
             
-            # Add winnings to player balance
-            current_balance = get_user_balance(current_player_id)
+            # Add winnings to player balance (run in thread pool)
+            current_balance = await run_db_operation(get_user_balance, current_player_id)
             current_balance = normalize_money(current_balance)
             new_balance = normalize_money(current_balance + winnings)
-            update_user_balance(current_player_id, new_balance)
+            await run_db_operation(update_user_balance, current_player_id, new_balance)
             
             # Remove from active games
             if current_player_id in user_active_games:
@@ -2722,12 +2744,14 @@ class RouletteContinueView(discord.ui.View):
             
             # Check for hidden achievement: Beating The Odds (cashout with 5 bullets = 5/6 death chance)
             # Send as ephemeral message to the user
-            if game.initial_bullets == 5 and unlock_hidden_achievement(current_player_id, "beating_the_odds"):
-                try:
-                    # Send ephemeral notification to the user who cashed out
-                    await send_hidden_achievement_notification(interaction, "beating_the_odds")
-                except Exception as e:
-                    print(f"Error sending Beating The Odds achievement notification: {e}")
+            if game.initial_bullets == 5:
+                achievement_unlocked = await run_db_operation(unlock_hidden_achievement, current_player_id, "beating_the_odds")
+                if achievement_unlocked:
+                    try:
+                        # Send ephemeral notification to the user who cashed out
+                        await send_hidden_achievement_notification(interaction, "beating_the_odds")
+                    except Exception as e:
+                        print(f"Error sending Beating The Odds achievement notification: {e}")
             
             # Check if game ends
             alive_count = len(game.get_alive_players())
@@ -2826,9 +2850,9 @@ async def end_roulette_game(channel, game_id):
         # Winner gets pot + their stake
         total_winnings = game.pot + winner['current_stake']
         
-        # Add winnings to balance
-        current_balance = get_user_balance(winner_id)
-        update_user_balance(winner_id, current_balance + total_winnings)
+        # Add winnings to balance (run in thread pool)
+        current_balance = await run_db_operation(get_user_balance, winner_id)
+        await run_db_operation(update_user_balance, winner_id, current_balance + total_winnings)
         
         # Remove from active games
         if winner_id in user_active_games:
@@ -2909,7 +2933,7 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
         # Normalize bet to exactly 2 decimal places
         bet = normalize_money(bet)
         
-        current_balance = get_user_balance(user_id)
+        current_balance = await run_db_operation(get_user_balance, user_id)
         current_balance = normalize_money(current_balance)
         
         if not can_afford_rounded(current_balance, bet):
@@ -2918,7 +2942,7 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
         
         # Deduct bet first
         new_balance_after_bet = normalize_money(current_balance - bet)
-        update_user_balance(user_id, new_balance_after_bet)
+        await run_db_operation(update_user_balance, user_id, new_balance_after_bet)
         
         # Flip the coin - randomly choose heads or tails (lowercase)
         coin_result = random.choice(["heads", "tails"])
@@ -2926,9 +2950,11 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
         # Check if they won (their choice matches the result, both lowercase)
         won = choice.lower() == coin_result
         
-        # Track coinflip stats
-        increment_user_coinflip_count(user_id)
-        current_streak = get_user_coinflip_win_streak(user_id)
+        # Track coinflip stats in parallel
+        current_streak = await asyncio.gather(
+            run_db_operation(increment_user_coinflip_count, user_id),
+            run_db_operation(get_user_coinflip_win_streak, user_id)
+        )[1]  # Get streak from second result
         
         # Track achievements that will be unlocked
         achievements_unlocked = []
@@ -2936,31 +2962,33 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
         if won:
             # They win - increment streak
             new_streak = current_streak + 1
-            set_user_coinflip_win_streak(user_id, new_streak)
+            await run_db_operation(set_user_coinflip_win_streak, user_id, new_streak)
             
             # Check and update coinflip_win_streak achievement
             new_streak_level = get_achievement_level_for_stat("coinflip_win_streak", new_streak)
-            current_streak_level = get_user_achievement_level(user_id, "coinflip_win_streak")
+            current_streak_level = await run_db_operation(get_user_achievement_level, user_id, "coinflip_win_streak")
             if new_streak_level > current_streak_level:
-                set_user_achievement_level(user_id, "coinflip_win_streak", new_streak_level)
+                await run_db_operation(set_user_achievement_level, user_id, "coinflip_win_streak", new_streak_level)
                 achievements_unlocked.append(("coinflip_win_streak", new_streak_level))
         else:
             # They lose - reset streak to 0
-            set_user_coinflip_win_streak(user_id, 0)
+            await run_db_operation(set_user_coinflip_win_streak, user_id, 0)
         
         # Check and update coinflip_total achievement
-        coinflip_count = get_user_coinflip_count(user_id)
+        coinflip_count, current_total_level = await asyncio.gather(
+            run_db_operation(get_user_coinflip_count, user_id),
+            run_db_operation(get_user_achievement_level, user_id, "coinflip_total")
+        )
         new_total_level = get_achievement_level_for_stat("coinflip_total", coinflip_count)
-        current_total_level = get_user_achievement_level(user_id, "coinflip_total")
         if new_total_level > current_total_level:
-            set_user_achievement_level(user_id, "coinflip_total", new_total_level)
+            await run_db_operation(set_user_achievement_level, user_id, "coinflip_total", new_total_level)
             achievements_unlocked.append(("coinflip_total", new_total_level))
         
         # Calculate new balance
         if won:
             # They win - get double their bet back (bet was already deducted, so add 2*bet)
             new_balance = normalize_money(new_balance_after_bet + (bet * 2))
-            update_user_balance(user_id, new_balance)
+            await run_db_operation(update_user_balance, user_id, new_balance)
             message = f"You placed **${bet:.2f}** on **{choice}**!\nThe coin landed on **{coin_result}**! You doubled your bet!!\nYour new balance is **${new_balance:.2f}**."
         else:
             # They lose - bet was already deducted
@@ -3336,13 +3364,15 @@ async def gather(interaction: discord.Interaction):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
-        # Fetch user data and events once at the start
+        # Fetch user data and events once at the start (in parallel)
         user_id = interaction.user.id
-        user_data = get_user_gather_data(user_id)   
-        active_events = get_active_events_cached()
+        user_data, active_events = await asyncio.gather(
+            run_db_operation(get_user_gather_data, user_id),
+            run_db_operation(get_active_events_cached)
+        )
 
         #check if the user is on cooldown (default 1 min), if so let them know how much time they have left
-        can_user_gather, time_left, is_roulette_cooldown = can_gather(user_id, user_data=user_data, active_events=active_events)
+        can_user_gather, time_left, is_roulette_cooldown = await run_db_operation(can_gather, user_id, user_data, active_events)
         if not can_user_gather:
             #then user is on cooldown
             if is_roulette_cooldown:
@@ -3353,27 +3383,30 @@ async def gather(interaction: discord.Interaction):
             else:
                 # Normal gather cooldown
                 # Check for hidden achievement: Almost Got It (cooldown says "0" seconds)
-                if time_left == 0 and unlock_hidden_achievement(user_id, "almost_got_it"):
-                    await safe_interaction_response(interaction, interaction.followup.send,
-                        f"You must wait {time_left} seconds before gathering again, {interaction.user.name}.\n\n"
-                        f"🎉 **Hidden Achievement Unlocked: Almost Got It!** 🎉", ephemeral=True)
-                else:
-                    await safe_interaction_response(interaction, interaction.followup.send,
-                        f"You must wait {time_left} seconds before gathering again, {interaction.user.name}.", ephemeral=True)
+                achievement_unlocked = False
+                if time_left == 0:
+                    achievement_unlocked = await run_db_operation(unlock_hidden_achievement, user_id, "almost_got_it")
+                
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"You must wait {time_left} seconds before gathering again, {interaction.user.name}.", ephemeral=True)
+                
+                # Send achievement notification as embed if unlocked
+                if achievement_unlocked:
+                    await send_hidden_achievement_notification(interaction, "almost_got_it")
             return
 
-        # Get Tree Rings before gather to check if one was awarded
-        tree_rings_before = get_user_tree_rings(user_id)
-        
-        # Increment gather command count (only for actual /gather commands, not gardeners)
-        increment_user_gather_command_count(user_id)
+        # Get Tree Rings before gather and increment command count in parallel
+        tree_rings_before, _ = await asyncio.gather(
+            run_db_operation(get_user_tree_rings, user_id),
+            run_db_operation(increment_user_gather_command_count, user_id)
+        )
         
         # Perform the gather with pre-fetched data
         gather_result = await perform_gather_for_user(user_id, apply_cooldown=True, 
                                                       user_data=user_data, active_events=active_events)
 
         # Check if a Tree Ring was awarded
-        tree_rings_after = get_user_tree_rings(user_id)
+        tree_rings_after = await run_db_operation(get_user_tree_rings, user_id)
         if tree_rings_after > tree_rings_before:
             tree_rings_awarded = tree_rings_after - tree_rings_before
             await safe_interaction_response(interaction, interaction.followup.send,
@@ -3424,10 +3457,12 @@ async def gather(interaction: discord.Interaction):
         embed.add_field(name="Ripeness", value=f"{gather_result['ripeness']}", inline=True)
         embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
         
-        # Show bloom multiplier if applicable (only after first bloom)
-        bloom_count = get_user_bloom_count(user_id)
+        # Show bloom multiplier if applicable (only after first bloom) - fetch in parallel
+        bloom_count, tree_rings = await asyncio.gather(
+            run_db_operation(get_user_bloom_count, user_id),
+            run_db_operation(get_user_tree_rings, user_id)
+        )
         if bloom_count > 0 and gather_result.get('extra_money_from_bloom', 0) > 0:
-            tree_rings = get_user_tree_rings(user_id)
             multiplier_percent = (gather_result['bloom_multiplier'] - 1.0) * 100
             embed.add_field(
                 name="🌳 Tree Ring Boost", 
@@ -3436,7 +3471,7 @@ async def gather(interaction: discord.Interaction):
             )
         
         # Show rank perma buff if applicable (only if not PINE I)
-        bloom_rank = get_bloom_rank(user_id)
+        bloom_rank = await run_db_operation(get_bloom_rank, user_id)
         if bloom_rank != "PINE I" and gather_result.get('extra_money_from_rank', 0) > 0:
             rank_perma_buff_percent = (gather_result['rank_perma_buff_multiplier'] - 1.0) * 100
             embed.add_field(
@@ -3484,26 +3519,28 @@ async def gather(interaction: discord.Interaction):
             chain_triggered = random.random() < chain_chance
             if chain_triggered:
                 # Reset cooldown by setting last_gather_time to 0 (allows immediate next gather)
-                update_user_last_gather_time(user_id, 0)
+                await run_db_operation(update_user_last_gather_time, user_id, 0)
         
         # Send the main gather embed first
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
         
-        # Check and update planter achievement level (after main response)
-        total_items = get_user_total_items(user_id)
+        # Check and update achievement levels (after main response) - fetch in parallel
+        total_items, gather_command_count, current_planter_level, current_gatherer_level = await asyncio.gather(
+            run_db_operation(get_user_total_items, user_id),
+            run_db_operation(get_user_gather_command_count, user_id),
+            run_db_operation(get_user_achievement_level, user_id, "planter"),
+            run_db_operation(get_user_achievement_level, user_id, "gatherer")
+        )
+        
         new_planter_level = get_planter_level_from_total_items(total_items)
-        current_planter_achievement_level = get_user_achievement_level(user_id, "planter")
-        if new_planter_level > current_planter_achievement_level:
-            set_user_achievement_level(user_id, "planter", new_planter_level)
+        if new_planter_level > current_planter_level:
+            await run_db_operation(set_user_achievement_level, user_id, "planter", new_planter_level)
             # Send achievement notification (ephemeral, only visible to user)
             await send_achievement_notification(interaction, "planter", new_planter_level)
         
-        # Check and update achievement levels based on gather_command_count (after main response)
-        gather_command_count = get_user_gather_command_count(user_id)
         new_gatherer_level = get_achievement_level_for_stat("gatherer", gather_command_count)
-        current_gatherer_level = get_user_achievement_level(user_id, "gatherer")
         if new_gatherer_level > current_gatherer_level:
-            set_user_achievement_level(user_id, "gatherer", new_gatherer_level)
+            await run_db_operation(set_user_achievement_level, user_id, "gatherer", new_gatherer_level)
             # Send achievement notification (ephemeral, only visible to user)
             await send_achievement_notification(interaction, "gatherer", new_gatherer_level)
         
@@ -3524,7 +3561,7 @@ async def water(interaction: discord.Interaction):
         
         user_id = interaction.user.id
         current_time = time.time()
-        last_water_time = get_user_last_water_time(user_id)
+        last_water_time = await run_db_operation(get_user_last_water_time, user_id)
         
         # Convert to EST (UTC-5)
         EST_OFFSET = datetime.timedelta(hours=-5)
@@ -3568,7 +3605,7 @@ async def water(interaction: discord.Interaction):
                 return
         
         # Calculate consecutive days
-        consecutive_days = get_user_consecutive_water_days(user_id)
+        consecutive_days = await run_db_operation(get_user_consecutive_water_days, user_id)
         
         # Check if streak should be reset (last water was not yesterday)
         if last_water_time > 0:
@@ -3585,31 +3622,36 @@ async def water(interaction: discord.Interaction):
         
         # Increment consecutive days
         consecutive_days += 1
-        set_user_consecutive_water_days(user_id, consecutive_days)
-        
-        # Update last water time and increment water count
-        update_user_last_water_time(user_id, current_time)
-        increment_user_water_count(user_id)
         
         # Calculate money reward: $7,500 per day (day 1 = $7.5k, day 2 = $15k, etc.)
         money_reward = consecutive_days * 7500.0
         money_reward = normalize_money(money_reward)
         
-        # Update user balance with reward
-        current_balance = get_user_balance(user_id)
-        new_balance = normalize_money(current_balance + money_reward)
-        update_user_balance(user_id, new_balance)
-        
-        # Get water count and multiplier
-        water_count = get_user_water_count(user_id)
-        water_multiplier = get_water_multiplier(user_id)
-        daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
-        
         # Award 10 Tree Rings on 5th consecutive day
         tree_rings_awarded = 0
         if consecutive_days == 5:
-            increment_tree_rings(user_id, 10)
             tree_rings_awarded = 10
+        
+        # Batch all database updates in parallel
+        current_balance = await run_db_operation(get_user_balance, user_id)
+        new_balance = normalize_money(current_balance + money_reward)
+        
+        # Get water count and multipliers in parallel
+        water_count, water_multiplier, daily_bonus_multiplier = await asyncio.gather(
+            run_db_operation(get_user_water_count, user_id),
+            run_db_operation(get_water_multiplier, user_id),
+            run_db_operation(get_daily_bonus_multiplier, user_id)
+        )
+        
+        # Update all database fields in parallel
+        await asyncio.gather(
+            run_db_operation(set_user_consecutive_water_days, user_id, consecutive_days),
+            run_db_operation(update_user_last_water_time, user_id, current_time),
+            run_db_operation(increment_user_water_count, user_id),
+            run_db_operation(update_user_balance, user_id, new_balance),
+            run_db_operation(increment_tree_rings, user_id, tree_rings_awarded) if tree_rings_awarded > 0 else asyncio.sleep(0),
+            return_exceptions=True
+        )
         
         # Build the message
         message = f"{interaction.user.mention}, you've been rewarded with **${money_reward:,.2f}**. Your streak is **{consecutive_days}**! (**{daily_bonus_multiplier:.2f}x**)"
@@ -3641,11 +3683,14 @@ async def perform_harvest_for_user(user_id: int, allow_chain: bool = True) -> di
     benefit from the user's /orchard upgrades. Set allow_chain=False for gardener-triggered harvests (no chain).
     Returns dict with total_value, gathered_items, current_balance, chain_chance, total_base_value,
     bloom_multiplier, water_multiplier, total_value_before_daily, tree_rings_to_award."""
-    active_events = get_active_events_cached()
-    user_upgrades = get_user_basket_upgrades(user_id)
+    # Fetch all user data in parallel using thread pool
+    active_events, user_upgrades, harvest_upgrades = await asyncio.gather(
+        run_db_operation(get_active_events_cached),
+        run_db_operation(get_user_basket_upgrades, user_id),
+        run_db_operation(get_user_harvest_upgrades, user_id)
+    )
     basket_tier = user_upgrades["basket"]
     soil_tier = user_upgrades["soil"]
-    harvest_upgrades = get_user_harvest_upgrades(user_id)
     car_tier = harvest_upgrades["car"]
     chain_tier = harvest_upgrades["chain"]
     fertilizer_tier = harvest_upgrades["fertilizer"]
@@ -3673,14 +3718,20 @@ async def perform_harvest_for_user(user_id: int, allow_chain: bool = True) -> di
     gmo_chance = min(gmo_chance, 1.0)
     if hourly_event and hourly_event.get("effects", {}).get("event_id", "") == "basket_boost":
         basket_multiplier *= 1.5
-    bloom_multiplier = get_bloom_multiplier(user_id)
-    water_multiplier = get_water_multiplier(user_id)
-    plants_before_harvest = get_user_total_items(user_id)
+    # Fetch all multipliers and initial data in parallel (fetch once, use for all items)
+    bloom_multiplier, water_multiplier, rank_multiplier, achievement_multiplier, daily_bonus_multiplier, plants_before_harvest, current_balance = await asyncio.gather(
+        run_db_operation(get_bloom_multiplier, user_id),
+        run_db_operation(get_water_multiplier, user_id),
+        run_db_operation(get_rank_perma_buff_multiplier, user_id),
+        run_db_operation(get_achievement_multiplier, user_id),
+        run_db_operation(get_daily_bonus_multiplier, user_id),
+        run_db_operation(get_user_total_items, user_id),
+        run_db_operation(get_user_balance, user_id)
+    )
     gathered_items = []
     total_value = 0.0
     total_base_value = 0.0
     total_value_before_daily = 0.0
-    current_balance = get_user_balance(user_id)
     for i in range(total_items_to_harvest):
         item = random.choice(GATHERABLE_ITEMS)
         name = item["name"]
@@ -3741,33 +3792,35 @@ async def perform_harvest_for_user(user_id: int, allow_chain: bool = True) -> di
         base_value_before_bloom = final_value
         final_value *= bloom_multiplier
         final_value *= water_multiplier
-        final_value *= get_rank_perma_buff_multiplier(user_id)
-        final_value *= get_achievement_multiplier(user_id)
-        daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
+        final_value *= rank_multiplier
+        final_value *= achievement_multiplier
         value_before_daily = final_value
         final_value *= daily_bonus_multiplier
         current_balance += final_value
         total_value += final_value
         total_base_value += base_value_before_bloom
         total_value_before_daily += value_before_daily
-        add_user_item(user_id, name)
-        add_ripeness_stat(user_id, ripeness["name"])
-        # Increment total_items for userstats display (harvests should count towards total plants)
-        # But do NOT increment gather_stats categories/items (those are for gatherer achievements only)
-        increment_total_items_only(user_id)
+        # Batch database operations - run them in parallel
+        await asyncio.gather(
+            run_db_operation(add_user_item, user_id, name),
+            run_db_operation(add_ripeness_stat, user_id, ripeness["name"]),
+            run_db_operation(increment_total_items_only, user_id),
+            return_exceptions=True
+        )
         gathered_items.append({"name": name, "value": final_value, "ripeness": ripeness["name"], "is_gmo": is_gmo})
-    current_total = get_user_total_items(user_id)
+    current_total = await run_db_operation(get_user_total_items, user_id)
     tree_rings_to_award = 0
     for milestone in range(200, current_total + 1, 200):
         if plants_before_harvest < milestone <= current_total:
             tree_rings_to_award += 1
+    # Batch final database operations
+    db_operations = [run_db_operation(update_user_balance, user_id, current_balance)]
     if tree_rings_to_award > 0:
-        increment_tree_rings(user_id, tree_rings_to_award)
+        db_operations.append(run_db_operation(increment_tree_rings, user_id, tree_rings_to_award))
+    await asyncio.gather(*db_operations, return_exceptions=True)
     
     # Note: Gatherer achievement check removed - harvests should not contribute to gatherer achievements
     # Achievement checking is now done in the /harvest command handler to only count actual /harvest commands
-    
-    update_user_balance(user_id, current_balance)
     return {
         "total_value": total_value,
         "gathered_items": gathered_items,
@@ -3789,7 +3842,7 @@ async def harvest(interaction: discord.Interaction):
         if not await safe_defer(interaction, ephemeral=False):
             return
         user_id = interaction.user.id
-        can_user_harvest, time_left, is_roulette_cooldown = can_harvest(user_id)
+        can_user_harvest, time_left, is_roulette_cooldown = await run_db_operation(can_harvest, user_id)
         if not can_user_harvest:
             if is_roulette_cooldown:
                 # Russian Roulette elimination cooldown
@@ -3975,22 +4028,28 @@ async def achievements(interaction: discord.Interaction):
             return
         
         user_id = interaction.user.id
-        total_items = get_user_total_items(user_id)
-        hidden_achievements_count = get_user_hidden_achievements_count(user_id)
+        # Fetch initial data in parallel
+        total_items, hidden_achievements_count, total_boost_multiplier = await asyncio.gather(
+            run_db_operation(get_user_total_items, user_id),
+            run_db_operation(get_user_hidden_achievements_count, user_id),
+            run_db_operation(get_achievement_multiplier, user_id)
+        )
         
         # Create embed
         embed = discord.Embed(
             title=f"🏆 {interaction.user.name}'s Achievements",
             color=discord.Color.gold()
         )
-        
-        # Calculate total boost
-        total_boost_multiplier = get_achievement_multiplier(user_id)
         total_boost_percent = (total_boost_multiplier - 1.0) * 100
         
         # Process each achievement category
-        for achievement_name, achievement_data in ACHIEVEMENTS.items():
-            current_level = get_user_achievement_level(user_id, achievement_name)
+        # Fetch all achievement levels in parallel
+        achievement_levels = await asyncio.gather(*[
+            run_db_operation(get_user_achievement_level, user_id, achievement_name)
+            for achievement_name in ACHIEVEMENTS.keys()
+        ])
+        
+        for (achievement_name, achievement_data), current_level in zip(ACHIEVEMENTS.items(), achievement_levels):
             levels = achievement_data["levels"]
             
             # Get the current level data
@@ -4056,7 +4115,7 @@ async def bloom(interaction: discord.Interaction):
             return
         
         user_id = interaction.user.id
-        total_items = get_user_total_items(user_id)
+        total_items = await run_db_operation(get_user_total_items, user_id)
         
         # Check if user has at least 3000 plants
         if total_items < 3000:
@@ -4066,15 +4125,17 @@ async def bloom(interaction: discord.Interaction):
                 ephemeral=True)
             return
         
-        # Get current stats before blooming
-        old_rank = get_bloom_rank(user_id)
-        tree_rings = get_user_tree_rings(user_id)
+        # Get current stats before blooming in parallel
+        old_rank, tree_rings = await asyncio.gather(
+            run_db_operation(get_bloom_rank, user_id),
+            run_db_operation(get_user_tree_rings, user_id)
+        )
         
         # Perform bloom
-        perform_bloom(user_id)
+        await run_db_operation(perform_bloom, user_id)
         
         # Get new stats
-        new_rank = get_bloom_rank(user_id)
+        new_rank = await run_db_operation(get_bloom_rank, user_id)
         
         # Assign Bloom Rank role
         old_bloom_role = None
@@ -4095,7 +4156,7 @@ async def bloom(interaction: discord.Interaction):
         embed.add_field(name="🌳 Tree Rings", value=f"**{tree_rings}** Tree Rings", inline=False)
         
         if tree_rings > 0:
-            multiplier = get_bloom_multiplier(user_id)
+            multiplier = await run_db_operation(get_bloom_multiplier, user_id)
             multiplier_percent = (multiplier - 1.0) * 100
             embed.add_field(
                 name="💰 Money Boost", 
@@ -4127,8 +4188,11 @@ async def userstats(interaction: discord.Interaction):
             return
         
         user_id = interaction.user.id
-        user_balance = get_user_balance(user_id)
-        total_items = get_user_total_items(user_id)
+        # Fetch initial data in parallel
+        user_balance, total_items = await asyncio.gather(
+            run_db_operation(get_user_balance, user_id),
+            run_db_operation(get_user_total_items, user_id)
+        )
         
         # Calculate items needed for next rankup
         # PLANTER I: 0-49 (need 50 for PLANTER II)
@@ -4184,22 +4248,23 @@ async def userstats(interaction: discord.Interaction):
         embed.add_field(name="💰 Balance", value=f"**${user_balance:.2f}**", inline=True)
         embed.add_field(name="🌱 Plants Gathered", value=f"**{total_items}** plants", inline=True)
         
-        # Add Bloom Rank and Tree Rings
-        bloom_rank = get_bloom_rank(user_id)
-        tree_rings = get_user_tree_rings(user_id)
-        bloom_multiplier = get_bloom_multiplier(user_id)
+        # Fetch all stats in parallel
+        bloom_rank, tree_rings, bloom_multiplier, rank_perma_buff_multiplier, water_streak, daily_bonus_multiplier = await asyncio.gather(
+            run_db_operation(get_bloom_rank, user_id),
+            run_db_operation(get_user_tree_rings, user_id),
+            run_db_operation(get_bloom_multiplier, user_id),
+            run_db_operation(get_rank_perma_buff_multiplier, user_id),
+            run_db_operation(get_user_consecutive_water_days, user_id),
+            run_db_operation(get_daily_bonus_multiplier, user_id)
+        )
+        
         embed.add_field(name="🌲 Bloom Rank", value=f"**{bloom_rank}**", inline=True)
         embed.add_field(name="🌳 Tree Rings", value=f"**{tree_rings}** ({bloom_multiplier:.2f}x)", inline=True)
         
         # Add Rank Perma Buff (only if not PINE I)
-        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
         if bloom_rank != "PINE I":
             rank_perma_buff_percent = (rank_perma_buff_multiplier - 1.0) * 100
             embed.add_field(name="⭐ Rank Boost", value=f"**+{rank_perma_buff_percent:.1f}%**", inline=True)
-        
-        # Add Water Streak
-        water_streak = get_user_consecutive_water_days(user_id)
-        daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
         day_text = "day" if water_streak == 1 else "days"
         embed.add_field(name="💧 Water Streak", value=f"**{water_streak}** {day_text} ({daily_bonus_multiplier:.2f}x)", inline=True)
         
@@ -4222,7 +4287,7 @@ async def almanac(interaction: discord.Interaction):
             return
         
         user_id = interaction.user.id
-        user_items = get_user_items(user_id)
+        user_items = await run_db_operation(get_user_items, user_id)
         
         if not user_items:
             embed = discord.Embed(
@@ -4260,10 +4325,12 @@ class BasketUpgradeView(discord.ui.View):
         self.user_id = user_id
         self.guild = guild
     
-    def create_embed(self) -> discord.Embed:
+    async def create_embed(self) -> discord.Embed:
         """Create the basket upgrade embed."""
-        upgrades = get_user_basket_upgrades(self.user_id)
-        balance = get_user_balance(self.user_id)
+        upgrades, balance = await asyncio.gather(
+            run_db_operation(get_user_basket_upgrades, self.user_id),
+            run_db_operation(get_user_balance, self.user_id)
+        )
         
         embed = discord.Embed(
             title="🛒 Gear Upgrade Shop",
@@ -4390,7 +4457,7 @@ class BasketUpgradeView(discord.ui.View):
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your gear shop!", ephemeral=True)
                 return
             
-            embed = self.create_embed()
+            embed = await self.create_embed()
             await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
         except Exception as e:
             print(f"Error in refresh (gear): {e}")
@@ -4402,7 +4469,10 @@ class BasketUpgradeView(discord.ui.View):
                 await safe_interaction_response(interaction, interaction.response.send_message, f"❌ This is not your gear shop!", ephemeral=True)
                 return
             
-            upgrades = get_user_basket_upgrades(self.user_id)
+            upgrades, balance = await asyncio.gather(
+                run_db_operation(get_user_basket_upgrades, self.user_id),
+                run_db_operation(get_user_balance, self.user_id)
+            )
             current_tier = upgrades[upgrade_type]
             
             if current_tier >= 10:
@@ -4410,7 +4480,6 @@ class BasketUpgradeView(discord.ui.View):
                 return
             
             cost = UPGRADE_PRICES[current_tier]
-            balance = get_user_balance(self.user_id)
             
             if balance < cost:
                 await safe_interaction_response(interaction, interaction.response.send_message,
@@ -4418,17 +4487,20 @@ class BasketUpgradeView(discord.ui.View):
                     ephemeral=True)
                 return
             
-            # Deduct money and upgrade
+            # Deduct money and upgrade in parallel
             new_balance = balance - cost
-            update_user_balance(self.user_id, new_balance)
-            set_user_basket_upgrade(self.user_id, upgrade_type, current_tier + 1)
-            
             next_upgrade = upgrade_list[current_tier]
+            
+            await asyncio.gather(
+                run_db_operation(update_user_balance, self.user_id, new_balance),
+                run_db_operation(set_user_basket_upgrade, self.user_id, upgrade_type, current_tier + 1),
+                return_exceptions=True
+            )
             
             # Send quick confirmation and update the main embed
             await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
             
-            embed = self.create_embed()
+            embed = await self.create_embed()
             try:
                 await interaction.message.edit(embed=embed, view=self)
             except:
@@ -4447,7 +4519,7 @@ async def gear(interaction: discord.Interaction):
         
         user_id = interaction.user.id
         view = BasketUpgradeView(user_id, interaction.guild)
-        embed = view.create_embed()
+        embed = await view.create_embed()
         
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
     except Exception as e:
@@ -4462,10 +4534,12 @@ class HarvestUpgradeView(discord.ui.View):
         self.user_id = user_id
         self.guild = guild
     
-    def create_embed(self) -> discord.Embed:
+    async def create_embed(self) -> discord.Embed:
         """Create the harvest upgrade embed."""
-        upgrades = get_user_harvest_upgrades(self.user_id)
-        balance = get_user_balance(self.user_id)
+        upgrades, balance = await asyncio.gather(
+            run_db_operation(get_user_harvest_upgrades, self.user_id),
+            run_db_operation(get_user_balance, self.user_id)
+        )
         
         embed = discord.Embed(
             title="🚜 Harvest Upgrade Shop",
@@ -4595,7 +4669,7 @@ class HarvestUpgradeView(discord.ui.View):
             cooldown_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_workers} ({current_reduction_text} cooldown)"
         
         embed.add_field(
-            name="⚡ PATH 4: COOLDOWN REDUCTION",
+            name="⚡ PATH 4: WORKERS",
             value=cooldown_text,
             inline=False
         )
@@ -4643,7 +4717,7 @@ class HarvestUpgradeView(discord.ui.View):
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your harvest shop!", ephemeral=True)
                 return
             
-            embed = self.create_embed()
+            embed = await self.create_embed()
             await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
         except Exception as e:
             print(f"Error in refresh (harvest): {e}")
@@ -4655,7 +4729,10 @@ class HarvestUpgradeView(discord.ui.View):
                 await safe_interaction_response(interaction, interaction.response.send_message, f"❌ This is not your harvest shop!", ephemeral=True)
                 return
             
-            upgrades = get_user_harvest_upgrades(self.user_id)
+            upgrades, balance = await asyncio.gather(
+                run_db_operation(get_user_harvest_upgrades, self.user_id),
+                run_db_operation(get_user_balance, self.user_id)
+            )
             current_tier = upgrades[upgrade_type]
             
             if current_tier >= 10:
@@ -4663,7 +4740,6 @@ class HarvestUpgradeView(discord.ui.View):
                 return
             
             cost = price_list[current_tier]
-            balance = get_user_balance(self.user_id)
             
             if balance < cost:
                 await safe_interaction_response(interaction, interaction.response.send_message,
@@ -4671,25 +4747,28 @@ class HarvestUpgradeView(discord.ui.View):
                     ephemeral=True)
                 return
             
-            # Deduct money and upgrade
+            # Deduct money and upgrade in parallel
             new_balance = balance - cost
-            update_user_balance(self.user_id, new_balance)
-            set_user_harvest_upgrade(self.user_id, upgrade_type, current_tier + 1)
-            
             next_upgrade = upgrade_list[current_tier]
             
+            await asyncio.gather(
+                run_db_operation(update_user_balance, self.user_id, new_balance),
+                run_db_operation(set_user_harvest_upgrade, self.user_id, upgrade_type, current_tier + 1),
+                return_exceptions=True
+            )
+            
             # Check for Maxed Out achievement
-            achievement_unlocked = check_maxed_out_achievement(self.user_id)
+            achievement_unlocked = await run_db_operation(check_maxed_out_achievement, self.user_id)
             
             # Send quick confirmation and update the main embed
-            if achievement_unlocked:
-                await safe_interaction_response(interaction, interaction.response.send_message, 
-                    f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.\n\n"
-                    f"🎉 **Hidden Achievement Unlocked: Maxed Out!** 🎉", ephemeral=True)
-            else:
-                await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
+            await safe_interaction_response(interaction, interaction.response.send_message, 
+                f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
             
-            embed = self.create_embed()
+            # Send achievement notification as embed if unlocked
+            if achievement_unlocked:
+                await send_hidden_achievement_notification(interaction, "maxed_out")
+            
+            embed = await self.create_embed()
             try:
                 await interaction.message.edit(embed=embed, view=self)
             except:
@@ -4708,7 +4787,7 @@ async def orchard(interaction: discord.Interaction):
         
         user_id = interaction.user.id
         view = HarvestUpgradeView(user_id, interaction.guild)
-        embed = view.create_embed()
+        embed = await view.create_embed()
         
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
     except Exception as e:
@@ -4724,11 +4803,13 @@ class HireView(discord.ui.View):
         self.current_page = 0  # 0-4 for gardeners 1-5
         self.total_pages = 5
     
-    def create_embed(self, page: int) -> discord.Embed:
+    async def create_embed(self, page: int) -> discord.Embed:
         """Create the embed for a specific gardener page."""
         slot_id = page + 1  # Convert 0-4 to 1-5
-        gardeners = get_user_gardeners(self.user_id)
-        balance = get_user_balance(self.user_id)
+        gardeners, balance = await asyncio.gather(
+            run_db_operation(get_user_gardeners, self.user_id),
+            run_db_operation(get_user_balance, self.user_id)
+        )
         gardener_dict = {g["id"]: g for g in gardeners}
         gardener = gardener_dict.get(slot_id)
         price = GARDENER_PRICES[slot_id - 1]
@@ -4796,7 +4877,7 @@ class HireView(discord.ui.View):
         
         return embed
     
-    def update_buttons(self):
+    async def update_buttons(self):
         """Update button states based on current page and gardener status."""
         # Update navigation buttons
         self.previous_button.disabled = self.current_page == 0
@@ -4804,10 +4885,12 @@ class HireView(discord.ui.View):
         
         # Update hire button
         slot_id = self.current_page + 1
-        gardeners = get_user_gardeners(self.user_id)
+        gardeners, balance = await asyncio.gather(
+            run_db_operation(get_user_gardeners, self.user_id),
+            run_db_operation(get_user_balance, self.user_id)
+        )
         gardener_dict = {g["id"]: g for g in gardeners}
         gardener = gardener_dict.get(slot_id)
-        balance = get_user_balance(self.user_id)
         price = GARDENER_PRICES[slot_id - 1]
         
         if gardener:
@@ -4862,8 +4945,8 @@ class HireView(discord.ui.View):
             
             if self.current_page > 0:
                 self.current_page -= 1
-                self.update_buttons()
-                embed = self.create_embed(self.current_page)
+                await self.update_buttons()
+                embed = await self.create_embed(self.current_page)
                 await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
             else:
                 await safe_defer(interaction)
@@ -4880,8 +4963,8 @@ class HireView(discord.ui.View):
             
             if self.current_page < self.total_pages - 1:
                 self.current_page += 1
-                self.update_buttons()
-                embed = self.create_embed(self.current_page)
+                await self.update_buttons()
+                embed = await self.create_embed(self.current_page)
                 await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
             else:
                 await safe_defer(interaction)
@@ -4897,7 +4980,10 @@ class HireView(discord.ui.View):
                 return
             
             slot_id = self.current_page + 1
-            gardeners = get_user_gardeners(self.user_id)
+            gardeners, balance = await asyncio.gather(
+                run_db_operation(get_user_gardeners, self.user_id),
+                run_db_operation(get_user_balance, self.user_id)
+            )
             gardener_dict = {g["id"]: g for g in gardeners}
             
             # Check if slot is already taken
@@ -4911,7 +4997,6 @@ class HireView(discord.ui.View):
                 return
             
             price = GARDENER_PRICES[slot_id - 1]
-            balance = get_user_balance(self.user_id)
             
             if balance < price:
                 await safe_interaction_response(interaction, interaction.response.send_message,
@@ -4920,24 +5005,24 @@ class HireView(discord.ui.View):
                 return
             
             # Hire the gardener
-            success = add_gardener(self.user_id, slot_id, price)
+            success = await run_db_operation(add_gardener, self.user_id, slot_id, price)
             if not success:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Failed to hire gardener. Please try again.", ephemeral=True)
                 return
             
             # Check for Maxed Out achievement
-            achievement_unlocked = check_maxed_out_achievement(self.user_id)
+            achievement_unlocked = await run_db_operation(check_maxed_out_achievement, self.user_id)
             
             # Send confirmation and update embed
-            if achievement_unlocked:
-                await safe_interaction_response(interaction, interaction.response.send_message, 
-                    f"✅ Hired **Gardener #{slot_id}** for ${price:,.2f}! They'll start gathering for you automatically.\n\n"
-                    f"🎉 **Hidden Achievement Unlocked: Maxed Out!** 🎉", ephemeral=True)
-            else:
-                await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Hired **Gardener #{slot_id}** for ${price:,.2f}! They'll start gathering for you automatically.", ephemeral=True)
+            await safe_interaction_response(interaction, interaction.response.send_message, 
+                f"✅ Hired **Gardener #{slot_id}** for ${price:,.2f}! They'll start gathering for you automatically.", ephemeral=True)
             
-            embed = self.create_embed(self.current_page)
-            self.update_buttons()
+            # Send achievement notification as embed if unlocked
+            if achievement_unlocked:
+                await send_hidden_achievement_notification(interaction, "maxed_out")
+            
+            embed = await self.create_embed(self.current_page)
+            await self.update_buttons()
             try:
                 await interaction.message.edit(embed=embed, view=self)
             except:
@@ -4954,7 +5039,10 @@ class HireView(discord.ui.View):
                 return
             
             slot_id = self.current_page + 1
-            gardeners = get_user_gardeners(self.user_id)
+            gardeners, balance = await asyncio.gather(
+                run_db_operation(get_user_gardeners, self.user_id),
+                run_db_operation(get_user_balance, self.user_id)
+            )
             gardener_dict = {g["id"]: g for g in gardeners}
             gardener = gardener_dict.get(slot_id)
             
@@ -4968,32 +5056,30 @@ class HireView(discord.ui.View):
             
             tool_info = GARDENER_TOOLS.get(slot_id, {"name": "Tool", "cost": 0})
             tool_cost = tool_info["cost"]
-            balance = get_user_balance(self.user_id)
             
             if balance < tool_cost:
                 await safe_interaction_response(interaction, interaction.response.send_message,
                     f"❌ You don't have enough money! The **{tool_info['name']}** costs **${tool_cost:,.2f}** but you only have **${balance:,.2f}**.", ephemeral=True)
                 return
             
-            success = set_gardener_has_tool(self.user_id, slot_id, tool_cost)
+            success = await run_db_operation(set_gardener_has_tool, self.user_id, slot_id, tool_cost)
             if not success:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Failed to buy tool. Please try again.", ephemeral=True)
                 return
             
             # Check for Maxed Out achievement
-            achievement_unlocked = check_maxed_out_achievement(self.user_id)
+            achievement_unlocked = await run_db_operation(check_maxed_out_achievement, self.user_id)
             
             chance_pct = tool_info["chance"] * 100
-            if achievement_unlocked:
-                await safe_interaction_response(interaction, interaction.response.send_message,
-                    f"✅ **{tool_info['name']}** purchased for ${tool_cost:,.2f}! This gardener's auto gather now has a **{chance_pct}%** chance to upgrade to a full harvest!\n\n"
-                    f"🎉 **Hidden Achievement Unlocked: Maxed Out!** 🎉", ephemeral=True)
-            else:
-                await safe_interaction_response(interaction, interaction.response.send_message,
-                    f"✅ **{tool_info['name']}** purchased for ${tool_cost:,.2f}! This gardener's auto gather now has a **{chance_pct}%** chance to upgrade to a full harvest!", ephemeral=True)
+            await safe_interaction_response(interaction, interaction.response.send_message,
+                f"✅ **{tool_info['name']}** purchased for ${tool_cost:,.2f}! This gardener's auto gather now has a **{chance_pct}%** chance to upgrade to a full harvest!", ephemeral=True)
             
-            embed = self.create_embed(self.current_page)
-            self.update_buttons()
+            # Send achievement notification as embed if unlocked
+            if achievement_unlocked:
+                await send_hidden_achievement_notification(interaction, "maxed_out")
+            
+            embed = await self.create_embed(self.current_page)
+            await self.update_buttons()
             try:
                 await interaction.message.edit(embed=embed, view=self)
             except:
@@ -5013,8 +5099,8 @@ async def hire(interaction: discord.Interaction):
         user_id = interaction.user.id
         
         view = HireView(user_id)
-        embed = view.create_embed(0)  # Start on page 0 (Gardener #1)
-        view.update_buttons()
+        embed = await view.create_embed(0)  # Start on page 0 (Gardener #1)
+        await view.update_buttons()
         
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
     except Exception as e:
@@ -5030,12 +5116,14 @@ class GpuView(discord.ui.View):
         self.current_page = 0  # 0-9 for GPUs 1-10
         self.total_pages = 10
     
-    def create_embed(self, page: int) -> discord.Embed:
+    async def create_embed(self, page: int) -> discord.Embed:
         """Create the embed for a specific GPU page."""
         gpu_info = GPU_SHOP[page]
         gpu_name = gpu_info["name"]
-        balance = get_user_balance(self.user_id)
-        user_gpus = get_user_gpus(self.user_id)
+        balance, user_gpus = await asyncio.gather(
+            run_db_operation(get_user_balance, self.user_id),
+            run_db_operation(get_user_gpus, self.user_id)
+        )
         
         # Check if user owns this GPU
         already_owned = gpu_name in user_gpus
@@ -5071,7 +5159,7 @@ class GpuView(discord.ui.View):
         
         return embed
     
-    def update_buttons(self):
+    async def update_buttons(self):
         """Update button states based on current page and user balance."""
         # Update navigation buttons
         self.previous_button.disabled = self.current_page == 0
@@ -5080,9 +5168,11 @@ class GpuView(discord.ui.View):
         # Update buy button
         gpu_info = GPU_SHOP[self.current_page]
         gpu_name = gpu_info["name"]
-        balance = get_user_balance(self.user_id)
+        balance, user_gpus = await asyncio.gather(
+            run_db_operation(get_user_balance, self.user_id),
+            run_db_operation(get_user_gpus, self.user_id)
+        )
         price = gpu_info["price"]
-        user_gpus = get_user_gpus(self.user_id)
         already_owned = gpu_name in user_gpus
         
         if already_owned:
@@ -5110,8 +5200,8 @@ class GpuView(discord.ui.View):
             
             if self.current_page > 0:
                 self.current_page -= 1
-                self.update_buttons()
-                embed = self.create_embed(self.current_page)
+                await self.update_buttons()
+                embed = await self.create_embed(self.current_page)
                 await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
             else:
                 await safe_defer(interaction)
@@ -5128,8 +5218,8 @@ class GpuView(discord.ui.View):
             
             if self.current_page < self.total_pages - 1:
                 self.current_page += 1
-                self.update_buttons()
-                embed = self.create_embed(self.current_page)
+                await self.update_buttons()
+                embed = await self.create_embed(self.current_page)
                 await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
             else:
                 await safe_defer(interaction)
@@ -5147,8 +5237,10 @@ class GpuView(discord.ui.View):
             gpu_info = GPU_SHOP[self.current_page]
             gpu_name = gpu_info["name"]
             price = gpu_info["price"]
-            balance = get_user_balance(self.user_id)
-            user_gpus = get_user_gpus(self.user_id)
+            balance, user_gpus = await asyncio.gather(
+                run_db_operation(get_user_balance, self.user_id),
+                run_db_operation(get_user_gpus, self.user_id)
+            )
             
             # Check if already owned
             if gpu_name in user_gpus:
@@ -5162,24 +5254,24 @@ class GpuView(discord.ui.View):
                 return
             
             # Buy the GPU
-            success = add_gpu(self.user_id, gpu_name, price)
+            success = await run_db_operation(add_gpu, self.user_id, gpu_name, price)
             if not success:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Failed to buy GPU. Please try again.", ephemeral=True)
                 return
             
             # Check for Maxed Out achievement
-            achievement_unlocked = check_maxed_out_achievement(self.user_id)
+            achievement_unlocked = await run_db_operation(check_maxed_out_achievement, self.user_id)
             
             # Send confirmation and update embed
-            if achievement_unlocked:
-                await safe_interaction_response(interaction, interaction.response.send_message, 
-                    f"✅ Purchased **{gpu_name}** for ${price:,.2f}! It will boost your mining!\n\n"
-                    f"🎉 **Hidden Achievement Unlocked: Maxed Out!** 🎉", ephemeral=True)
-            else:
-                await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Purchased **{gpu_name}** for ${price:,.2f}! It will boost your mining!", ephemeral=True)
+            await safe_interaction_response(interaction, interaction.response.send_message, 
+                f"✅ Purchased **{gpu_name}** for ${price:,.2f}! It will boost your mining!", ephemeral=True)
             
-            embed = self.create_embed(self.current_page)
-            self.update_buttons()
+            # Send achievement notification as embed if unlocked
+            if achievement_unlocked:
+                await send_hidden_achievement_notification(interaction, "maxed_out")
+            
+            embed = await self.create_embed(self.current_page)
+            await self.update_buttons()
             try:
                 await interaction.message.edit(embed=embed, view=self)
             except:
@@ -5199,8 +5291,8 @@ async def gpu(interaction: discord.Interaction):
         user_id = interaction.user.id
         
         view = GpuView(user_id)
-        embed = view.create_embed(0)  # Start on page 0 (GPU 1)
-        view.update_buttons()
+        embed = await view.create_embed(0)  # Start on page 0 (GPU 1)
+        await view.update_buttons()
         
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
     except Exception as e:
@@ -5924,8 +6016,8 @@ class LeaderboardView(discord.ui.View):
         try:
             if self.current_page > 0:
                 self.current_page -= 1
-                self.update_buttons()
-                embed = self.create_embed(self.current_page)
+                await self.update_buttons()
+                embed = await self.create_embed(self.current_page)
                 await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
             else:
                 await safe_defer(interaction)
@@ -5938,8 +6030,8 @@ class LeaderboardView(discord.ui.View):
         try:
             if self.current_page < self.total_pages - 1:
                 self.current_page += 1
-                self.update_buttons()
-                embed = self.create_embed(self.current_page)
+                await self.update_buttons()
+                embed = await self.create_embed(self.current_page)
                 await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
             else:
                 await safe_defer(interaction)
@@ -5969,13 +6061,13 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
     # Get all guild member IDs
     guild_member_ids = {member.id for member in guild.members}
     
-    # Get leaderboard data
+    # Get leaderboard data (run in thread pool to avoid blocking)
     if leaderboard_type == "plants":
-        all_data = get_all_users_total_items()
+        all_data = await run_db_operation(get_all_users_total_items)
     elif leaderboard_type == "money":
-        all_data = get_all_users_balance()
+        all_data = await run_db_operation(get_all_users_balance)
     else:  # ranks
-        all_data = get_all_users_ranks()
+        all_data = await run_db_operation(get_all_users_ranks)
     
     # Filter to only include users in the guild
     leaderboard_data = [(user_id, value) for user_id, value in all_data if user_id in guild_member_ids]
@@ -6155,19 +6247,21 @@ async def update_all_leaderboards():
     
     while not bot.is_closed():
         try:
-            # Update leaderboards for all guilds the bot is in
-            for guild in bot.guilds:
-                try:
-                    await update_leaderboard_message(guild, "plants")
-                    await asyncio.sleep(2)  # Delay between updates to avoid rate limits
-                    await update_leaderboard_message(guild, "money")
-                    await asyncio.sleep(2)  # Delay between updates
-                    await update_leaderboard_message(guild, "ranks")
-                    await asyncio.sleep(2)  # Delay between updates
-                except Exception as e:
-                    logging.error(f"Error updating leaderboards for guild {guild.name}: {e}", exc_info=True)
-                # Delay between guilds to prevent rate limiting
-                await asyncio.sleep(1)
+            # Get the first (and only) guild
+            if not bot.guilds:
+                await asyncio.sleep(60)
+                continue
+            
+            guild = bot.guilds[0]
+            try:
+                await update_leaderboard_message(guild, "plants")
+                await asyncio.sleep(2)  # Delay between updates to avoid rate limits
+                await update_leaderboard_message(guild, "money")
+                await asyncio.sleep(2)  # Delay between updates
+                await update_leaderboard_message(guild, "ranks")
+                await asyncio.sleep(2)  # Delay between updates
+            except Exception as e:
+                logging.error(f"Error updating leaderboards for guild {guild.name}: {e}", exc_info=True)
         except Exception as e:
             logging.error(f"Error in leaderboard update task: {e}", exc_info=True)
         
@@ -6595,22 +6689,24 @@ async def update_all_marketboards():
     
     while not bot.is_closed():
         try:
-            # Update marketboards for all guilds the bot is in
-            for guild in bot.guilds:
-                try:
-                    await update_marketboard_message(guild)
-                    await asyncio.sleep(2)  # Delay after marketboard update
-                    # Update leaderboards after stock prices change
-                    await update_leaderboard_message(guild, "plants")
-                    await asyncio.sleep(2)  # Delay between updates to avoid rate limits
-                    await update_leaderboard_message(guild, "money")
-                    await asyncio.sleep(2)  # Delay between updates
-                    await update_leaderboard_message(guild, "ranks")
-                    await asyncio.sleep(2)  # Delay between updates
-                except Exception as e:
-                    logging.error(f"Error updating marketboard/leaderboards for guild {guild.name}: {e}", exc_info=True)
-                # Delay between guilds to prevent rate limiting
-                await asyncio.sleep(1)
+            # Get the first (and only) guild
+            if not bot.guilds:
+                await asyncio.sleep(60)
+                continue
+            
+            guild = bot.guilds[0]
+            try:
+                await update_marketboard_message(guild)
+                await asyncio.sleep(2)  # Delay after marketboard update
+                # Update leaderboards after stock prices change
+                await update_leaderboard_message(guild, "plants")
+                await asyncio.sleep(2)  # Delay between updates to avoid rate limits
+                await update_leaderboard_message(guild, "money")
+                await asyncio.sleep(2)  # Delay between updates
+                await update_leaderboard_message(guild, "ranks")
+                await asyncio.sleep(2)  # Delay between updates
+            except Exception as e:
+                logging.error(f"Error updating marketboard/leaderboards for guild {guild.name}: {e}", exc_info=True)
         except Exception as e:
             logging.error(f"Error in marketboard update task: {e}", exc_info=True)
         
@@ -7032,15 +7128,113 @@ async def update_all_coinbase():
             logging.info("Starting crypto price update...")
             await update_crypto_prices_market()
             
-            # Update coinbase channels for all guilds the bot is in
-            for guild in bot.guilds:
-                await update_coinbase_message(guild)
-                await asyncio.sleep(1)  # Small delay between updates
+            # Update coinbase channel for the first (and only) guild
+            if bot.guilds:
+                await update_coinbase_message(bot.guilds[0])
         except Exception as e:
             logging.error(f"Error in coinbase update task: {e}", exc_info=True)
         
         # Wait 60 seconds before next update
         await asyncio.sleep(60)
+
+
+async def process_gardener_user(user_id: int, gardeners: list, semaphore: asyncio.Semaphore):
+    """Process a single user's gardeners. Called concurrently for multiple users."""
+    async with semaphore:
+        try:
+            # Process each gardener
+            for gardener in gardeners:
+                gardener_id = gardener.get("id")
+                if not gardener_id:
+                    continue
+                
+                # Get chance based on gardener level
+                gardener_chance = GARDENER_CHANCES.get(gardener_id, 0.05)  # Default to 5% if invalid ID
+                if random.random() < gardener_chance:
+                    try:
+                        # Stacked tool chance: any gardener with a tool can trigger harvest upgrade
+                        total_harvest_upgrade_chance = sum(
+                            GARDENER_TOOLS.get(g["id"], {}).get("chance", 0)
+                            for g in gardeners
+                            if g.get("has_tool")
+                        )
+                        upgraded_to_harvest = total_harvest_upgrade_chance > 0 and random.random() < total_harvest_upgrade_chance
+                        
+                        if upgraded_to_harvest:
+                            # Perform full harvest instead of single gather (orchard upgrades apply; no chain)
+                            harvest_result = await perform_harvest_for_user(user_id, allow_chain=False)
+                            total_value = harvest_result["total_value"]
+                            current_balance = harvest_result["current_balance"]
+                            item_count = len(harvest_result["gathered_items"])
+                            
+                            # Update gardener stats with total money earned from harvest and plant count
+                            await run_db_operation(update_gardener_stats, user_id, gardener_id, total_value, item_count)
+                            
+                            # Send cool upgrade message to #lawn
+                            for guild in bot.guilds:
+                                member = guild.get_member(user_id)
+                                if member:
+                                    lawn_channel = discord.utils.get(guild.text_channels, name="lawn")
+                                    if lawn_channel and lawn_channel.permissions_for(guild.me).send_messages:
+                                        try:
+                                            mention = member.mention
+                                            embed = discord.Embed(
+                                                title="🌾✨ GATHER UPGRADED TO HARVEST! ✨🌾",
+                                                description=f"{mention}, **the gardener's tool sparked!**",
+                                                color=discord.Color.gold()
+                                            )
+                                            
+                                            # Display actual items (up to 20)
+                                            items_text = ""
+                                            for item in harvest_result["gathered_items"][:20]:
+                                                gmo_text = " GMO! ✨" if item["is_gmo"] else ""
+                                                items_text += f"• **{item['name']}** - ${item['value']:.2f} ({item['ripeness']}){gmo_text}\n"
+                                            
+                                            embed.add_field(name="📦 Items Harvested", value=items_text or "No items", inline=False)
+                                            embed.add_field(name="💰 Total Value", value=f"**${total_value:,.2f}**", inline=True)
+                                            embed.add_field(name="💵 New Balance", value=f"**${current_balance:,.2f}**", inline=True)
+                                            await lawn_channel.send(embed=embed)
+                                            break
+                                        except Exception as e:
+                                            print(f"Error sending gardener harvest-upgrade notification to #lawn in {guild.name} for user {user_id}: {e}")
+                                    break
+                        else:
+                            # Normal single gather (orchard fertilizer applies; no chain)
+                            gather_result = await perform_gather_for_user(user_id, apply_cooldown=False, apply_orchard_fertilizer=True)
+                            # Single gather = 1 plant
+                            await run_db_operation(update_gardener_stats, user_id, gardener_id, gather_result["value"], 1)
+                            
+                            user_name = "User"
+                            for guild in bot.guilds:
+                                member = guild.get_member(user_id)
+                                if member:
+                                    user_name = member.display_name or member.name
+                                    break
+                            
+                            for guild in bot.guilds:
+                                member = guild.get_member(user_id)
+                                if member:
+                                    lawn_channel = discord.utils.get(guild.text_channels, name="lawn")
+                                    if lawn_channel:
+                                        try:
+                                            if lawn_channel.permissions_for(guild.me).send_messages:
+                                                embed = discord.Embed(
+                                                    title=f"🌿 {user_name}'s Gardener gathered!",
+                                                    description=f"Their gardener found a **{gather_result['name']}**!",
+                                                    color=discord.Color.green()
+                                                )
+                                                embed.add_field(name="Value", value=f"**${gather_result['value']:.2f}**", inline=True)
+                                                embed.add_field(name="Ripeness", value=gather_result['ripeness'], inline=True)
+                                                embed.add_field(name="GMO?", value="Yes ✨" if gather_result['is_gmo'] else "No", inline=False)
+                                                await lawn_channel.send(embed=embed)
+                                                break
+                                        except Exception as e:
+                                            print(f"Error sending gardener notification to #lawn channel in {guild.name} for user {user_id}: {e}")
+                                    break
+                    except Exception as e:
+                        print(f"Error processing gather for gardener {gardener_id} of user {user_id}: {e}")
+        except Exception as e:
+            print(f"Error processing gardener user {user_id}: {e}")
 
 
 async def gardener_background_task():
@@ -7050,111 +7244,91 @@ async def gardener_background_task():
     # Wait a bit for bot to fully initialize
     await asyncio.sleep(5)
     
+    # Create semaphore to limit concurrent user processing
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_GARDENER_USERS)
+    
     while not bot.is_closed():
         try:
-            # Get all users with gardeners
-            users_with_gardeners = get_all_users_with_gardeners()
+            # Get all users with gardeners (run in thread pool to avoid blocking)
+            users_with_gardeners = await run_db_operation(get_all_users_with_gardeners)
             
-            for user_id, gardeners in users_with_gardeners:
-                # Process each gardener
-                for gardener in gardeners:
-                    gardener_id = gardener.get("id")
-                    if not gardener_id:
-                        continue
-                    
-                    # Get chance based on gardener level
-                    gardener_chance = GARDENER_CHANCES.get(gardener_id, 0.05)  # Default to 5% if invalid ID
-                    if random.random() < gardener_chance:
-                        try:
-                            # Stacked tool chance: any gardener with a tool can trigger harvest upgrade
-                            total_harvest_upgrade_chance = sum(
-                                GARDENER_TOOLS.get(g["id"], {}).get("chance", 0)
-                                for g in gardeners
-                                if g.get("has_tool")
-                            )
-                            upgraded_to_harvest = total_harvest_upgrade_chance > 0 and random.random() < total_harvest_upgrade_chance
-                            
-                            if upgraded_to_harvest:
-                                # Perform full harvest instead of single gather (orchard upgrades apply; no chain)
-                                harvest_result = await perform_harvest_for_user(user_id, allow_chain=False)
-                                total_value = harvest_result["total_value"]
-                                current_balance = harvest_result["current_balance"]
-                                item_count = len(harvest_result["gathered_items"])
-                                
-                                # Update gardener stats with total money earned from harvest and plant count
-                                update_gardener_stats(user_id, gardener_id, total_value, plants_count=item_count)
-                                
-                                # Send cool upgrade message to #lawn
-                                for guild in bot.guilds:
-                                    member = guild.get_member(user_id)
-                                    if member:
-                                        lawn_channel = discord.utils.get(guild.text_channels, name="lawn")
-                                        if lawn_channel and lawn_channel.permissions_for(guild.me).send_messages:
-                                            try:
-                                                mention = member.mention
-                                                embed = discord.Embed(
-                                                    title="🌾✨ GATHER UPGRADED TO HARVEST! ✨🌾",
-                                                    description=f"{mention}, **the gardener's tool sparked!**",
-                                                    color=discord.Color.gold()
-                                                )
-                                                
-                                                # Display actual items (up to 20)
-                                                items_text = ""
-                                                for item in harvest_result["gathered_items"][:20]:
-                                                    gmo_text = " GMO! ✨" if item["is_gmo"] else ""
-                                                    items_text += f"• **{item['name']}** - ${item['value']:.2f} ({item['ripeness']}){gmo_text}\n"
-                                                
-                                                embed.add_field(name="📦 Items Harvested", value=items_text or "No items", inline=False)
-                                                embed.add_field(name="💰 Total Value", value=f"**${total_value:,.2f}**", inline=True)
-                                                embed.add_field(name="💵 New Balance", value=f"**${current_balance:,.2f}**", inline=True)
-                                                await lawn_channel.send(embed=embed)
-                                                break
-                                            except Exception as e:
-                                                print(f"Error sending gardener harvest-upgrade notification to #lawn in {guild.name} for user {user_id}: {e}")
-                                        break
-                            else:
-                                # Normal single gather (orchard fertilizer applies; no chain)
-                                gather_result = await perform_gather_for_user(user_id, apply_cooldown=False, apply_orchard_fertilizer=True)
-                                # Single gather = 1 plant
-                                update_gardener_stats(user_id, gardener_id, gather_result["value"], plants_count=1)
-                                
-                                user_name = "User"
-                                for guild in bot.guilds:
-                                    member = guild.get_member(user_id)
-                                    if member:
-                                        user_name = member.display_name or member.name
-                                        break
-                                
-                                for guild in bot.guilds:
-                                    member = guild.get_member(user_id)
-                                    if member:
-                                        lawn_channel = discord.utils.get(guild.text_channels, name="lawn")
-                                        if lawn_channel:
-                                            try:
-                                                if lawn_channel.permissions_for(guild.me).send_messages:
-                                                    embed = discord.Embed(
-                                                        title=f"🌿 {user_name}'s Gardener gathered!",
-                                                        description=f"Their gardener found a **{gather_result['name']}**!",
-                                                        color=discord.Color.green()
-                                                    )
-                                                    embed.add_field(name="Value", value=f"**${gather_result['value']:.2f}**", inline=True)
-                                                    embed.add_field(name="Ripeness", value=gather_result['ripeness'], inline=True)
-                                                    embed.add_field(name="GMO?", value="Yes ✨" if gather_result['is_gmo'] else "No", inline=False)
-                                                    await lawn_channel.send(embed=embed)
-                                                    break
-                                            except Exception as e:
-                                                print(f"Error sending gardener notification to #lawn channel in {guild.name} for user {user_id}: {e}")
-                                        break
-                        except Exception as e:
-                            print(f"Error processing gather for gardener {gardener_id} of user {user_id}: {e}")
+            # Process users concurrently with semaphore limit
+            tasks = [
+                process_gardener_user(user_id, gardeners, semaphore)
+                for user_id, gardeners in users_with_gardeners
+            ]
             
-            # Small delay to avoid overwhelming the system
-            await asyncio.sleep(1)
+            # Wait for all user processing to complete
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
         except Exception as e:
             print(f"Error in gardener background task: {e}")
         
         # Wait 60 seconds (1 minute) before next check
         await asyncio.sleep(60)
+
+
+async def process_gpu_user(user_id: int, gpus: list, semaphore: asyncio.Semaphore):
+    """Process a single user's GPUs. Called concurrently for multiple users."""
+    async with semaphore:
+        try:
+            # Process each GPU
+            for gpu_name in gpus:
+                # Find GPU info in shop to get tier index and percent_increase
+                gpu_info = None
+                tier_index = 0
+                for idx, gpu in enumerate(GPU_SHOP):
+                    if gpu["name"] == gpu_name:
+                        gpu_info = gpu
+                        tier_index = idx
+                        break
+                
+                if not gpu_info:
+                    continue  # Skip if GPU not found in shop
+                
+                # Calculate mining chance based on GPU tier
+                # Formula: base_chance * (1 + tier_index * 0.5) where base_chance = 0.03 (3%)
+                base_chance = 0.03
+                mining_chance = base_chance * (1 + tier_index * 0.5)
+                
+                if random.random() < mining_chance:
+                    try:
+                        # Randomly select a coin to mine
+                        coin = random.choice(CRYPTO_COINS)
+                        symbol = coin["symbol"]
+                        base_price = coin["base_price"]
+                        
+                        # Calculate mining amount based on coin's base price (proportional to old 200.0 base)
+                        # Target: $50-60 per session average (assuming up to 60 clicks per 60s session, 1 per second)
+                        # This means ~$0.83-$1.00 per click average, so $0.60-$1.40 range with RNG
+                        # At $200 base: $0.60-$1.40 = 0.003-0.007 coins = 30-70 thousandths
+                        # New system: scale by price ratio (200.0 / base_price)
+                        price_ratio = 200.0 / base_price
+                        # Reduced range: 30-70 thousandths (0.003-0.007) at $200 base
+                        # Scaled range: multiply by price_ratio
+                        min_thousandths = int(30 * price_ratio)
+                        max_thousandths = int(70 * price_ratio)
+                        # Ensure at least 1 thousandth
+                        min_thousandths = max(1, min_thousandths)
+                        max_thousandths = max(min_thousandths, max_thousandths)
+                        random_thousandths = random.randint(min_thousandths, max_thousandths)
+                        base_amount = round(random_thousandths / 10000, 4)
+                        
+                        # Apply GPU percent boost
+                        percent_increase = gpu_info["percent_increase"]
+                        percent_multiplier = 1.0 + (percent_increase / 100.0)
+                        amount = round(base_amount * percent_multiplier, 4)
+                        
+                        # Add crypto to user's holdings (run in thread pool)
+                        await run_db_operation(update_user_crypto_holdings, user_id, symbol, amount)
+                        
+                        # Optional: Could send notification to #gathercoin channel
+                        # (Skipping for now to reduce spam, similar to plan note)
+                        
+                    except Exception as e:
+                        print(f"Error processing GPU mining for {gpu_name} of user {user_id}: {e}")
+        except Exception as e:
+            print(f"Error processing GPU user {user_id}: {e}")
 
 
 async def gpu_background_task():
@@ -7164,70 +7338,23 @@ async def gpu_background_task():
     # Wait a bit for bot to fully initialize
     await asyncio.sleep(5)
     
+    # Create semaphore to limit concurrent user processing
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_GPU_USERS)
+    
     while not bot.is_closed():
         try:
-            # Get all users with GPUs
-            users_with_gpus = get_all_users_with_gpus()
+            # Get all users with GPUs (run in thread pool to avoid blocking)
+            users_with_gpus = await run_db_operation(get_all_users_with_gpus)
             
-            for user_id, gpus in users_with_gpus:
-                # Process each GPU
-                for gpu_name in gpus:
-                    # Find GPU info in shop to get tier index and percent_increase
-                    gpu_info = None
-                    tier_index = 0
-                    for idx, gpu in enumerate(GPU_SHOP):
-                        if gpu["name"] == gpu_name:
-                            gpu_info = gpu
-                            tier_index = idx
-                            break
-                    
-                    if not gpu_info:
-                        continue  # Skip if GPU not found in shop
-                    
-                    # Calculate mining chance based on GPU tier
-                    # Formula: base_chance * (1 + tier_index * 0.5) where base_chance = 0.03 (3%)
-                    base_chance = 0.03
-                    mining_chance = base_chance * (1 + tier_index * 0.5)
-                    
-                    if random.random() < mining_chance:
-                        try:
-                            # Randomly select a coin to mine
-                            coin = random.choice(CRYPTO_COINS)
-                            symbol = coin["symbol"]
-                            base_price = coin["base_price"]
-                            
-                            # Calculate mining amount based on coin's base price (proportional to old 200.0 base)
-                            # Target: $50-60 per session average (assuming up to 60 clicks per 60s session, 1 per second)
-                            # This means ~$0.83-$1.00 per click average, so $0.60-$1.40 range with RNG
-                            # At $200 base: $0.60-$1.40 = 0.003-0.007 coins = 30-70 thousandths
-                            # New system: scale by price ratio (200.0 / base_price)
-                            price_ratio = 200.0 / base_price
-                            # Reduced range: 30-70 thousandths (0.003-0.007) at $200 base
-                            # Scaled range: multiply by price_ratio
-                            min_thousandths = int(30 * price_ratio)
-                            max_thousandths = int(70 * price_ratio)
-                            # Ensure at least 1 thousandth
-                            min_thousandths = max(1, min_thousandths)
-                            max_thousandths = max(min_thousandths, max_thousandths)
-                            random_thousandths = random.randint(min_thousandths, max_thousandths)
-                            base_amount = round(random_thousandths / 10000, 4)
-                            
-                            # Apply GPU percent boost
-                            percent_increase = gpu_info["percent_increase"]
-                            percent_multiplier = 1.0 + (percent_increase / 100.0)
-                            amount = round(base_amount * percent_multiplier, 4)
-                            
-                            # Add crypto to user's holdings
-                            update_user_crypto_holdings(user_id, symbol, amount)
-                            
-                            # Optional: Could send notification to #gathercoin channel
-                            # (Skipping for now to reduce spam, similar to plan note)
-                            
-                        except Exception as e:
-                            print(f"Error processing GPU mining for {gpu_name} of user {user_id}: {e}")
+            # Process users concurrently with semaphore limit
+            tasks = [
+                process_gpu_user(user_id, gpus, semaphore)
+                for user_id, gpus in users_with_gpus
+            ]
             
-            # Small delay to avoid overwhelming the system
-            await asyncio.sleep(1)
+            # Wait for all user processing to complete
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
         except Exception as e:
             print(f"Error in GPU background task: {e}")
         
@@ -7926,7 +8053,7 @@ async def mine(interaction: discord.Interaction):
         user_id = interaction.user.id
         
         # Check cooldown
-        last_mine_time = get_user_last_mine_time(user_id)
+        last_mine_time = await run_db_operation(get_user_last_mine_time, user_id)
         current_time = time.time()
         
         if last_mine_time > 0:
@@ -7943,7 +8070,7 @@ async def mine(interaction: discord.Interaction):
         # Don't set cooldown here - it will be set when the user clicks the button to start the session
         
         # Get user's GPUs and calculate bonuses
-        user_gpus = get_user_gpus(user_id)
+        user_gpus = await run_db_operation(get_user_gpus, user_id)
         total_percent_boost = 0
         total_seconds_boost = 0
         gpus_used = []
@@ -8228,12 +8355,12 @@ async def portfolio(interaction: discord.Interaction):
         user_id = interaction.user.id
         guild_id = interaction.guild.id if interaction.guild else None
         
-        # Get crypto holdings and prices
-        crypto_holdings = get_user_crypto_holdings(user_id)
-        crypto_prices = get_crypto_prices()
-        
-        # Get stock holdings
-        stock_holdings = get_user_stock_holdings(user_id)
+        # Get crypto holdings, prices, and stock holdings in parallel
+        crypto_holdings, crypto_prices, stock_holdings = await asyncio.gather(
+            run_db_operation(get_user_crypto_holdings, user_id),
+            run_db_operation(get_crypto_prices),
+            run_db_operation(get_user_stock_holdings, user_id)
+        )
         
         # Initialize stocks for guild if needed to get current prices
         if guild_id:
@@ -8405,9 +8532,15 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
         else:
             current_price = stock_data[guild_id][ticker]["price"]
         
-        # Get user's current stock holdings
-        stock_holdings = get_user_stock_holdings(user_id)
+        # Get user's current stock holdings and balance in parallel
+        stock_holdings, user_balance = await asyncio.gather(
+            run_db_operation(get_user_stock_holdings, user_id),
+            run_db_operation(get_user_balance, user_id)
+        )
         current_shares = stock_holdings.get(ticker, 0)
+        
+        # Initialize achievement_unlocked for both buy and sell actions
+        achievement_unlocked = False
         
         if action == "buy":
             # Check if enough shares are available in the market
@@ -8428,9 +8561,6 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
             
             # Calculate total cost
             total_cost = amount * current_price
-            
-            # Check if user has enough balance
-            user_balance = get_user_balance(user_id)
             if user_balance < total_cost:
                 await safe_interaction_response(interaction, interaction.followup.send,
                     f"❌ You don't have enough balance to buy {amount} share(s) of {ticker_info['name']} ({ticker})!\n\n"
@@ -8438,19 +8568,13 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
                     ephemeral=True)
                 return
             
-            # Check if user would exceed max shares (per user limit)
-            max_shares = ticker_info["max_shares"]
-            if (current_shares + amount) > max_shares:
-                await safe_interaction_response(interaction, interaction.followup.send,
-                    f"❌ You cannot buy {amount:,} share(s)! Maximum shares per user for {ticker_info['name']} is {max_shares:,}.\n\n"
-                    f"You currently own {current_shares:,} share(s).",
-                    ephemeral=True)
-                return
-            
-            # Deduct money and add shares
+            # Deduct money and add shares in parallel
             new_balance = user_balance - total_cost
-            update_user_balance(user_id, new_balance)
-            update_user_stock_holdings(user_id, ticker, amount)
+            await asyncio.gather(
+                run_db_operation(update_user_balance, user_id, new_balance),
+                run_db_operation(update_user_stock_holdings, user_id, ticker, amount),
+                return_exceptions=True
+            )
             
             # Check for hidden achievement: CEO (own over 50% of shares for any company)
             # Get shares outstanding from stock_data or fallback to max_shares
@@ -8462,17 +8586,12 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
             
             user_owned_shares = current_shares + amount
             if shares_outstanding > 0 and (user_owned_shares / shares_outstanding) > 0.5:
-                if unlock_hidden_achievement(user_id, "ceo"):
-                    achievement_msg = f"\n\n🎉 **Hidden Achievement Unlocked: CEO!** 🎉"
-                else:
-                    achievement_msg = ""
-            else:
-                achievement_msg = ""
+                achievement_unlocked = await run_db_operation(unlock_hidden_achievement, user_id, "ceo")
             
             # Create success embed
             embed = discord.Embed(
                 title="✅ Purchase Successful!",
-                description=f"You bought **{amount:,} share(s)** of **{ticker_info['name']} ({ticker})** at **${current_price:.2f}** each.{achievement_msg}",
+                description=f"You bought **{amount:,} share(s)** of **{ticker_info['name']} ({ticker})** at **${current_price:.2f}** each.",
                 color=discord.Color.green()
             )
             embed.add_field(name="Cost", value=f"**${total_cost:.2f}**", inline=True)
@@ -8498,11 +8617,14 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
             # Calculate total value
             total_value = amount * current_price
             
-            # Add money and remove shares
-            user_balance = get_user_balance(user_id)
+            # Add money and remove shares in parallel
+            user_balance = await run_db_operation(get_user_balance, user_id)
             new_balance = user_balance + total_value
-            update_user_balance(user_id, new_balance)
-            update_user_stock_holdings(user_id, ticker, -amount)
+            await asyncio.gather(
+                run_db_operation(update_user_balance, user_id, new_balance),
+                run_db_operation(update_user_stock_holdings, user_id, ticker, -amount),
+                return_exceptions=True
+            )
             
             # Create success embed
             embed = discord.Embed(
@@ -8522,6 +8644,10 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
         
         embed.set_footer(text=f"Use /portfolio to view all your holdings")
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+        
+        # Send achievement notification as embed if unlocked
+        if achievement_unlocked:
+            await send_hidden_achievement_notification(interaction, "ceo")
     except Exception as e:
         print(f"Error in stocks command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
@@ -8546,8 +8672,8 @@ async def russian(
         channel_id = interaction.channel.id
         channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
 
-        # Check if user is on Russian Roulette elimination cooldown
-        is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+        # Check if user is on Russian Roulette elimination cooldown (run in thread pool)
+        is_roulette_cooldown, roulette_time_left = await run_db_operation(check_roulette_elimination_cooldown, user_id)
         if is_roulette_cooldown:
             minutes_left = roulette_time_left // 60
             await safe_interaction_response(interaction, interaction.followup.send,
@@ -8622,8 +8748,8 @@ async def russian(
         # Normalize bet to exactly 2 decimal places
         bet = normalize_money(bet)
 
-        # get user balance
-        user_balance = get_user_balance(user_id)
+        # get user balance (run in thread pool)
+        user_balance = await run_db_operation(get_user_balance, user_id)
         user_balance = normalize_money(user_balance)
         
         if not can_afford_rounded(user_balance, bet):
@@ -8639,9 +8765,9 @@ async def russian(
         user_active_games[user_id] = game_id
         active_roulette_channel_games[channel_id] = game_id
 
-        # deduct bet from host
+        # deduct bet from host (run in thread pool)
         new_balance = normalize_money(user_balance - bet)
-        update_user_balance(user_id, new_balance)
+        await run_db_operation(update_user_balance, user_id, new_balance)
         # increase bullet multiplier
         bullet_multiplier = 1.2 ** bullets
 
