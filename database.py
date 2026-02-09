@@ -128,13 +128,21 @@ def _ensure_user_document(user_id: int) -> None:
                 "ceo": False,
                 "blockchain": False,
                 "almost_got_it": False,
-                "maxed_out": False
+                "maxed_out": False,
+                "social_butterfly": False
             }
         },
         "coinflip_count": 0,
         "coinflip_win_streak": 0,
         "gather_command_count": 0,
-        "harvest_command_count": 0
+        "harvest_command_count": 0,
+        "invite_stats": {
+            "invites_created": 0,
+            "total_joins": 0,
+            "rewards_earned": 0.0,
+            "invite_codes": [],
+            "claimed_rewards": []
+        }
     }
     users.update_one(
         {"_id": int(user_id)},
@@ -1260,7 +1268,8 @@ def wipe_user_all(user_id: int) -> None:
                     "ceo": False,
                     "blockchain": False,
                     "almost_got_it": False,
-                    "maxed_out": False
+                    "maxed_out": False,
+                    "social_butterfly": False
                 }
             },
             "coinflip_count": 0,
@@ -1269,6 +1278,14 @@ def wipe_user_all(user_id: int) -> None:
             "harvest_command_count": 0,
             "consecutive_water_days": 0,
             "water_count": 0,
+            # Reset invite rewards (claimed rewards reset on wipe)
+            "invite_stats": {
+                "invites_created": 0,
+                "total_joins": 0,
+                "rewards_earned": 0.0,
+                "invite_codes": [],
+                "claimed_rewards": []
+            },
             # Reset all cooldowns
             "last_gather_time": 0.0,
             "last_harvest_time": 0.0,
@@ -1434,3 +1451,185 @@ def increment_user_harvest_command_count(user_id: int) -> None:
         {"$inc": {"harvest_command_count": 1}},
         upsert=True,
     )
+
+
+# Invite tracking functions
+def get_user_invite_stats(user_id: int) -> Dict:
+    """Get user's invite statistics. Returns dict with invites_created, total_joins, rewards_earned, claimed_rewards."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"invite_stats": 1})
+    if not doc or "invite_stats" not in doc:
+        return {
+            "invites_created": 0,
+            "total_joins": 0,
+            "rewards_earned": 0.0,
+            "claimed_rewards": []
+        }
+    stats = doc.get("invite_stats", {})
+    return {
+        "invites_created": int(stats.get("invites_created", 0)),
+        "total_joins": int(stats.get("total_joins", 0)),
+        "rewards_earned": float(stats.get("rewards_earned", 0.0)),
+        "claimed_rewards": list(stats.get("claimed_rewards", []))
+    }
+
+
+def increment_invite_joins(inviter_id: int, reward_amount: float) -> None:
+    """Increment invite joins count and add reward for the inviter."""
+    users = _get_users_collection()
+    _ensure_user_document(inviter_id)
+    users.update_one(
+        {"_id": int(inviter_id)},
+        {
+            "$inc": {
+                "invite_stats.total_joins": 1,
+                "invite_stats.rewards_earned": float(reward_amount),
+                "balance": float(reward_amount)
+            }
+        },
+        upsert=True,
+    )
+
+
+def track_invite_created(user_id: int, invite_code: str) -> None:
+    """Track that a user created an invite. Stores invite code for reference."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    users.update_one(
+        {"_id": int(user_id)},
+        {
+            "$inc": {"invite_stats.invites_created": 1},
+            "$addToSet": {"invite_stats.invite_codes": str(invite_code)}
+        },
+        upsert=True,
+    )
+
+
+def claim_invite_reward(user_id: int, reward_tier: int) -> bool:
+    """Mark an invite reward tier as claimed. Returns True if newly claimed, False if already claimed."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    
+    # Check if already claimed
+    doc = users.find_one({"_id": int(user_id)}, {"invite_stats.claimed_rewards": 1})
+    claimed = []
+    if doc and "invite_stats" in doc:
+        claimed = doc["invite_stats"].get("claimed_rewards", [])
+    
+    if reward_tier in claimed:
+        return False
+    
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$addToSet": {"invite_stats.claimed_rewards": int(reward_tier)}},
+        upsert=True,
+    )
+    return True
+
+
+def get_user_claimed_invite_rewards(user_id: int) -> list:
+    """Get list of claimed invite reward tiers."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"invite_stats.claimed_rewards": 1})
+    if not doc or "invite_stats" not in doc:
+        return []
+    return list(doc["invite_stats"].get("claimed_rewards", []))
+
+
+def has_secret_gardener(user_id: int) -> bool:
+    """Check if user has the secret gardener unlocked (invite reward tier 10)."""
+    claimed = get_user_claimed_invite_rewards(user_id)
+    return 10 in claimed
+
+
+def has_secret_gardener_harvest(user_id: int) -> bool:
+    """Check if user has the secret gardener auto-harvest unlocked (invite reward tier 12)."""
+    claimed = get_user_claimed_invite_rewards(user_id)
+    return 12 in claimed
+
+
+def get_invite_cooldown_reductions(user_id: int) -> Dict:
+    """Get permanent cooldown reductions from invite rewards.
+    Returns dict with gather_reduction, harvest_reduction, mine_reduction, water_double."""
+    claimed = get_user_claimed_invite_rewards(user_id)
+    return {
+        "gather_reduction": 10 if 13 in claimed else 0,      # 10 seconds
+        "harvest_reduction": 300 if 14 in claimed else 0,     # 5 minutes (300 seconds)
+        "mine_reduction": 1200 if 15 in claimed else 0,       # 20 minutes (1200 seconds)
+        "water_double": 19 in claimed                         # Can water twice a day
+    }
+
+
+def get_all_users_with_secret_gardener() -> list[int]:
+    """Get all user IDs who have the secret gardener unlocked (invite reward tier 10)."""
+    users = _get_users_collection()
+    cursor = users.find(
+        {"invite_stats.claimed_rewards": 10},
+        {"_id": 1}
+    )
+    return [doc["_id"] for doc in cursor]
+
+
+def has_user_joined_before(user_id: int) -> bool:
+    """Check if a user has already joined the server before (to prevent duplicate invite rewards)."""
+    users = _get_users_collection()
+    # Use _id = -1 as a special document to track all users who have joined
+    doc = users.find_one({"_id": -1}, {"joined_users": 1})
+    if not doc:
+        return False
+    joined_users = doc.get("joined_users", [])
+    return int(user_id) in joined_users
+
+
+def mark_user_as_joined(user_id: int) -> None:
+    """Mark a user as having joined the server (prevents duplicate invite rewards)."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": -1},
+        {"$addToSet": {"joined_users": int(user_id)}},
+        upsert=True,
+    )
+
+
+def increment_invite_joins_new_user(inviter_id: int, new_user_id: int, reward_amount: float) -> bool:
+    """
+    Increment invite joins count and add reward for the inviter, but only if the new user hasn't joined before.
+    Returns True if reward was awarded, False if user already joined before.
+    """
+    # Check if this is a new user
+    if has_user_joined_before(new_user_id):
+        return False
+    
+    # Mark user as joined
+    mark_user_as_joined(new_user_id)
+    
+    # Award reward to inviter
+    increment_invite_joins(inviter_id, reward_amount)
+    
+    return True
+
+
+def increment_invite_joins_count_only(inviter_id: int, new_user_id: int) -> bool:
+    """
+    Increment invite joins count for the inviter (no money reward), but only if the new user hasn't joined before.
+    Returns True if count was incremented, False if user already joined before.
+    """
+    # Check if this is a new user
+    if has_user_joined_before(new_user_id):
+        return False
+    
+    # Mark user as joined
+    mark_user_as_joined(new_user_id)
+    
+    # Increment invite join count only (no money reward)
+    users = _get_users_collection()
+    _ensure_user_document(inviter_id)
+    users.update_one(
+        {"_id": int(inviter_id)},
+        {"$inc": {"invite_stats.total_joins": 1}},
+        upsert=True,
+    )
+    
+    return True
