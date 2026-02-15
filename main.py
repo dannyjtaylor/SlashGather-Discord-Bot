@@ -497,17 +497,17 @@ HARVEST_COOLDOWN_PRICES = [5000, 50000, 100000, 500000, 1000000, 2500000, 500000
 IMBUE_HOE_COST = 750_000
 IMBUE_TRACTOR_COST = 4_000_000
 
-# Rarity weights (used in random.choices - don't need to sum to 100)
+# Rarity weights (sum to 100 — each weight IS the % chance)
 ENCHANTMENT_RARITIES = [
-    {"name": "COMMON",     "weight": 60.0},
-    {"name": "UNCOMMON",   "weight": 28.0},
-    {"name": "RARE",       "weight": 12.0},
-    {"name": "SUPER RARE", "weight": 6.0},
-    {"name": "LEGENDARY",  "weight": 3.0},
-    {"name": "NETHERITE",  "weight": 1.0},
-    {"name": "LUMINITE",   "weight": 0.5},
-    {"name": "CELESTIAL",  "weight": 0.1234},
-    {"name": "SECRET",     "weight": 0.01666},
+    {"name": "COMMON",     "weight": 49.35994},  # ~49.36%
+    {"name": "UNCOMMON",   "weight": 28.0},       # 28%
+    {"name": "RARE",       "weight": 12.0},       # 12%
+    {"name": "SUPER RARE", "weight": 6.0},        # 6%
+    {"name": "LEGENDARY",  "weight": 3.0},        # 3%
+    {"name": "NETHERITE",  "weight": 1.0},        # 1%
+    {"name": "LUMINITE",   "weight": 0.5},        # 0.5%
+    {"name": "CELESTIAL",  "weight": 0.1234},     # 0.1234%
+    {"name": "SECRET",     "weight": 0.01666},    # 0.01666%
 ]
 
 RARITY_COLORS = {
@@ -524,15 +524,15 @@ RARITY_COLORS = {
 
 # Custom emoji IDs from Discord CDN (format <:name:id> for display in messages)
 RARITY_EMOJI = {
-    "COMMON":      "<:IMBUE_C:1472363666534826128>",
-    "UNCOMMON":    "<:IMBUE_UC:1472363902825136272>",
-    "RARE":        "<:IMBUE_R:1472364047063318713>",
-    "SUPER RARE":  "<:IMBUE_SR:1472393571666624575>",
-    "LEGENDARY":   "<:IMBUE_L:1472364644952703260>",
-    "NETHERITE":   "<:IMBUE_N:1472398386673225906>",
-    "LUMINITE":    "<:IMBUE_LUM:1472393728223350835>",
-    "CELESTIAL":   "<:IMBUE_CE:1472393321749151999>",
-    "SECRET":      "<:IMBUE_SEC:1472393864152092828>",
+    "COMMON":      "<:IMBUE_C:1472431378900451441>",
+    "UNCOMMON":    "<:IMBUE_UC:1472432117966307349>",
+    "RARE":        "<:IMBUE_R:1472431562564833361>",
+    "SUPER RARE":  "<:IMBUE_SR:1472431974428704999>",
+    "LEGENDARY":   "<:IMBUE_L:1472431641975717971>",
+    "NETHERITE":   "<:IMBUE_N:1472431697642520576>",
+    "LUMINITE":    "<:IMBUE_LUM:1472431119466107000>",
+    "CELESTIAL":   "<:IMBUE_CE:1472431208859439295>",
+    "SECRET":      "<:IMBUE_SEC:1472432257544491009>",
 }
 
 def _to_roman(num):
@@ -867,12 +867,6 @@ def can_harvest(user_id):
         enchant_cd = tractor_enchant.get("cooldown_reduction", 0)
         cooldown_reduction += enchant_cd  # positive = less cooldown, negative = more cooldown
     
-    # Apply tractor attunement cooldown reduction (Renewal)
-    tractor_enchant = get_user_tractor_attunement(user_id)
-    if tractor_enchant:
-        enchant_cd = tractor_enchant.get("cooldown_reduction", 0)
-        cooldown_reduction += enchant_cd  # positive = less cooldown, negative = more cooldown
-    
     # Apply cooldown reduction
     effective_cooldown = max(0, HARVEST_COOLDOWN - cooldown_reduction)
     cooldown_end = last_harvest_time + effective_cooldown
@@ -948,8 +942,8 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
     #PLANTER VI - 1000-1999 items gathered
     #PLANTER VII - 2000-3999 items gathered
     #PLANTER VIII - 4000-9999 items gathered
-    #PLANTER IX - 10000-24999 items gathered
-    #PLANTER X - 25000+ items gathered
+    #PLANTER IX - 10000-14999 items gathered
+    #PLANTER X - 15000+ items gathered
 
     user_id = member.id
     total_items = get_user_total_items(user_id)  # Use same counter as userstats to keep them in sync
@@ -976,9 +970,9 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
         target_role_name = "PLANTER VII"
     elif total_items < 10000:
         target_role_name = "PLANTER VIII"
-    elif total_items < 100000:
+    elif total_items < 15000:
         target_role_name = "PLANTER IX"
-    else: #100000+
+    else: #15000+
         target_role_name = "PLANTER X"
     # If the target role is the same as current role, no changes needed
     if target_role_name == previous_role_name:
@@ -1251,14 +1245,14 @@ ACHIEVEMENTS = {
                 "name": "You Should Buy A Lottery Ticket",
                 "description": "Win 9 coinflips in a row",
                 "threshold": 9,
-                "boost": 20.0  # 2000%
+                "boost": 10.0  # 1000%
             },
             {
                 "level": 10,
                 "name": "Struck By Lightning (Twice)",
                 "description": "Win 10 coinflips in a row",
                 "threshold": 10,
-                "boost": 100.0  # 10000%
+                "boost": 15.0  # 1500%
             }
         ]
     },
@@ -1631,8 +1625,8 @@ def get_planter_level_from_total_items(total_items: int) -> int:
     6 = PLANTER VI (1000-1999 items) - achievement "I Prefer Almond Milk Anyway"
     7 = PLANTER VII (2000-3999 items) - achievement "It'd Be Crazy If You Were A Carnivore"
     8 = PLANTER VIII (4000-9999 items) - achievement "Going Vegan"
-    9 = PLANTER IX (10000-99999 items) - achievement "Treehugger"
-    10 = PLANTER X (100000+ items) - achievement "John Deere Himself"
+    9 = PLANTER IX (10000-14999 items) - achievement "Treehugger"
+    10 = PLANTER X (15000+ items) - achievement "John Deere Himself"
     """
     if total_items == 0:
         return 0  # Unranked (no PLANTER role yet - new users/prestige)
@@ -1652,7 +1646,7 @@ def get_planter_level_from_total_items(total_items: int) -> int:
         return 7  # PLANTER VII role -> achievement level 7
     elif total_items < 10000:
         return 8  # PLANTER VIII role -> achievement level 8
-    elif total_items < 100000:
+    elif total_items < 15000:
         return 9  # PLANTER IX role -> achievement level 9
     else:
         return 10  # PLANTER X role -> achievement level 10
@@ -1725,71 +1719,54 @@ def get_achievement_multiplier(user_id: int) -> float:
 def get_rank_perma_buff_multiplier(user_id):
     """
     Calculate the rank perma buff multiplier based on bloom rank.
-    Returns a multiplier (e.g., 1.015 for 1.5% boost).
+    Each rank-up permanently multiplies ALL money earned by 1.2x (compounding).
     
-    PINE I: 0% (no boost, returns 1.0)
-    PINE II: 1.5%
-    PINE III: 3%
-    CEDAR I: 6%
-    CEDAR II: 9%
-    CEDAR III: 12%
-    BIRCH I: 17%
-    BIRCH II: 22%
-    BIRCH III: 27%
-    MAPLE I: 34.5%
-    MAPLE II: 42%
-    MAPLE III: 50%
-    OAK I: 60%
-    OAK II: 70%
-    OAK III: 80%
-    FIR I: 95%
-    FIR II: 110%
-    FIR III: 125%
-    REDWOOD: 200%
+    PINE I: 1.0x (no boost)
+    PINE II: 1.2x (1.2^1)
+    PINE III: 1.44x (1.2^2)
+    CEDAR I: 1.728x (1.2^3)
+    CEDAR II: 2.0736x (1.2^4)
+    CEDAR III: 2.48832x (1.2^5)
+    BIRCH I: 2.98598x (1.2^6)
+    BIRCH II: 3.58318x (1.2^7)
+    BIRCH III: 4.29982x (1.2^8)
+    MAPLE I: 5.15978x (1.2^9)
+    MAPLE II: 6.19174x (1.2^10)
+    MAPLE III: 7.43008x (1.2^11)
+    OAK I: 8.91610x (1.2^12)
+    OAK II: 10.69932x (1.2^13)
+    OAK III: 12.83918x (1.2^14)
+    FIR I: 15.40702x (1.2^15)
+    FIR II: 18.48843x (1.2^16)
+    FIR III: 22.18611x (1.2^17)
+    REDWOOD: 26.62333x (1.2^18)
     """
     bloom_rank = get_bloom_rank(user_id)
     
-    if bloom_rank == "PINE I":
-        return 1.0  # No boost for PINE I
-    elif bloom_rank == "PINE II":
-        return 1.015  # 1.5%
-    elif bloom_rank == "PINE III":
-        return 1.03  # 3%
-    elif bloom_rank == "CEDAR I":
-        return 1.06  # 6%
-    elif bloom_rank == "CEDAR II":
-        return 1.09  # 9%
-    elif bloom_rank == "CEDAR III":
-        return 1.12  # 12%
-    elif bloom_rank == "BIRCH I":
-        return 1.17  # 17%
-    elif bloom_rank == "BIRCH II":
-        return 1.22  # 22%
-    elif bloom_rank == "BIRCH III":
-        return 1.27  # 27%
-    elif bloom_rank == "MAPLE I":
-        return 1.345  # 34.5%
-    elif bloom_rank == "MAPLE II":
-        return 1.42  # 42%
-    elif bloom_rank == "MAPLE III":
-        return 1.50  # 50%
-    elif bloom_rank == "OAK I":
-        return 1.60  # 60%
-    elif bloom_rank == "OAK II":
-        return 1.70  # 70%
-    elif bloom_rank == "OAK III":
-        return 1.80  # 80%
-    elif bloom_rank == "FIR I":
-        return 1.95  # 95%
-    elif bloom_rank == "FIR II":
-        return 2.10  # 110%
-    elif bloom_rank == "FIR III":
-        return 2.25  # 125%
-    elif bloom_rank == "REDWOOD":
-        return 3.0  # 200% (flat increase)
-    else:
-        # Default to no boost if rank is unknown
-        return 1.0
+    rank_levels = {
+        "PINE I": 0,
+        "PINE II": 1,
+        "PINE III": 2,
+        "CEDAR I": 3,
+        "CEDAR II": 4,
+        "CEDAR III": 5,
+        "BIRCH I": 6,
+        "BIRCH II": 7,
+        "BIRCH III": 8,
+        "MAPLE I": 9,
+        "MAPLE II": 10,
+        "MAPLE III": 11,
+        "OAK I": 12,
+        "OAK II": 13,
+        "OAK III": 14,
+        "FIR I": 15,
+        "FIR II": 16,
+        "FIR III": 17,
+        "REDWOOD": 18,
+    }
+    
+    level = rank_levels.get(bloom_rank, 0)
+    return 1.2 ** level
 
 
 def can_gather(user_id, user_data=None, active_events=None):
@@ -1840,12 +1817,6 @@ def can_gather(user_id, user_data=None, active_events=None):
         event_id = daily_event.get("effects", {}).get("event_id", "")
         if event_id == "speed_day":
             cooldown_reduction += 15  # Cooldown reduced by 15 seconds
-    
-    # Apply hoe attunement cooldown reduction (Renewal)
-    hoe_enchant = get_user_hoe_attunement(user_id)
-    if hoe_enchant:
-        enchant_cd = hoe_enchant.get("cooldown_reduction", 0)
-        cooldown_reduction += enchant_cd  # positive = less cooldown, negative = more cooldown
     
     # Apply hoe attunement cooldown reduction (Renewal)
     hoe_enchant = get_user_hoe_attunement(user_id)
@@ -2051,51 +2022,45 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
             fertilizer_multiplier = 1.0 + HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["multiplier"]
             final_value *= fertilizer_multiplier
 
-    # Apply bloom multiplier
+    # Additive boosts from base value, then rank multiplies the subtotal
     bloom_multiplier = get_bloom_multiplier(user_id)
-    base_final_value = final_value
-    final_value *= bloom_multiplier
-    extra_money_from_bloom = final_value - base_final_value
-    
-    # Apply water multiplier (1.01x per water, cumulative)
-    water_multiplier = get_water_multiplier(user_id)
-    final_value *= water_multiplier
-    
-    # Apply rank perma buff multiplier
-    rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
-    base_value_before_rank = final_value
-    final_value *= rank_perma_buff_multiplier
-    extra_money_from_rank = final_value - base_value_before_rank
-    
-    # Apply achievement multiplier
-    achievement_multiplier = get_achievement_multiplier(user_id)
-    base_value_before_achievement = final_value
-    final_value *= achievement_multiplier
-    extra_money_from_achievement = final_value - base_value_before_achievement
-    
-    # Apply daily bonus multiplier (1% per consecutive day)
-    daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
-    base_value_before_daily = final_value
-    final_value *= daily_bonus_multiplier
-    extra_money_from_daily = final_value - base_value_before_daily
+    base_final_value = final_value  # Base value after orchard/gear upgrades
 
-    # Apply hoe attunement money bonus (Prosperity)
+    water_multiplier = get_water_multiplier(user_id)
+    rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
+    achievement_multiplier = get_achievement_multiplier(user_id)
+    daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
+
+    # Calculate each boost as a percentage of the base value (additive, not compounding)
+    extra_money_from_bloom = base_final_value * (bloom_multiplier - 1.0)
+    extra_money_from_water = base_final_value * (water_multiplier - 1.0)
+    extra_money_from_achievement = base_final_value * (achievement_multiplier - 1.0)
+    extra_money_from_daily = base_final_value * (daily_bonus_multiplier - 1.0)
+
+    # Apply hoe attunement money bonus (Prosperity) - additive from base
     hoe_enchant = get_user_hoe_attunement(user_id)
     enchant_money_bonus = 0.0
     is_critical_gather = False
     if hoe_enchant:
         money_bonus = hoe_enchant.get("money_bonus", 0)
         if money_bonus != 0:
-            base_before_enchant = final_value
-            final_value *= (1.0 + money_bonus)
-            enchant_money_bonus = final_value - base_before_enchant
+            enchant_money_bonus = base_final_value * money_bonus
 
         # Check for critical gather (Abundance) - only for player gathers, not gardeners
         crit_chance = hoe_enchant.get("critical_chance", 0)
         if crit_chance > 0 and apply_cooldown:  # apply_cooldown=True means player, not gardener
             is_critical_gather = random.random() < crit_chance
-            if is_critical_gather:
-                final_value *= 2  # 2x all money on critical
+
+    # Subtotal = base + all additive boosts (before rank)
+    subtotal = base_final_value + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + enchant_money_bonus
+
+    # Rank boost is multiplicative on the entire subtotal (1.2x per rank-up)
+    extra_money_from_rank = subtotal * (rank_perma_buff_multiplier - 1.0)
+    final_value = subtotal + extra_money_from_rank
+
+    # Apply critical gather (2x all money) after all boosts
+    if is_critical_gather:
+        final_value *= 2  # 2x all money on critical
 
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
@@ -3630,7 +3595,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.4.0 :3"
+            name="running /gather on V0.6.0 :3"
         )
     )
     try:
@@ -3782,76 +3747,115 @@ async def gather(interaction: discord.Interaction):
                 )
             await safe_interaction_response(interaction, interaction.followup.send, embed=rankup_embed)
 
-        #create discord embed
-        embed = discord.Embed(
-            title= "You Gathered!",
-            description = f"You foraged for a(n) **{gather_result['name']}**!",
-            color = discord.Color.green()
-        )
+        #create discord embed — use a special explosive embed for critical gathers
+        is_crit = gather_result.get('is_critical_gather', False)
 
-        embed.add_field(name="Value", value=f"**${gather_result['value']:.2f}**", inline=True)
-        embed.add_field(name="Ripeness", value=f"{gather_result['ripeness']}", inline=True)
-        embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
-        
-        # Show bloom multiplier if applicable (only after first bloom)
-        bloom_count = get_user_bloom_count(user_id)
-        if bloom_count > 0 and gather_result.get('extra_money_from_bloom', 0) > 0:
-            tree_rings = get_user_tree_rings(user_id)
-            multiplier_percent = (gather_result['bloom_multiplier'] - 1.0) * 100
-            embed.add_field(
-                name="🌳 Tree Ring Boost", 
-                value=f"+{multiplier_percent:.1f}% - **+${gather_result['extra_money_from_bloom']:.2f}**", 
-                inline=False
+        if is_crit:
+            # ---------- CRITICAL GATHER EMBED ----------
+            hoe_enc = gather_result.get('hoe_enchant')
+            hoe_name = hoe_enc.get("name", "Unknown") if hoe_enc else "Unknown"
+            hoe_rarity = hoe_enc.get("rarity", "COMMON") if hoe_enc else "COMMON"
+            hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]")
+            # Pre-crit value is half of the final (since final = pre_crit * 2)
+            pre_crit_value = gather_result['value'] / 2
+
+            embed = discord.Embed(
+                title="\U0001f4a5 CRITICAL HIT! \U0001f4a5",
+                description=(
+                    f"**{interaction.user.name}** foraged for a(n) **{gather_result['name']}** "
+                    f"and got a **CRIT HIT**!\n\n"
+                    f"\U0001f4a5 **2X MONEY** \U0001f4a5"
+                ),
+                color=discord.Color.orange()
             )
-        
-        # Show rank perma buff if applicable (only if not PINE I)
-        bloom_rank = get_bloom_rank(user_id)
-        if bloom_rank != "PINE I" and gather_result.get('extra_money_from_rank', 0) > 0:
-            rank_perma_buff_percent = (gather_result['rank_perma_buff_multiplier'] - 1.0) * 100
-            embed.add_field(
-                name="⭐ Rank Boost",
-                value=f"+{rank_perma_buff_percent:.1f}% - **+${gather_result['extra_money_from_rank']:.2f}**",
-                inline=False
-            )
-        
-        # Show achievement boost if applicable
-        if gather_result.get('extra_money_from_achievement', 0) > 0:
-            achievement_percent = (gather_result['achievement_multiplier'] - 1.0) * 100
-            embed.add_field(
-                name="🏆 Achievement Boost",
-                value=f"+{achievement_percent:.1f}% - **+${gather_result['extra_money_from_achievement']:.2f}**",
-                inline=False
-            )
-        
-        # Show daily bonus if applicable (1% per consecutive day)
-        if gather_result.get('extra_money_from_daily', 0) > 0:
-            daily_bonus_percent = (gather_result['daily_bonus_multiplier'] - 1.0) * 100
-            embed.add_field(
-                name="💧 Water Streak Boost",
-                value=f"+{daily_bonus_percent:.1f}% - **+${gather_result['extra_money_from_daily']:.2f}**",
-                inline=False
-            )
-        
-        # Show attunement name if applicable
-        hoe_enc = gather_result.get('hoe_enchant')
-        if hoe_enc:
+
+            embed.add_field(name="Value", value=f"**${gather_result['base_value']:.2f}**", inline=True)
+            embed.add_field(name="Ripeness", value=f"{gather_result['ripeness']}", inline=True)
+            embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
+
             embed.add_field(
                 name="\u2728 Attunement",
-                value=hoe_enc.get("name", "Unknown"),
+                value=f"**{hoe_name}** {hoe_rarity_display}",
                 inline=False
             )
-        
-        # Show critical gather if triggered
-        if gather_result.get('is_critical_gather', False):
             embed.add_field(
-                name="\U0001f4a5 CRITICAL GATHER! \U0001f4a5 2X MONEY!",
-                value="Your attunement triggered a critical hit!",
+                name="\U0001f4a5 Critical Multiplier",
+                value=f"${pre_crit_value:.2f} \u2192 **${gather_result['value']:.2f}**",
                 inline=False
             )
-        
-        # add a line to show [username] in [month]
-        embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
-        embed.add_field(name="new balance: ", value=f"**${gather_result['new_balance']:.2f}**", inline=False)
+
+            # add a line to show [username] in [month]
+            embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
+            embed.add_field(name="💰 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
+            embed.add_field(name="💵 New Balance", value=f"**${gather_result['new_balance']:.2f}**", inline=True)
+
+        else:
+            # ---------- NORMAL GATHER EMBED ----------
+            embed = discord.Embed(
+                title= "You Gathered!",
+                description = f"You foraged for a(n) **{gather_result['name']}**!",
+                color = discord.Color.green()
+            )
+
+            embed.add_field(name="Value", value=f"**${gather_result['base_value']:.2f}**", inline=True)
+            embed.add_field(name="Ripeness", value=f"{gather_result['ripeness']}", inline=True)
+            embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
+            
+            # Show bloom multiplier if applicable (only after first bloom)
+            bloom_count = get_user_bloom_count(user_id)
+            if bloom_count > 0 and gather_result.get('extra_money_from_bloom', 0) > 0:
+                tree_rings = get_user_tree_rings(user_id)
+                multiplier_percent = (gather_result['bloom_multiplier'] - 1.0) * 100
+                embed.add_field(
+                    name="🌳 Tree Ring Boost", 
+                    value=f"+{multiplier_percent:.1f}% - **+${gather_result['extra_money_from_bloom']:.2f}**", 
+                    inline=False
+                )
+            
+            # Show rank perma buff if applicable (only if not PINE I) - multiplicative on subtotal
+            bloom_rank = get_bloom_rank(user_id)
+            if bloom_rank != "PINE I" and gather_result.get('extra_money_from_rank', 0) > 0:
+                rank_multiplier = gather_result['rank_perma_buff_multiplier']
+                embed.add_field(
+                    name="⭐ Rank Boost",
+                    value=f"{rank_multiplier:.2f}x - **+${gather_result['extra_money_from_rank']:.2f}**",
+                    inline=False
+                )
+            
+            # Show achievement boost if applicable
+            if gather_result.get('extra_money_from_achievement', 0) > 0:
+                achievement_percent = (gather_result['achievement_multiplier'] - 1.0) * 100
+                embed.add_field(
+                    name="🏆 Achievement Boost",
+                    value=f"+{achievement_percent:.1f}% - **+${gather_result['extra_money_from_achievement']:.2f}**",
+                    inline=False
+                )
+            
+            # Show daily bonus if applicable (1% per consecutive day)
+            if gather_result.get('extra_money_from_daily', 0) > 0:
+                daily_bonus_percent = (gather_result['daily_bonus_multiplier'] - 1.0) * 100
+                embed.add_field(
+                    name="💧 Water Streak Boost",
+                    value=f"+{daily_bonus_percent:.1f}% - **+${gather_result['extra_money_from_daily']:.2f}**",
+                    inline=False
+                )
+            
+            # Show attunement name and rarity if applicable
+            hoe_enc = gather_result.get('hoe_enchant')
+            if hoe_enc:
+                hoe_name = hoe_enc.get("name", "Unknown")
+                hoe_rarity = hoe_enc.get("rarity", "COMMON")
+                hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]")
+                embed.add_field(
+                    name="\u2728 Attunement",
+                    value=f"**{hoe_name}** {hoe_rarity_display}",
+                    inline=False
+                )
+            
+            # add a line to show [username] in [month]
+            embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
+            embed.add_field(name="💰 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
+            embed.add_field(name="💵 New Balance", value=f"**${gather_result['new_balance']:.2f}**", inline=True)
         
         # Check for chain chance (gloves upgrade + hoe attunement Resonance) - use pre-fetched data
         user_upgrades = user_data["basket_upgrades"]
@@ -4084,7 +4088,7 @@ async def perform_harvest_for_user(user_id: int, allow_chain: bool = True) -> di
     gathered_items = []
     total_value = 0.0
     total_base_value = 0.0
-    total_value_before_daily = 0.0
+    total_value_before_daily = 0.0  # Kept for backward compatibility
     current_balance = get_user_balance(user_id)
     for i in range(total_items_to_harvest):
         item = random.choice(GATHERABLE_ITEMS)
@@ -4143,27 +4147,27 @@ async def perform_harvest_for_user(user_id: int, allow_chain: bool = True) -> di
             elif event_id == "harvest_festival":
                 value_multiplier *= 1.5
         final_value *= value_multiplier
-        base_value_before_bloom = final_value
-        final_value *= bloom_multiplier
-        final_value *= water_multiplier
-        final_value *= get_rank_perma_buff_multiplier(user_id)
-        final_value *= get_achievement_multiplier(user_id)
+        base_value_before_boosts = final_value
+        # Additive boosts from base value, then rank multiplies the subtotal
         daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
-        value_before_daily = final_value
-        final_value *= daily_bonus_multiplier
-        # Apply tractor attunement money bonus (Prosperity)
-        if enchant_money_bonus != 0:
-            final_value *= (1.0 + enchant_money_bonus)
+        extra_bloom = base_value_before_boosts * (bloom_multiplier - 1.0)
+        extra_water = base_value_before_boosts * (water_multiplier - 1.0)
+        extra_achievement = base_value_before_boosts * (get_achievement_multiplier(user_id) - 1.0)
+        extra_daily = base_value_before_boosts * (daily_bonus_multiplier - 1.0)
+        extra_enchant = base_value_before_boosts * enchant_money_bonus if enchant_money_bonus != 0 else 0.0
+        # Subtotal = base + additive boosts (before rank)
+        subtotal = base_value_before_boosts + extra_bloom + extra_water + extra_achievement + extra_daily + extra_enchant
+        # Rank boost is multiplicative on the entire subtotal (1.2x per rank-up)
+        final_value = subtotal * get_rank_perma_buff_multiplier(user_id)
         current_balance += final_value
         total_value += final_value
-        total_base_value += base_value_before_bloom
-        total_value_before_daily += value_before_daily
+        total_base_value += base_value_before_boosts
         add_user_item(user_id, name)
         add_ripeness_stat(user_id, ripeness["name"])
         # Increment total_items for userstats display (harvests should count towards total plants)
         # But do NOT increment gather_stats categories/items (those are for gatherer achievements only)
         increment_total_items_only(user_id)
-        gathered_items.append({"name": name, "value": final_value, "ripeness": ripeness["name"], "is_gmo": is_gmo})
+        gathered_items.append({"name": name, "value": final_value, "base_value": base_value_before_boosts, "ripeness": ripeness["name"], "is_gmo": is_gmo})
     current_total = get_user_total_items(user_id)
     tree_rings_to_award = 0
     for milestone in range(200, current_total + 1, 200):
@@ -4223,7 +4227,6 @@ async def harvest(interaction: discord.Interaction):
         total_base_value = result["total_base_value"]
         bloom_multiplier = result["bloom_multiplier"]
         water_multiplier = result["water_multiplier"]
-        total_value_before_daily = result["total_value_before_daily"]
         tree_rings_to_award = result["tree_rings_to_award"]
 
         if tree_rings_to_award > 0:
@@ -4279,23 +4282,21 @@ async def harvest(interaction: discord.Interaction):
             color = discord.Color.green()
         )
 
-        #show gathered items, just using 20 for now
+        #show gathered items, just using 20 for now (show base value per item)
         items_text = ""
         for item in gathered_items[:20]:
             gmo_text = " GMO! ✨" if item["is_gmo"] else ""
-            items_text += f"• **{item['name']}** - ${item['value']:.2f} ({item['ripeness']}){gmo_text}\n"
+            items_text += f"• **{item['name']}** - ${item['base_value']:.2f} ({item['ripeness']}){gmo_text}\n"
 
         embed.add_field(name="📦 Items Gathered", value=items_text or "No items", inline=False)
         embed.add_field(name="💰 Total Value", value=f"**${total_value:.2f}**", inline=True)
         embed.add_field(name="💵 New Balance", value=f"**${current_balance:.2f}**", inline=True)
         
+        # Additive boosts from total_base_value, then rank multiplies the subtotal
         # Show bloom multiplier if applicable (only after first bloom)
         bloom_count = get_user_bloom_count(user_id)
-        # Calculate extra money from bloom correctly: base * (bloom_multiplier - 1) * water_multiplier
-        # This accounts for water multiplier being applied after bloom
-        extra_money_from_bloom = total_base_value * (bloom_multiplier - 1.0) * water_multiplier
+        extra_money_from_bloom = total_base_value * (bloom_multiplier - 1.0)
         if bloom_count > 0 and extra_money_from_bloom > 0:
-            tree_rings = get_user_tree_rings(user_id)
             multiplier_percent = (bloom_multiplier - 1.0) * 100
             embed.add_field(
                 name="🌳 Tree Ring Boost", 
@@ -4303,25 +4304,9 @@ async def harvest(interaction: discord.Interaction):
                 inline=False
             )
         
-        # Show rank perma buff if applicable (only if not PINE I)
-        bloom_rank = get_bloom_rank(user_id)
-        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
-        achievement_multiplier = get_achievement_multiplier(user_id)
-        # Calculate extra money from rank: value after water * (rank_multiplier - 1)
-        value_after_water = total_base_value * bloom_multiplier * water_multiplier
-        extra_money_from_rank = value_after_water * (rank_perma_buff_multiplier - 1.0)
-        # Calculate extra money from achievement: value after rank * (achievement_multiplier - 1)
-        value_after_rank = value_after_water * rank_perma_buff_multiplier
-        extra_money_from_achievement = value_after_rank * (achievement_multiplier - 1.0)
-        if bloom_rank != "PINE I" and extra_money_from_rank > 0:
-            rank_perma_buff_percent = (rank_perma_buff_multiplier - 1.0) * 100
-            embed.add_field(
-                name="⭐ Rank Boost",
-                value=f"+{rank_perma_buff_percent:.1f}% - **+${extra_money_from_rank:.2f}**",
-                inline=False
-            )
-        
         # Show achievement boost if applicable
+        achievement_multiplier = get_achievement_multiplier(user_id)
+        extra_money_from_achievement = total_base_value * (achievement_multiplier - 1.0)
         if extra_money_from_achievement > 0:
             achievement_percent = (achievement_multiplier - 1.0) * 100
             embed.add_field(
@@ -4332,7 +4317,7 @@ async def harvest(interaction: discord.Interaction):
         
         # Show daily bonus if applicable (1% per consecutive day)
         daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
-        extra_money_from_daily = total_value_before_daily * (daily_bonus_multiplier - 1.0)
+        extra_money_from_daily = total_base_value * (daily_bonus_multiplier - 1.0)
         if extra_money_from_daily > 0:
             daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
             embed.add_field(
@@ -4341,12 +4326,31 @@ async def harvest(interaction: discord.Interaction):
                 inline=False
             )
         
-        # Show tractor attunement name if applicable
+        # Show rank perma buff if applicable (only if not PINE I) - multiplicative on subtotal
+        bloom_rank = get_bloom_rank(user_id)
+        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
+        if bloom_rank != "PINE I" and rank_perma_buff_multiplier > 1.0:
+            # Rank multiplies the subtotal (base + all additive boosts)
+            enchant_money_bonus = result.get("enchant_money_bonus", 0)
+            extra_money_from_water = total_base_value * (water_multiplier - 1.0)
+            enchant_total = total_base_value * enchant_money_bonus if enchant_money_bonus != 0 else 0.0
+            total_subtotal = total_base_value + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + enchant_total
+            extra_money_from_rank = total_subtotal * (rank_perma_buff_multiplier - 1.0)
+            embed.add_field(
+                name="⭐ Rank Boost",
+                value=f"{rank_perma_buff_multiplier:.2f}x - **+${extra_money_from_rank:.2f}**",
+                inline=False
+            )
+        
+        # Show tractor attunement name and rarity if applicable (just name, no dollar amount)
         tractor_enc = result.get("tractor_enchant")
         if tractor_enc:
+            tractor_name = tractor_enc.get("name", "Unknown")
+            tractor_rarity = tractor_enc.get("rarity", "COMMON")
+            tractor_rarity_display = RARITY_EMOJI.get(tractor_rarity, f"[{tractor_rarity}]")
             embed.add_field(
                 name="\u2728 Attunement",
-                value=tractor_enc.get("name", "Unknown"),
+                value=f"**{tractor_name}** {tractor_rarity_display}",
                 inline=False
             )
         
@@ -4469,20 +4473,32 @@ async def achievements(interaction: discord.Interaction):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
-@bot.tree.command(name="bloom", description="Bloom to reset your progress and advance your Bloom Rank! (Requires 3000 plants)")
+@bot.tree.command(name="bloom", description="Bloom to advance your Bloom Rank! (Requires PLANTER X & $500,000,000)")
 async def bloom(interaction: discord.Interaction):
     try:
         if not await safe_defer(interaction, ephemeral=False):
             return
         
         user_id = interaction.user.id
-        total_items = get_user_total_items(user_id)
         
-        # Check if user has at least 3000 plants
-        if total_items < 3000:
-            plants_needed = 3000 - total_items
+        # Check if user has PLANTER X role
+        planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V", "PLANTER VI", "PLANTER VII", "PLANTER VIII", "PLANTER IX", "PLANTER X"]
+        user_roles = [role.name for role in interaction.user.roles]
+        has_planter_x = "PLANTER X" in user_roles
+        
+        if not has_planter_x:
             await safe_interaction_response(interaction, interaction.followup.send,
-                f"❌ You need **{plants_needed}** more plants to bloom, {interaction.user.name}!",
+                f"❌ You must be **PLANTER X** to bloom, {interaction.user.name}!",
+                ephemeral=True)
+            return
+        
+        # Check if user has at least $500,000,000
+        bloom_cost = 500_000_000
+        user_balance = get_user_balance(user_id)
+        if user_balance < bloom_cost:
+            money_needed = bloom_cost - user_balance
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ You need **${money_needed:,.2f}** more to bloom, {interaction.user.name}! (Cost: **$500,000,000**)",
                 ephemeral=True)
             return
         
@@ -4490,7 +4506,7 @@ async def bloom(interaction: discord.Interaction):
         old_rank = get_bloom_rank(user_id)
         tree_rings = get_user_tree_rings(user_id)
         
-        # Perform bloom
+        # Perform bloom (only resets money, plants persist)
         perform_bloom(user_id)
         
         # Get new stats
@@ -4559,8 +4575,8 @@ async def userstats(interaction: discord.Interaction):
         # PLANTER VI: 1000-1999 (need 2000 for PLANTER VII)
         # PLANTER VII: 2000-3999 (need 4000 for PLANTER VIII)
         # PLANTER VIII: 4000-9999 (need 10000 for PLANTER IX)
-        # PLANTER IX: 10000-99999 (need 100000 for PLANTER X)
-        # PLANTER X: 100000+ (max rank)
+        # PLANTER IX: 10000-14999 (need 15000 for PLANTER X)
+        # PLANTER X: 15000+ (max rank)
         items_needed = None
         next_rank = None
         
@@ -4588,8 +4604,8 @@ async def userstats(interaction: discord.Interaction):
         elif total_items < 10000:
             items_needed = 10000 - total_items
             next_rank = "PLANTER IX"
-        elif total_items < 100000:
-            items_needed = 100000 - total_items
+        elif total_items < 15000:
+            items_needed = 15000 - total_items
             next_rank = "PLANTER X"
         else:
             # Max rank achieved
@@ -4611,11 +4627,10 @@ async def userstats(interaction: discord.Interaction):
         embed.add_field(name="🌲 Bloom Rank", value=f"**{bloom_rank}**", inline=True)
         embed.add_field(name="🌳 Tree Rings", value=f"**{tree_rings}** ({bloom_multiplier:.2f}x)", inline=True)
         
-        # Add Rank Perma Buff (only if not PINE I)
+        # Add Rank Perma Buff (only if not PINE I) - 1.2x per rank-up
         rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
         if bloom_rank != "PINE I":
-            rank_perma_buff_percent = (rank_perma_buff_multiplier - 1.0) * 100
-            embed.add_field(name="⭐ Rank Boost", value=f"**+{rank_perma_buff_percent:.1f}%**", inline=True)
+            embed.add_field(name="⭐ Rank Boost", value=f"**{rank_perma_buff_multiplier:.2f}x**", inline=True)
         
         # Add Water Streak
         water_streak = get_user_consecutive_water_days(user_id)
@@ -4623,8 +4638,28 @@ async def userstats(interaction: discord.Interaction):
         day_text = "day" if water_streak == 1 else "days"
         embed.add_field(name="💧 Water Streak", value=f"**{water_streak}** {day_text} ({daily_bonus_multiplier:.2f}x)", inline=True)
         
+        # Add Gather Attunement (Hoe)
+        hoe_attunement = get_user_hoe_attunement(user_id)
+        if hoe_attunement:
+            hoe_name = hoe_attunement.get("name", "Unknown")
+            hoe_rarity = hoe_attunement.get("rarity", "COMMON")
+            hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]")
+            embed.add_field(name="✨ Gather Attunement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=True)
+        else:
+            embed.add_field(name="✨ Gather Attunement", value="**None**", inline=True)
+        
+        # Add Harvest Attunement (Tractor)
+        tractor_attunement = get_user_tractor_attunement(user_id)
+        if tractor_attunement:
+            tractor_name = tractor_attunement.get("name", "Unknown")
+            tractor_rarity = tractor_attunement.get("rarity", "COMMON")
+            tractor_rarity_display = RARITY_EMOJI.get(tractor_rarity, f"[{tractor_rarity}]")
+            embed.add_field(name="✨ Harvest Attunement", value=f"**{tractor_name}** {tractor_rarity_display}", inline=True)
+        else:
+            embed.add_field(name="✨ Harvest Attunement", value="**None**", inline=True)
+        
         if items_needed == 0:
-            embed.add_field(name="🏆 Rank Status", value=f"**{next_rank}** - You've reached the maximum rank!", inline=False)
+            embed.add_field(name="🏆 Rank Status", value=f"**{next_rank}** - You've reached **PLANTER X**!", inline=False)
         else:
             embed.add_field(name="📈 Next Rank", value=f"**{items_needed}** more plants until **{next_rank}**", inline=False)
         
@@ -5291,10 +5326,10 @@ async def imbue(interaction: discord.Interaction, tool: app_commands.Choice[str]
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        # Channel restriction: #enchants only
-        if not hasattr(interaction.channel, 'name') or interaction.channel.name != "enchants":
+        # Channel restriction: #imbue only
+        if not hasattr(interaction.channel, 'name') or interaction.channel.name != "imbue":
             await safe_interaction_response(interaction, interaction.followup.send,
-                "\u274c This command can only be used in the #enchants channel!", ephemeral=True)
+                "\u274c This command can only be used in the #imbue channel!", ephemeral=True)
             return
 
         user_id = interaction.user.id
@@ -6817,16 +6852,16 @@ REAL_STOCK_MAPPING = {
 
 # Stock ticker definitions
 STOCK_TICKERS = [
-    {"name": "Maizy's", "symbol": "M", "base_price": 50.0, "max_shares": 10000},
-    {"name": "Meadow", "symbol": "MEDO", "base_price": 75.0, "max_shares": 20000},
-    {"name": "IVM", "symbol": "IVM", "base_price": 100.0, "max_shares": 15000},
-    {"name": "CisGrow", "symbol": "CSGO", "base_price": 60.0, "max_shares": 12000},
-    {"name": "Sowny", "symbol": "SWNY", "base_price": 90.0, "max_shares": 11000},
-    {"name": "General Mowers", "symbol": "GM", "base_price": 45.0, "max_shares": 20000},
-    {"name": "Raytheorn", "symbol": "RTH", "base_price": 125.0, "max_shares": 16000},
-    {"name": "Wells Fargrow", "symbol": "WFG", "base_price": 70.0, "max_shares": 18000},
-    {"name": "Apple", "symbol": "AAPL", "base_price": 150.0, "max_shares": 17000},
-    {"name": "Sproutify", "symbol": "SPRT", "base_price": 55.0, "max_shares": 16000},
+    {"name": "Maizy's", "symbol": "M", "base_price": 50.0, "max_shares": 10000, "emoji": "<:MZ:1466552134836158465>"},
+    {"name": "Meadow", "symbol": "MEDO", "base_price": 75.0, "max_shares": 20000, "emoji": "<:MEDO:1472431415160209511>"},
+    {"name": "IVM", "symbol": "IVM", "base_price": 100.0, "max_shares": 15000, "emoji": "<:IVM:1466497224379731968>"},
+    {"name": "CisGrow", "symbol": "CSGO", "base_price": 60.0, "max_shares": 12000, "emoji": "<:CG:1472431245433508082>"},
+    {"name": "Sowny", "symbol": "SWNY", "base_price": 90.0, "max_shares": 11000, "emoji": "<:SWNY:1472431904493142147>"},
+    {"name": "General Mowers", "symbol": "GM", "base_price": 45.0, "max_shares": 20000, "emoji": "<:GM:1472431754202583091>"},
+    {"name": "Raytheorn", "symbol": "RTH", "base_price": 125.0, "max_shares": 16000, "emoji": "<:RTH:1472431811887104081>"},
+    {"name": "Wells Fargrow", "symbol": "WFG", "base_price": 70.0, "max_shares": 18000, "emoji": "<:WFG:1472432146915524638>"},
+    {"name": "Apple", "symbol": "AAPL", "base_price": 150.0, "max_shares": 17000, "emoji": "<:AAPL:1466507980164956283>"},
+    {"name": "Sproutify", "symbol": "SPRT", "base_price": 55.0, "max_shares": 16000, "emoji": "<:SPRT:1472432046356828252>"},
 ]
 
 # Stock data storage: {guild_id: {ticker_symbol: {"price": float, "price_history": [float], "available_shares": int, "real_price": float, "shares_outstanding": int, "market_cap": float, "news_multiplier": float, "last_api_fetch": float}}}
@@ -7100,8 +7135,9 @@ async def update_marketboard_message(guild: discord.Guild):
         # Format shares as available/max (using real shares outstanding)
         shares_str = f"{available_shares:,}/{shares_outstanding:,}"
         
-        # Create stock line
-        stock_line = f"**{ticker['name']} ({symbol})**\n"
+        # Create stock line (with company emoji)
+        company_emoji = ticker.get("emoji", "")
+        stock_line = f"{company_emoji} **{ticker['name']} ({symbol})**\n"
         stock_line += f"   Price: **{price_str}** | Δ5m: **{change_str}** | Shares: **{shares_str}** {change_emoji}\n"
         
         stock_lines.append(stock_line)
@@ -7727,7 +7763,7 @@ async def gardener_background_task():
                                                 items_text = ""
                                                 for item in harvest_result["gathered_items"][:20]:
                                                     gmo_text = " GMO! ✨" if item["is_gmo"] else ""
-                                                    items_text += f"• **{item['name']}** - ${item['value']:.2f} ({item['ripeness']}){gmo_text}\n"
+                                                    items_text += f"• **{item['name']}** - ${item['base_value']:.2f} ({item['ripeness']}){gmo_text}\n"
                                                 
                                                 embed.add_field(name="📦 Items Harvested", value=items_text or "No items", inline=False)
                                                 embed.add_field(name="💰 Total Value", value=f"**${total_value:,.2f}**", inline=True)
@@ -7762,7 +7798,7 @@ async def gardener_background_task():
                                                         description=f"Their gardener found a **{gather_result['name']}**!",
                                                         color=discord.Color.green()
                                                     )
-                                                    embed.add_field(name="Value", value=f"**${gather_result['value']:.2f}**", inline=True)
+                                                    embed.add_field(name="Value", value=f"**${gather_result['base_value']:.2f}**", inline=True)
                                                     embed.add_field(name="Ripeness", value=gather_result['ripeness'], inline=True)
                                                     embed.add_field(name="GMO?", value="Yes ✨" if gather_result['is_gmo'] else "No", inline=False)
                                                     await lawn_channel.send(embed=embed)
@@ -8654,26 +8690,24 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
                     ephemeral=True)
                 return
             
-            # Apply boosts to sale value
+            # Apply boosts to sale value (additive from base, then rank multiplies subtotal)
             bloom_multiplier = get_bloom_multiplier(user_id)
             water_multiplier = get_water_multiplier(user_id)
             rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
             achievement_multiplier = get_achievement_multiplier(user_id)
             daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
             
-            # Calculate boosted value (apply all multipliers)
-            value_after_bloom = base_sale_value * bloom_multiplier
-            value_after_water = value_after_bloom * water_multiplier
-            value_after_rank = value_after_water * rank_perma_buff_multiplier
-            value_after_achievement = value_after_rank * achievement_multiplier
-            total_sale_value = value_after_achievement * daily_bonus_multiplier
+            # Calculate additive boosts from base
+            extra_from_bloom = base_sale_value * (bloom_multiplier - 1.0)
+            extra_from_water = base_sale_value * (water_multiplier - 1.0)
+            extra_from_achievement = base_sale_value * (achievement_multiplier - 1.0)
+            extra_from_daily = base_sale_value * (daily_bonus_multiplier - 1.0)
             
-            # Calculate extra value from boosts (only show tree ring and water streak)
-            extra_from_bloom = value_after_bloom - base_sale_value
-            # Water multiplier is applied but not shown separately
-            extra_from_rank = value_after_rank - value_after_water
-            extra_from_achievement = value_after_achievement - value_after_rank
-            extra_from_daily = total_sale_value - value_after_achievement
+            # Subtotal before rank
+            subtotal = base_sale_value + extra_from_bloom + extra_from_water + extra_from_achievement + extra_from_daily
+            # Rank is multiplicative on subtotal
+            extra_from_rank = subtotal * (rank_perma_buff_multiplier - 1.0)
+            total_sale_value = subtotal + extra_from_rank
             
             # Add money to balance (with boosts)
             current_balance = get_user_balance(user_id)
@@ -8691,22 +8725,13 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             )
             embed.add_field(name="Sold", value="\n".join(sold_items) if sold_items else "None", inline=False)
             
-            # Show boosts if applicable (only tree ring and water streak)
+            # Show boosts if applicable
             bloom_count = get_user_bloom_count(user_id)
             if bloom_count > 0 and extra_from_bloom > 0:
                 multiplier_percent = (bloom_multiplier - 1.0) * 100
                 embed.add_field(
                     name="🌳 Tree Ring Boost",
                     value=f"+{multiplier_percent:.1f}% - **+${extra_from_bloom:.2f}**",
-                    inline=False
-                )
-            # Show rank perma buff if applicable (only if not PINE I)
-            bloom_rank = get_bloom_rank(user_id)
-            if bloom_rank != "PINE I" and extra_from_rank > 0:
-                rank_perma_buff_percent = (rank_perma_buff_multiplier - 1.0) * 100
-                embed.add_field(
-                    name="⭐ Rank Boost",
-                    value=f"+{rank_perma_buff_percent:.1f}% - **+${extra_from_rank:.2f}**",
                     inline=False
                 )
             # Show achievement boost if applicable
@@ -8722,6 +8747,14 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
                 embed.add_field(
                     name="💧 Water Streak Boost",
                     value=f"+{daily_bonus_percent:.1f}% - **+${extra_from_daily:.2f}**",
+                    inline=False
+                )
+            # Show rank perma buff if applicable (only if not PINE I) - multiplicative on subtotal
+            bloom_rank = get_bloom_rank(user_id)
+            if bloom_rank != "PINE I" and extra_from_rank > 0:
+                embed.add_field(
+                    name="⭐ Rank Boost",
+                    value=f"{rank_perma_buff_multiplier:.2f}x - **+${extra_from_rank:.2f}**",
                     inline=False
                 )
             
@@ -8762,26 +8795,24 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         coin_price = prices.get(coin, coin_base_price)
         base_sale_value = amount * coin_price
         
-        # Apply boosts to sale value
+        # Apply boosts to sale value (additive from base, then rank multiplies subtotal)
         bloom_multiplier = get_bloom_multiplier(user_id)
         water_multiplier = get_water_multiplier(user_id)
         rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
         achievement_multiplier = get_achievement_multiplier(user_id)
         daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
         
-        # Calculate boosted value (apply all multipliers)
-        value_after_bloom = base_sale_value * bloom_multiplier
-        value_after_water = value_after_bloom * water_multiplier
-        value_after_rank = value_after_water * rank_perma_buff_multiplier
-        value_after_achievement = value_after_rank * achievement_multiplier
-        sale_value = value_after_achievement * daily_bonus_multiplier
+        # Calculate additive boosts from base
+        extra_from_bloom = base_sale_value * (bloom_multiplier - 1.0)
+        extra_from_water = base_sale_value * (water_multiplier - 1.0)
+        extra_from_achievement = base_sale_value * (achievement_multiplier - 1.0)
+        extra_from_daily = base_sale_value * (daily_bonus_multiplier - 1.0)
         
-        # Calculate extra value from boosts (only show tree ring and water streak)
-        extra_from_bloom = value_after_bloom - base_sale_value
-        # Water multiplier is applied but not shown separately
-        extra_from_rank = value_after_rank - value_after_water
-        extra_from_achievement = value_after_achievement - value_after_rank
-        extra_from_daily = sale_value - value_after_achievement
+        # Subtotal before rank
+        subtotal = base_sale_value + extra_from_bloom + extra_from_water + extra_from_achievement + extra_from_daily
+        # Rank is multiplicative on subtotal
+        extra_from_rank = subtotal * (rank_perma_buff_multiplier - 1.0)
+        sale_value = subtotal + extra_from_rank
         
         # Update holdings (subtract)
         update_user_crypto_holdings(user_id, coin, -amount)
@@ -8801,22 +8832,13 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             color=discord.Color.green()
         )
         
-        # Show boosts if applicable (only tree ring and water streak)
+        # Show boosts if applicable
         bloom_count = get_user_bloom_count(user_id)
         if bloom_count > 0 and extra_from_bloom > 0:
             multiplier_percent = (bloom_multiplier - 1.0) * 100
             embed.add_field(
                 name="🌳 Tree Ring Boost",
                 value=f"+{multiplier_percent:.1f}% - **+${extra_from_bloom:.2f}**",
-                inline=False
-            )
-        # Show rank perma buff if applicable (only if not PINE I)
-        bloom_rank = get_bloom_rank(user_id)
-        if bloom_rank != "PINE I" and extra_from_rank > 0:
-            rank_perma_buff_percent = (rank_perma_buff_multiplier - 1.0) * 100
-            embed.add_field(
-                name="⭐ Rank Boost",
-                value=f"+{rank_perma_buff_percent:.1f}% - **+${extra_from_rank:.2f}**",
                 inline=False
             )
         # Show achievement boost if applicable
@@ -8832,6 +8854,14 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             embed.add_field(
                 name="💧 Water Streak Boost",
                 value=f"+{daily_bonus_percent:.1f}% - **+${extra_from_daily:.2f}**",
+                inline=False
+            )
+        # Show rank perma buff if applicable (only if not PINE I) - multiplicative on subtotal
+        bloom_rank = get_bloom_rank(user_id)
+        if bloom_rank != "PINE I" and extra_from_rank > 0:
+            embed.add_field(
+                name="⭐ Rank Boost",
+                value=f"{rank_perma_buff_multiplier:.2f}x - **+${extra_from_rank:.2f}**",
                 inline=False
             )
         

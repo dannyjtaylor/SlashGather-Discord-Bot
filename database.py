@@ -933,10 +933,20 @@ def get_user_bloom_count(user_id: int) -> int:
 
 
 def perform_bloom(user_id: int) -> None:
-    """Reset user's progress while keeping Tree Rings, achievements, and incrementing bloom_count.
+    """Reset user's progress while keeping plants gathered (gather_stats.total_items, total_forage_count),
+    Tree Rings, achievements, and incrementing bloom_count.
     Note: All achievements persist through bloom, including planter achievements."""
     users = _get_users_collection()
     default_balance = _get_default_balance()
+
+    # Preserve the current plants gathered count before resetting
+    doc = users.find_one({"_id": int(user_id)}, {"gather_stats.total_items": 1, "total_forage_count": 1})
+    preserved_total_items = 0
+    preserved_forage_count = 0
+    if doc:
+        preserved_total_items = int(doc.get("gather_stats", {}).get("total_items", 0))
+        preserved_forage_count = int(doc.get("total_forage_count", 0))
+
     users.update_one(
         {"_id": int(user_id)},
         {
@@ -959,11 +969,11 @@ def perform_bloom(user_id: int) -> None:
                 "items": {},
                 "ripeness_stats": {},
                 "gather_stats": {
-                    "total_items": 0,
+                    "total_items": preserved_total_items,
                     "categories": {},
                     "items": {}
                 },
-                "total_forage_count": 0,
+                "total_forage_count": preserved_forage_count,
                 "stock_holdings": {},
                 "crypto_holdings": {
                     "RTC": 0.0,
