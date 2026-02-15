@@ -1280,6 +1280,9 @@ def wipe_user_all(user_id: int) -> None:
             "harvest_command_count": 0,
             "consecutive_water_days": 0,
             "water_count": 0,
+            # Reset attunements
+            "hoe_enchantment": None,
+            "tractor_enchantment": None,
             # Reset invite rewards (claimed rewards reset on wipe)
             "invite_stats": {
                 "invites_created": 0,
@@ -1679,3 +1682,44 @@ def increment_invite_joins_count_only(inviter_id: int, new_user_id: int) -> bool
     )
     
     return True
+
+
+# Attunement functions
+def get_user_hoe_attunement(user_id: int) -> Optional[Dict]:
+    """Get user's hoe attunement. Returns dict with attunement data or None."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"hoe_enchantment": 1})
+    if not doc:
+        return None
+    return doc.get("hoe_enchantment", None)
+
+
+def set_user_hoe_attunement(user_id: int, attunement: Optional[Dict]) -> None:
+    """Set user's hoe attunement. Pass None to clear."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"hoe_enchantment": attunement}},
+        upsert=True,
+    )
+
+
+def get_user_tractor_attunement(user_id: int) -> Optional[Dict]:
+    """Get user's tractor attunement. Returns dict with attunement data or None."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"tractor_enchantment": 1})
+    if not doc:
+        return None
+    return doc.get("tractor_enchantment", None)
+
+
+def set_user_tractor_attunement(user_id: int, attunement: Optional[Dict]) -> None:
+    """Set user's tractor attunement. Pass None to clear."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"tractor_enchantment": attunement}},
+        upsert=True,
+    )

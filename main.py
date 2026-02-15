@@ -139,6 +139,19 @@ from database import (
     increment_user_gather_command_count,
     get_user_harvest_command_count,
     increment_user_harvest_command_count,
+    get_user_invite_stats,
+    increment_invite_joins,
+    track_invite_created,
+    has_user_joined_before,
+    mark_user_as_joined,
+    increment_invite_joins_new_user,
+    increment_invite_joins_count_only,
+    claim_invite_reward,
+    get_user_claimed_invite_rewards,
+    has_secret_gardener,
+    has_secret_gardener_harvest,
+    get_invite_cooldown_reductions,
+    get_all_users_with_secret_gardener,
     get_user_hoe_attunement,
     set_user_hoe_attunement,
     get_user_tractor_attunement,
@@ -847,6 +860,12 @@ def can_harvest(user_id):
         event_id = daily_event.get("effects", {}).get("event_id", "")
         if event_id == "speed_day":
             cooldown_reduction += 15  # Cooldown reduced by 15 seconds
+    
+    # Apply tractor attunement cooldown reduction (Renewal)
+    tractor_enchant = get_user_tractor_attunement(user_id)
+    if tractor_enchant:
+        enchant_cd = tractor_enchant.get("cooldown_reduction", 0)
+        cooldown_reduction += enchant_cd  # positive = less cooldown, negative = more cooldown
     
     # Apply tractor attunement cooldown reduction (Renewal)
     tractor_enchant = get_user_tractor_attunement(user_id)
@@ -1821,6 +1840,12 @@ def can_gather(user_id, user_data=None, active_events=None):
         event_id = daily_event.get("effects", {}).get("event_id", "")
         if event_id == "speed_day":
             cooldown_reduction += 15  # Cooldown reduced by 15 seconds
+    
+    # Apply hoe attunement cooldown reduction (Renewal)
+    hoe_enchant = get_user_hoe_attunement(user_id)
+    if hoe_enchant:
+        enchant_cd = hoe_enchant.get("cooldown_reduction", 0)
+        cooldown_reduction += enchant_cd  # positive = less cooldown, negative = more cooldown
     
     # Apply hoe attunement cooldown reduction (Renewal)
     hoe_enchant = get_user_hoe_attunement(user_id)
