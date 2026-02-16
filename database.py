@@ -109,6 +109,7 @@ def _ensure_user_document(user_id: int) -> None:
         "notification_channel_id": None,
         "tree_rings": 0,
         "bloom_count": 0,
+        "bloom_cycle_plants": 0,
         "last_water_time": 0.0,
         "consecutive_water_days": 0,
         "water_count": 0,
@@ -119,6 +120,8 @@ def _ensure_user_document(user_id: int) -> None:
             "harvesting": 0,
             "planter": 0,
             "water_streak": 0,
+            "blooming": 0,
+            "russian_roulette": 0,
             "hidden_achievements_discovered": 0,
             "hidden_achievements": {
                 "john_rockefeller": False,
@@ -129,8 +132,10 @@ def _ensure_user_document(user_id: int) -> None:
                 "blockchain": False,
                 "almost_got_it": False,
                 "maxed_out": False,
-                "social_butterfly": False
-            }
+                "social_butterfly": False,
+                "high_reroller": False
+            },
+            "areas_unlocked": 0
         },
         "coinflip_count": 0,
         "coinflip_win_streak": 0,
@@ -144,7 +149,14 @@ def _ensure_user_document(user_id: int) -> None:
             "claimed_rewards": []
         },
         "hoe_enchantment": None,
-        "tractor_enchantment": None
+        "tractor_enchantment": None,
+        "russian_games_played": 0,
+        "unlocked_areas": {
+            "grove": False,
+            "marsh": False,
+            "bog": False,
+            "mire": False
+        }
     }
     users.update_one(
         {"_id": int(user_id)},
@@ -205,6 +217,7 @@ def perform_gather_update(user_id: int, balance_increment: float, item_name: str
             f"gather_stats.categories.{category}": 1,
             f"gather_stats.items.{item_name}": 1,
             "total_forage_count": 1,  # Keep in sync with gather_stats.total_items for backwards compatibility
+            "bloom_cycle_plants": 1,  # Track plants in current bloom cycle (resets on bloom)
         }
     }
     
@@ -276,7 +289,7 @@ def increment_total_items_only(user_id: int) -> None:
     _ensure_user_document(user_id)
     users.update_one(
         {"_id": int(user_id)},
-        {"$inc": {"gather_stats.total_items": 1, "total_forage_count": 1}},
+        {"$inc": {"gather_stats.total_items": 1, "total_forage_count": 1, "bloom_cycle_plants": 1}},
         upsert=True,
     )
 
@@ -400,6 +413,16 @@ def get_user_total_items(user_id: int) -> int:
         return 0
     gather_stats = doc.get("gather_stats", {})
     return int(gather_stats.get("total_items", 0))
+
+def get_user_bloom_cycle_plants(user_id: int) -> int:
+    """Get user's plants gathered in the current bloom cycle (resets on bloom)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"bloom_cycle_plants": 1})
+    if not doc:
+        return 0
+    return int(doc.get("bloom_cycle_plants", 0))
+
 
 def get_all_users_total_items() -> list[tuple[int, int]]:
     """Get all users with their total items gathered, sorted by total_items descending."""
@@ -602,9 +625,9 @@ def get_water_multiplier(user_id: int) -> float:
 
 
 def get_daily_bonus_multiplier(user_id: int) -> float:
-    """Calculate daily streak bonus multiplier based on consecutive water days. Formula: 1.0 + (consecutive_days * 0.01) - 1% per consecutive day."""
+    """Calculate daily streak bonus multiplier based on consecutive water days. Formula: 1.0 + (consecutive_days * 0.02) - 2% per consecutive day."""
     consecutive_days = get_user_consecutive_water_days(user_id)
-    return 1.0 + (consecutive_days * 0.01)
+    return 1.0 + (consecutive_days * 0.02)
 
 
 def get_crypto_prices() -> Dict[str, float]:
@@ -933,13 +956,14 @@ def get_user_bloom_count(user_id: int) -> int:
 
 
 def perform_bloom(user_id: int) -> None:
-    """Reset user's progress while keeping plants gathered (gather_stats.total_items, total_forage_count),
+    """Reset user's progress while keeping lifetime plants (gather_stats.total_items, total_forage_count),
     Tree Rings, achievements, and incrementing bloom_count.
+    Resets bloom_cycle_plants to 0 so PLANTER rank restarts at I.
     Note: All achievements persist through bloom, including planter achievements."""
     users = _get_users_collection()
     default_balance = _get_default_balance()
 
-    # Preserve the current plants gathered count before resetting
+    # Preserve the lifetime plants gathered count before resetting
     doc = users.find_one({"_id": int(user_id)}, {"gather_stats.total_items": 1, "total_forage_count": 1})
     preserved_total_items = 0
     preserved_forage_count = 0
@@ -974,11 +998,18 @@ def perform_bloom(user_id: int) -> None:
                     "items": {}
                 },
                 "total_forage_count": preserved_forage_count,
+                "bloom_cycle_plants": 0,
                 "stock_holdings": {},
                 "crypto_holdings": {
                     "RTC": 0.0,
                     "TER": 0.0,
                     "CNY": 0.0
+                },
+                "unlocked_areas": {
+                    "grove": False,
+                    "marsh": False,
+                    "bog": False,
+                    "mire": False
                 }
                 # All achievements persist through bloom (gatherer, planter, harvesting, coinflip, water_streak, hidden)
             },
@@ -1196,6 +1227,7 @@ def wipe_user_plants(user_id: int) -> None:
                 "items": {}
             },
             "total_forage_count": 0,
+            "bloom_cycle_plants": 0,
             # Reset planter achievement since it's based on total_items
             "achievements.planter": 0,
             # Reset all cooldowns
@@ -1256,6 +1288,7 @@ def wipe_user_all(user_id: int) -> None:
                 "items": {}
             },
             "total_forage_count": 0,
+            "bloom_cycle_plants": 0,
             "stock_holdings": {},
             "crypto_holdings": {
                 "RTC": 0.0,
@@ -1271,6 +1304,8 @@ def wipe_user_all(user_id: int) -> None:
                 "harvesting": 0,
                 "planter": 0,
                 "water_streak": 0,
+                "blooming": 0,
+                "russian_roulette": 0,
                 "hidden_achievements_discovered": 0,
                 "hidden_achievements": {
                     "john_rockefeller": False,
@@ -1281,8 +1316,10 @@ def wipe_user_all(user_id: int) -> None:
                     "blockchain": False,
                     "almost_got_it": False,
                     "maxed_out": False,
-                    "social_butterfly": False
-                }
+                    "social_butterfly": False,
+                    "high_reroller": False
+                },
+                "areas_unlocked": 0
             },
             "coinflip_count": 0,
             "coinflip_win_streak": 0,
@@ -1290,6 +1327,7 @@ def wipe_user_all(user_id: int) -> None:
             "harvest_command_count": 0,
             "consecutive_water_days": 0,
             "water_count": 0,
+            "russian_games_played": 0,
             # Reset attunements
             "hoe_enchantment": None,
             "tractor_enchantment": None,
@@ -1309,7 +1347,14 @@ def wipe_user_all(user_id: int) -> None:
             "last_water_time": 0.0,
             # Reset attunements
             "hoe_enchantment": None,
-            "tractor_enchantment": None
+            "tractor_enchantment": None,
+            # Reset unlocked areas
+            "unlocked_areas": {
+                "grove": False,
+                "marsh": False,
+                "bog": False,
+                "mire": False
+            }
         }},
         upsert=True,
     )
@@ -1469,6 +1514,29 @@ def increment_user_harvest_command_count(user_id: int) -> None:
         {"$inc": {"harvest_command_count": 1}},
         upsert=True,
     )
+
+
+def get_user_russian_games_played(user_id: int) -> int:
+    """Get user's total Russian Roulette games played (died or cashed out)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"russian_games_played": 1})
+    if not doc:
+        return 0
+    return int(doc.get("russian_games_played", 0))
+
+
+def increment_user_russian_games_played(user_id: int) -> int:
+    """Increment user's Russian Roulette games played by 1. Returns the new count."""
+    users = _get_users_collection()
+    result = users.find_one_and_update(
+        {"_id": int(user_id)},
+        {"$inc": {"russian_games_played": 1}},
+        upsert=True,
+        return_document=True,
+        projection={"russian_games_played": 1}
+    )
+    return int(result.get("russian_games_played", 1)) if result else 1
 
 
 # Invite tracking functions
@@ -1694,7 +1762,7 @@ def increment_invite_joins_count_only(inviter_id: int, new_user_id: int) -> bool
     return True
 
 
-# Attunement functions
+# Attunement functions (second block kept for compatibility)
 def get_user_hoe_attunement(user_id: int) -> Optional[Dict]:
     """Get user's hoe attunement. Returns dict with attunement data or None."""
     users = _get_users_collection()
@@ -1731,5 +1799,47 @@ def set_user_tractor_attunement(user_id: int, attunement: Optional[Dict]) -> Non
     users.update_one(
         {"_id": int(user_id)},
         {"$set": {"tractor_enchantment": attunement}},
+        upsert=True,
+    )
+
+
+# Area unlock functions
+def get_user_unlocked_areas(user_id: int) -> Dict[str, bool]:
+    """Get user's unlocked areas. Returns dict with area names as keys and unlock status as values."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"unlocked_areas": 1})
+    if not doc:
+        return {"grove": False, "marsh": False, "bog": False, "mire": False}
+    areas = doc.get("unlocked_areas", {})
+    return {
+        "grove": bool(areas.get("grove", False)),
+        "marsh": bool(areas.get("marsh", False)),
+        "bog": bool(areas.get("bog", False)),
+        "mire": bool(areas.get("mire", False))
+    }
+
+
+def unlock_user_area(user_id: int, area_name: str) -> None:
+    """Unlock a gathering area for a user."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {f"unlocked_areas.{area_name}": True}},
+        upsert=True,
+    )
+
+
+def reset_user_areas(user_id: int) -> None:
+    """Reset all unlocked areas for a user (used on bloom)."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"unlocked_areas": {
+            "grove": False,
+            "marsh": False,
+            "bog": False,
+            "mire": False
+        }}},
         upsert=True,
     )

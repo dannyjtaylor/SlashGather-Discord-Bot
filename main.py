@@ -111,6 +111,7 @@ from database import (
     get_bloom_rank,
     get_user_bloom_count,
     perform_bloom,
+    get_user_bloom_cycle_plants,
     get_user_last_water_time,
     update_user_last_water_time,
     get_user_consecutive_water_days,
@@ -156,6 +157,11 @@ from database import (
     set_user_hoe_attunement,
     get_user_tractor_attunement,
     set_user_tractor_attunement,
+    get_user_russian_games_played,
+    increment_user_russian_games_played,
+    get_user_unlocked_areas,
+    unlock_user_area,
+    reset_user_areas,
 )
 
 try:
@@ -192,7 +198,11 @@ logging.getLogger('discord.http').setLevel(logging.WARNING)
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.invites = True
 bot = commands.Bot(command_prefix='/', intents=intents)
+
+# Global invite cache for tracking who invited whom
+_invite_cache = {}
 
 # Helper function to safely handle interaction responses and prevent "interaction failed" messages
 async def safe_interaction_response(interaction: discord.Interaction, 
@@ -272,14 +282,16 @@ async def send_achievement_notification(interaction: discord.Interaction, achiev
         level_data = levels[level]
         achievement_display_name = level_data["name"]
         achievement_description = level_data["description"]
+        boost_percent = level_data["boost"] * 100
         
         embed = discord.Embed(
-            title="🏆 Achievement Unlocked!",
+            title="\U0001f3c6 Achievement Unlocked!",
             description=f"**{achievement_display_name}**\n{achievement_description}",
             color=discord.Color.gold()
         )
+        if boost_percent > 0:
+            embed.add_field(name="\U0001f4b0 Boost", value=f"**+{boost_percent:.1f}%**", inline=False)
         
-        # Send ephemeral message directly using followup to ensure it's only visible to the user
         try:
             await interaction.followup.send(embed=embed, ephemeral=True)
         except Exception as e:
@@ -294,14 +306,16 @@ async def send_hidden_achievement_notification(interaction: discord.Interaction,
     achievement_data = HIDDEN_ACHIEVEMENTS[achievement_key]
     achievement_name = achievement_data["name"]
     achievement_description = achievement_data["description"]
+    boost_percent = achievement_data["boost"] * 100
     
     embed = discord.Embed(
-        title="🏆 Hidden Achievement Unlocked!",
+        title="\U0001f3c6 Hidden Achievement Unlocked!",
         description=f"**{achievement_name}**\n{achievement_description}",
         color=discord.Color.gold()
     )
+    if boost_percent > 0:
+        embed.add_field(name="\U0001f4b0 Boost", value=f"**+{boost_percent:.1f}%**", inline=False)
     
-    # Send ephemeral message directly using followup to ensure it's only visible to the user
     try:
         await interaction.followup.send(embed=embed, ephemeral=True)
     except Exception as e:
@@ -316,17 +330,66 @@ async def send_hidden_achievement_notification_async(channel, user_mention: str,
     achievement_data = HIDDEN_ACHIEVEMENTS[achievement_key]
     achievement_name = achievement_data["name"]
     achievement_description = achievement_data["description"]
+    boost_percent = achievement_data["boost"] * 100
     
     embed = discord.Embed(
-        title="🏆 Hidden Achievement Unlocked!",
+        title="\U0001f3c6 Hidden Achievement Unlocked!",
         description=f"{user_mention}\n\n**{achievement_name}**\n{achievement_description}",
         color=discord.Color.gold()
     )
+    if boost_percent > 0:
+        embed.add_field(name="\U0001f4b0 Boost", value=f"**+{boost_percent:.1f}%**", inline=False)
     
     try:
         await channel.send(embed=embed)
     except Exception as e:
         print(f"Error sending hidden achievement notification: {e}")
+
+
+async def send_achievement_notification_dm(user_id: int, achievement_name: str, level: int):
+    """Send an achievement notification via DM when no interaction is available (e.g. Russian Roulette)."""
+    if achievement_name not in ACHIEVEMENTS:
+        return
+    
+    achievement_data = ACHIEVEMENTS[achievement_name]
+    levels = achievement_data["levels"]
+    
+    if level < len(levels):
+        level_data = levels[level]
+        achievement_display_name = level_data["name"]
+        achievement_description = level_data["description"]
+        boost_percent = level_data["boost"] * 100
+        
+        embed = discord.Embed(
+            title="\U0001f3c6 Achievement Unlocked!",
+            description=f"**{achievement_display_name}**\n{achievement_description}",
+            color=discord.Color.gold()
+        )
+        if boost_percent > 0:
+            embed.add_field(name="\U0001f4b0 Boost", value=f"**+{boost_percent:.1f}%**", inline=False)
+        
+        try:
+            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+            if user:
+                await user.send(embed=embed)
+        except Exception as e:
+            print(f"Error sending achievement DM to user {user_id}: {e}")
+
+
+async def check_russian_roulette_achievement(player_id: int, interaction=None):
+    """Increment russian games played and check/award achievement. Sends notification via interaction (ephemeral) or DM."""
+    try:
+        new_count = increment_user_russian_games_played(player_id)
+        new_level = get_achievement_level_for_stat("russian_roulette", new_count)
+        current_level = get_user_achievement_level(player_id, "russian_roulette")
+        if new_level > current_level:
+            set_user_achievement_level(player_id, "russian_roulette", new_level)
+            if interaction is not None:
+                await send_achievement_notification(interaction, "russian_roulette", new_level)
+            else:
+                await send_achievement_notification_dm(player_id, "russian_roulette", new_level)
+    except Exception as e:
+        print(f"Error checking russian roulette achievement for {player_id}: {e}")
 
 GATHER_COOLDOWN = 60 #(seconds)
 HARVEST_COOLDOWN = 60 * 30 #(30 minutes)
@@ -854,18 +917,22 @@ def can_harvest(user_id):
     if hourly_event:
         event_id = hourly_event.get("effects", {}).get("event_id", "")
         if event_id == "speed_harvest":
-            cooldown_reduction += 30  # Cooldown reduced by 30 seconds
+            cooldown_reduction += 180  # Harvest cooldown reduced by 3 minutes
     
     if daily_event:
         event_id = daily_event.get("effects", {}).get("event_id", "")
         if event_id == "speed_day":
-            cooldown_reduction += 15  # Cooldown reduced by 15 seconds
+            cooldown_reduction += 60  # Harvest cooldown reduced by 1 minute
     
     # Apply tractor attunement cooldown reduction (Renewal)
     tractor_enchant = get_user_tractor_attunement(user_id)
     if tractor_enchant:
         enchant_cd = tractor_enchant.get("cooldown_reduction", 0)
         cooldown_reduction += enchant_cd  # positive = less cooldown, negative = more cooldown
+    
+    # Apply invite reward cooldown reduction (tier 14: -5 minutes = -300 seconds)
+    invite_reductions = get_invite_cooldown_reductions(user_id)
+    cooldown_reduction += invite_reductions.get("harvest_reduction", 0)
     
     # Apply cooldown reduction
     effective_cooldown = max(0, HARVEST_COOLDOWN - cooldown_reduction)
@@ -933,44 +1000,44 @@ async def assign_bloom_rank_role(member: discord.Member, guild: discord.Guild) -
 
 
 async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> tuple[str | None, str | None]:
-    #assign gatherer role to the user
-    #PLANTER I - 0-49 items gathered
-    #PLANTER II - 50-149 items gathered
-    #PLANTER III - 150-299 items gathered
-    #PLANTER IV - 300-499 items gathered
-    #PLANTER V - 500-999 items gathered
-    #PLANTER VI - 1000-1999 items gathered
-    #PLANTER VII - 2000-3999 items gathered
-    #PLANTER VIII - 4000-9999 items gathered
-    #PLANTER IX - 10000-14999 items gathered
-    #PLANTER X - 15000+ items gathered
+    #assign gatherer role to the user based on bloom cycle plants (resets per bloom)
+    #PLANTER I - 0-49 items gathered this cycle
+    #PLANTER II - 50-149 items gathered this cycle
+    #PLANTER III - 150-299 items gathered this cycle
+    #PLANTER IV - 300-499 items gathered this cycle
+    #PLANTER V - 500-999 items gathered this cycle
+    #PLANTER VI - 1000-1999 items gathered this cycle
+    #PLANTER VII - 2000-3999 items gathered this cycle
+    #PLANTER VIII - 4000-9999 items gathered this cycle
+    #PLANTER IX - 10000-14999 items gathered this cycle
+    #PLANTER X - 15000+ items gathered this cycle
 
     user_id = member.id
-    total_items = get_user_total_items(user_id)  # Use same counter as userstats to keep them in sync
+    cycle_plants = get_user_bloom_cycle_plants(user_id)  # Use bloom cycle counter (resets per bloom)
     planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V", "PLANTER VI", "PLANTER VII", "PLANTER VIII", "PLANTER IX", "PLANTER X"]
 
     # Find the user's current planter role
     previous_role_name = next((role.name for role in member.roles if role.name in planter_roles), None)
     
-    # Determine the target role based on total items gathered
+    # Determine the target role based on bloom cycle plants gathered
     target_role_name = None
-    if total_items < 50:
+    if cycle_plants < 50:
         target_role_name = "PLANTER I"
-    elif total_items < 150:
+    elif cycle_plants < 150:
         target_role_name = "PLANTER II"
-    elif total_items < 300:  # Fixed: was 299
+    elif cycle_plants < 300:
         target_role_name = "PLANTER III"
-    elif total_items < 500:  # Fixed: was 499
+    elif cycle_plants < 500:
         target_role_name = "PLANTER IV"
-    elif total_items < 1000:
+    elif cycle_plants < 1000:
         target_role_name = "PLANTER V"
-    elif total_items < 2000:
+    elif cycle_plants < 2000:
         target_role_name = "PLANTER VI"
-    elif total_items < 4000:
+    elif cycle_plants < 4000:
         target_role_name = "PLANTER VII"
-    elif total_items < 10000:
+    elif cycle_plants < 10000:
         target_role_name = "PLANTER VIII"
-    elif total_items < 15000:
+    elif cycle_plants < 15000:
         target_role_name = "PLANTER IX"
     else: #15000+
         target_role_name = "PLANTER X"
@@ -1006,6 +1073,120 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
     return previous_role_name, None
 
 
+
+# ─── Gathering Areas Configuration ───
+# Each area has: multiplier (on base plant values), required planter rank, unlock cost, and unlock order.
+# "forest" is always available (default). Other areas must be unlocked with /unlock.
+GATHERING_AREAS = {
+    "forest": {
+        "display_name": "#forest",
+        "emoji": "🌲",
+        "multiplier": 1.0,
+        "required_planter_rank": None,
+        "required_planter_level": 0,
+        "unlock_cost": 0,
+        "unlocked_by_default": True,
+        "previous_area": None,
+        "order": 0
+    },
+    "grove": {
+        "display_name": "#grove",
+        "emoji": "🌳",
+        "multiplier": 1.2,
+        "required_planter_rank": "PLANTER III",
+        "required_planter_level": 3,
+        "unlock_cost": 250_000,
+        "unlocked_by_default": False,
+        "previous_area": None,
+        "order": 1
+    },
+    "marsh": {
+        "display_name": "#marsh",
+        "emoji": "🏞️",
+        "multiplier": 2.0,
+        "required_planter_rank": "PLANTER V",
+        "required_planter_level": 5,
+        "unlock_cost": 5_000_000,
+        "unlocked_by_default": False,
+        "previous_area": "grove",
+        "order": 2
+    },
+    "bog": {
+        "display_name": "#bog",
+        "emoji": "🌿",
+        "multiplier": 5.0,
+        "required_planter_rank": "PLANTER VII",
+        "required_planter_level": 7,
+        "unlock_cost": 75_000_000,
+        "unlocked_by_default": False,
+        "previous_area": "marsh",
+        "order": 3
+    },
+    "mire": {
+        "display_name": "#mire",
+        "emoji": "🏝️",
+        "multiplier": 10.0,
+        "required_planter_rank": "PLANTER IX",
+        "required_planter_level": 9,
+        "unlock_cost": 300_000_000,
+        "unlocked_by_default": False,
+        "previous_area": "bog",
+        "order": 4
+    }
+}
+
+VALID_GATHERING_CHANNELS = set(GATHERING_AREAS.keys())
+
+# Planter rank name -> numeric level mapping for area requirement checks
+PLANTER_RANK_ORDER = {
+    "PLANTER I": 1, "PLANTER II": 2, "PLANTER III": 3, "PLANTER IV": 4,
+    "PLANTER V": 5, "PLANTER VI": 6, "PLANTER VII": 7, "PLANTER VIII": 8,
+    "PLANTER IX": 9, "PLANTER X": 10
+}
+
+
+def get_user_planter_level(member) -> int:
+    """Get user's numeric planter rank level (1-10) from their Discord roles. Returns 0 if no planter role."""
+    for role in member.roles:
+        if role.name in PLANTER_RANK_ORDER:
+            return PLANTER_RANK_ORDER[role.name]
+    return 0
+
+
+def check_area_access(member, channel_name: str, user_id: int) -> tuple[bool, str]:
+    """
+    Check if a user can gather/harvest in the given channel.
+    Returns (allowed, error_message). If allowed, error_message is empty.
+    """
+    # Not a gathering channel at all
+    if channel_name not in VALID_GATHERING_CHANNELS:
+        channels_list = ", ".join(f"**{GATHERING_AREAS[a]['display_name']}**" for a in GATHERING_AREAS)
+        return False, f"❌ You can only use this command in gathering channels: {channels_list}"
+
+    area = GATHERING_AREAS[channel_name]
+
+    # Forest is always accessible
+    if area["unlocked_by_default"]:
+        return True, ""
+
+    # Fetch unlocked areas once for all checks
+    unlocked_areas = get_user_unlocked_areas(user_id)
+
+    # Check if the previous area is unlocked (progression order)
+    if area["previous_area"] and not unlocked_areas.get(area["previous_area"], False):
+        prev_display = GATHERING_AREAS[area["previous_area"]]["display_name"]
+        return False, f"❌ You must unlock **{prev_display}** before accessing **{area['display_name']}**!"
+
+    # Check if this area is unlocked
+    if not unlocked_areas.get(channel_name, False):
+        return False, f"❌ You haven't unlocked **{area['display_name']}** yet! Use `/unlock {channel_name}` to unlock it for **${area['unlock_cost']:,}**."
+
+    # Check planter rank requirement
+    user_planter_level = get_user_planter_level(member)
+    if user_planter_level < area["required_planter_level"]:
+        return False, f"❌ You must be **{area['required_planter_rank']}** or above to gather in **{area['display_name']}**! You need to gather more plants to rank up."
+
+    return True, ""
 
 
 # Achievement definitions
@@ -1501,6 +1682,161 @@ ACHIEVEMENTS = {
                 "boost": 100.0  # 10000%
             }
         ]
+    },
+    "russian_roulette": {
+        "name": "Playing Russian! Achievement Category",
+        "levels": [
+            {
+                "level": 0,
+                "name": "Scaredy-Cat",
+                "description": "You haven't even played a game of russian! Go do /russian in one of the russian-roulette channels!",
+                "threshold": 0,
+                "boost": 0.0
+            },
+            {
+                "level": 1,
+                "name": "Maybe Just One Spin",
+                "description": "Play /russian once",
+                "threshold": 1,
+                "boost": 0.005  # 0.5%
+            },
+            {
+                "level": 2,
+                "name": "Risk Taker",
+                "description": "Play /russian 3 times",
+                "threshold": 3,
+                "boost": 0.01  # 1%
+            },
+            {
+                "level": 3,
+                "name": "It's Only A Bullet, Right?",
+                "description": "Play /russian 10 times",
+                "threshold": 10,
+                "boost": 0.05  # 5%
+            },
+            {
+                "level": 4,
+                "name": "Desensitized",
+                "description": "Play /russian 50 times",
+                "threshold": 50,
+                "boost": 0.15  # 15%
+            },
+            {
+                "level": 5,
+                "name": "I Can Stop Anytime",
+                "description": "Play /russian 125 times",
+                "threshold": 125,
+                "boost": 0.35  # 35%
+            },
+            {
+                "level": 6,
+                "name": "16.67's My Favorite Percentage",
+                "description": "Play /russian 300 times",
+                "threshold": 300,
+                "boost": 0.70  # 70%
+            }
+        ]
+    },
+    "blooming": {
+        "name": "Blooming Achievement Category",
+        "levels": [
+            {
+                "level": 0,
+                "name": "Just A Bud",
+                "description": "You haven't even bloomed! Try to bloom with /bloom!",
+                "threshold": 0,
+                "boost": 0.0
+            },
+            {
+                "level": 1,
+                "name": "Gravity Falls",
+                "description": "Reach Pine II",
+                "threshold": 1,
+                "boost": 0.05  # 5%
+            },
+            {
+                "level": 2,
+                "name": "Insect Repelling",
+                "description": "Reach Cedar Rank",
+                "threshold": 3,
+                "boost": 0.125  # 12.5%
+            },
+            {
+                "level": 3,
+                "name": "Eye See You",
+                "description": "Reach Birch Rank",
+                "threshold": 6,
+                "boost": 0.30  # 30%
+            },
+            {
+                "level": 4,
+                "name": "Canadian",
+                "description": "Reach Maple Rank",
+                "threshold": 9,
+                "boost": 0.50  # 50%
+            },
+            {
+                "level": 5,
+                "name": "Just Like In Minecraft",
+                "description": "Reach Oak Rank",
+                "threshold": 12,
+                "boost": 0.80  # 80%
+            },
+            {
+                "level": 6,
+                "name": "How Many Tree Rings Is That?",
+                "description": "Reach Fir Rank",
+                "threshold": 15,
+                "boost": 1.25  # 125%
+            },
+            {
+                "level": 7,
+                "name": "The Tallest",
+                "description": "Reach Redwood Rank",
+                "threshold": 18,
+                "boost": 2.00  # 200%
+            }
+        ]
+    },
+    "areas_unlocked": {
+        "name": "Areas Unlocked Achievement Category",
+        "levels": [
+            {
+                "level": 0,
+                "name": "Starting Area",
+                "description": "You've only seen the #forest! Do /unlock to get to other areas!",
+                "threshold": 0,
+                "boost": 0.0
+            },
+            {
+                "level": 1,
+                "name": "Treasure Grove",
+                "description": "Unlock the #grove.",
+                "threshold": 1,
+                "boost": 0.02  # 2%
+            },
+            {
+                "level": 2,
+                "name": "Marshing On",
+                "description": "Unlock the #marsh",
+                "threshold": 2,
+                "boost": 0.10  # 10%
+            },
+            {
+                "level": 3,
+                "name": "Not To Be Confused With Bug",
+                "description": "Unlock the #bog",
+                "threshold": 3,
+                "boost": 0.30  # 30%
+            },
+            {
+                "level": 4,
+                "name": "But Not Loot Lake",
+                "description": "Unlock the #mire",
+                "threshold": 4,
+                "boost": 0.50  # 50%
+            }
+        ]
     }
 }
 
@@ -1545,11 +1881,21 @@ HIDDEN_ACHIEVEMENTS = {
         "name": "Maxed Out",
         "description": "Have all GPUs, all gardeners, all /gear upgrades maxed, all /orchard upgrades maxed",
         "boost": 1.0  # 100%
+    },
+    "high_reroller": {
+        "name": "High Reroller",
+        "description": "Get an imbue enchantment that is NETHERITE, LUMINITE, CELESTIAL, or SECRET",
+        "boost": 0.50  # 50%
+    },
+    "social_butterfly": {
+        "name": "Social Butterfly",
+        "description": "Invite 20 people to the server",
+        "boost": 1.0  # 100%
     }
 }
 
 # Total number of hidden achievements
-TOTAL_HIDDEN_ACHIEVEMENTS = 8
+TOTAL_HIDDEN_ACHIEVEMENTS = 10
 
 
 def check_maxed_out_achievement(user_id: int) -> bool:
@@ -1708,6 +2054,30 @@ def get_achievement_multiplier(user_id: int) -> float:
             level_data = water_streak_achievement["levels"][water_streak_level]
             total_boost += level_data["boost"]
     
+    # Check blooming achievement
+    blooming_level = get_user_achievement_level(user_id, "blooming")
+    if blooming_level > 0 and "blooming" in ACHIEVEMENTS:
+        blooming_achievement = ACHIEVEMENTS["blooming"]
+        if blooming_level < len(blooming_achievement["levels"]):
+            level_data = blooming_achievement["levels"][blooming_level]
+            total_boost += level_data["boost"]
+    
+    # Check russian_roulette achievement
+    russian_level = get_user_achievement_level(user_id, "russian_roulette")
+    if russian_level > 0 and "russian_roulette" in ACHIEVEMENTS:
+        russian_achievement = ACHIEVEMENTS["russian_roulette"]
+        if russian_level < len(russian_achievement["levels"]):
+            level_data = russian_achievement["levels"][russian_level]
+            total_boost += level_data["boost"]
+    
+    # Check areas_unlocked achievement
+    areas_unlocked_level = get_user_achievement_level(user_id, "areas_unlocked")
+    if areas_unlocked_level > 0 and "areas_unlocked" in ACHIEVEMENTS:
+        areas_achievement = ACHIEVEMENTS["areas_unlocked"]
+        if areas_unlocked_level < len(areas_achievement["levels"]):
+            level_data = areas_achievement["levels"][areas_unlocked_level]
+            total_boost += level_data["boost"]
+    
     # Check hidden achievements
     for achievement_key, achievement_data in HIDDEN_ACHIEVEMENTS.items():
         if has_hidden_achievement(user_id, achievement_key):
@@ -1811,18 +2181,22 @@ def can_gather(user_id, user_data=None, active_events=None):
     if hourly_event:
         event_id = hourly_event.get("effects", {}).get("event_id", "")
         if event_id == "speed_harvest":
-            cooldown_reduction += 30  # Cooldown reduced by 30 seconds
+            cooldown_reduction += 15  # Gather cooldown reduced by 15 seconds
     
     if daily_event:
         event_id = daily_event.get("effects", {}).get("event_id", "")
         if event_id == "speed_day":
-            cooldown_reduction += 15  # Cooldown reduced by 15 seconds
+            cooldown_reduction += 5  # Gather cooldown reduced by 5 seconds
     
     # Apply hoe attunement cooldown reduction (Renewal)
     hoe_enchant = get_user_hoe_attunement(user_id)
     if hoe_enchant:
         enchant_cd = hoe_enchant.get("cooldown_reduction", 0)
         cooldown_reduction += enchant_cd  # positive = less cooldown, negative = more cooldown
+    
+    # Apply invite reward cooldown reduction (tier 13: -10 seconds)
+    invite_reductions = get_invite_cooldown_reductions(user_id)
+    cooldown_reduction += invite_reductions.get("gather_reduction", 0)
     
     # Calculate effective cooldown (base cooldown minus reduction, minimum 0)
     effective_cooldown = max(0, GATHER_COOLDOWN - cooldown_reduction)
@@ -1840,7 +2214,8 @@ def set_cooldown(user_id):
 
 async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True, 
                                   user_data=None, active_events=None,
-                                  apply_orchard_fertilizer: bool = False) -> dict:
+                                  apply_orchard_fertilizer: bool = False,
+                                  area_multiplier: float = 1.0) -> dict:
     """
     Perform a gather action for a user. Returns dict with gathered item info.
     When apply_orchard_fertilizer=True (e.g. gardener auto-gather), orchard (harvest) fertilizer
@@ -1853,6 +2228,7 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
         user_data: Optional pre-fetched user data dict (from get_user_gather_data)
         active_events: Optional pre-fetched active events list
         apply_orchard_fertilizer: If True, apply orchard (harvest) fertilizer multiplier (for gardener auto-gather).
+        area_multiplier: Multiplier based on the gathering area (e.g. 1.2x for grove, 2x for marsh).
     """
     # Fetch data if not provided
     if user_data is None:
@@ -1903,6 +2279,9 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
     
     name = item["name"]
     base_value = item["base_value"]
+    
+    # Apply area multiplier (e.g. grove = 1.2x, marsh = 2x, etc.)
+    base_value *= area_multiplier
     
     # Apply event base value modifications (May Flowers, Fruit Festival, Vegetable Boom)
     if hourly_event:
@@ -1966,14 +2345,14 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
     if hourly_event:
         event_id = hourly_event.get("effects", {}).get("event_id", "")
         if event_id == "radiation_leak":
-            # GMO chance +25%
-            gmo_chance += 0.25
+            # GMO chance +20%
+            gmo_chance += 0.20
     
     if daily_event:
         event_id = daily_event.get("effects", {}).get("event_id", "")
         if event_id == "gmo_surge":
-            # GMO chance +25%
-            gmo_chance += 0.25
+            # GMO chance +10%
+            gmo_chance += 0.10
     
     # Clamp GMO chance to max 1.0 (100%)
     gmo_chance = min(gmo_chance, 1.0)
@@ -2008,11 +2387,17 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
     if daily_event:
         event_id = daily_event.get("effects", {}).get("event_id", "")
         if event_id == "double_money":
-            value_multiplier *= 2.0  # All earnings doubled
+            value_multiplier *= 1.5  # All earnings x1.5
         elif event_id == "harvest_festival":
             value_multiplier *= 1.5  # All item values +50%
     
     final_value *= basket_multiplier * value_multiplier
+
+    # Apply seasonal month bonus
+    month_index = random.randint(0, 11)
+    month_name = MONTHS[month_index]
+    seasonal_multiplier, seasonal_label = get_seasonal_multiplier(month_index, item["category"])
+    final_value *= seasonal_multiplier
 
     # Apply orchard (harvest) fertilizer when e.g. gardener auto-gather
     if apply_orchard_fertilizer:
@@ -2098,6 +2483,9 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
         "enchant_money_bonus": enchant_money_bonus,
         "is_critical_gather": is_critical_gather,
         "hoe_enchant": hoe_enchant,
+        "month_name": month_name,
+        "seasonal_multiplier": seasonal_multiplier,
+        "seasonal_label": seasonal_label,
     }
 
 #gatherable items
@@ -2241,114 +2629,132 @@ LEVEL_OF_RIPENESS_FLOWERS = [
 
 MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
 
+# Seasonal month bonuses - certain months boost certain item categories
+SEASONAL_BONUSES = {
+    3: {"category": "Flower", "multiplier": 1.75, "label": "🌸 Spring Flower Season"},      # April
+    4: {"category": "Flower", "multiplier": 1.75, "label": "🌸 Spring Flower Season"},      # May
+    5: {"category": "Vegetable", "multiplier": 1.5, "label": "🥬 Vegetable Season"},        # June
+    6: {"category": "Fruit", "multiplier": 1.33, "label": "🍎 Summer Fruit Season"},        # July
+    7: {"category": "Fruit", "multiplier": 1.33, "label": "🍎 Summer Fruit Season"},        # August
+    8: {"category": "Fruit", "multiplier": 1.33, "label": "🍎 Summer Fruit Season"},        # September
+    9: {"category": "Vegetable", "multiplier": 1.5, "label": "🥬 Vegetable Season"},        # October
+}
+
+def get_seasonal_multiplier(month_index: int, category: str) -> tuple:
+    """Returns (multiplier, label) for a given month and item category."""
+    bonus = SEASONAL_BONUSES.get(month_index)
+    if bonus and bonus["category"] == category:
+        return bonus["multiplier"], bonus["label"]
+    return 1.0, None
+
 # Event definitions
 HOURLY_EVENTS = [
     {
         "id": "radiation_leak",
         "name": "Radiation Leak!",
         "emoji": "☢️",
-        "description": "Radiation has leaked into the forest! GMO mutations are more common.",
-        "effect": "GMO chance +25%"
+        "description": "Radiation has leaked into the forest! GMO mutations are more common!",
+        "effect": "GMO chance +20%"
     },
     {
         "id": "may_flowers",
         "name": "May Flowers!",
         "emoji": "🌸",
-        "description": "Flowers are blooming everywhere! Increased flower gathering and triple prices!",
+        "description": "Flowers are blooming everywhere!",
         "effect": "Flower gather chance +60%, flower prices x3"
     },
     {
         "id": "bumper_crop",
-        "name": "Bumper Crop!",
+        "name": "Nature's Blessing!",
         "emoji": "🌾",
-        "description": "An exceptional harvest season! All items are worth double!",
+        "description": "The spirits favor you! All items are worth double!",
         "effect": "All item values x2"
     },
     {
         "id": "speed_harvest",
-        "name": "Speed Harvest!",
+        "name": "Adrenaline Boost!",
         "emoji": "⚡",
-        "description": "The forest is buzzing with energy! Gather faster!",
-        "effect": "Cooldown reduced by 30 seconds"
+        "description": "The forest pulses with urgency! Cooldowns are decreased!",
+        "effect": "Gather cooldown -15s, Harvest cooldown -3 min"
     },
     {
         "id": "perfect_ripeness",
-        "name": "Perfect Ripeness!",
+        "name": "High Noon!",
         "emoji": "⭐",
-        "description": "Everything is perfectly ripe! All ripeness multipliers increased!",
+        "description": "The sun is aligned perfectly above! The plants are more ripe!",
         "effect": "All ripeness multipliers +50%"
     },
     {
         "id": "fruit_festival",
-        "name": "Fruit Festival!",
+        "name": "Sweet Surge!",
         "emoji": "🍎",
-        "description": "A celebration of fruits! More fruits and double prices!",
+        "description": "The fruits are flourishing! Fruits are now more common!",
         "effect": "Fruit gather chance +50%, fruit prices x2"
     },
     {
         "id": "vegetable_boom",
-        "name": "Vegetable Boom!",
+        "name": "Earth's Bounty!",
         "emoji": "🥕",
-        "description": "Vegetables are thriving! More vegetables and double prices!",
+        "description": "Vegetables are thriving in the earth! Vegetables are more common!",
         "effect": "Vegetable gather chance +50%, vegetable prices x2"
     },
     {
         "id": "chain_reaction",
         "name": "Chain Reaction!",
         "emoji": "🔗",
-        "description": "The gloves are working overtime! Chain chances doubled!",
-        "effect": "Gloves chain chance doubled"
+        "description": "Chain chances are more common!",
+        "effect": "Chain chance +10%"
     },
     {
         "id": "basket_boost",
-        "name": "Basket Boost!",
+        "name": "Carrier's Blessing!",
         "emoji": "🧺",
-        "description": "Your baskets are enhanced! All basket multipliers increased!",
+        "description": "Your basket is shining! The basket multiplier increases!",
         "effect": "Basket multiplier +50%"
     },
     {
         "id": "lucky_strike",
-        "name": "Lucky Strike!",
+        "name": "Fortune Frenzy!",
         "emoji": "🍀",
-        "description": "Luck is on your side! All multipliers increased!",
-        "effect": "All multipliers +25%"
+        "description": "Luck is on your side! All multipliers increase!",
+        "effect": "All earnings +25%"
     }
 ]
 
 DAILY_EVENTS = [
     {
         "id": "double_money",
-        "name": "Double Money Day!",
+        "name": "Gold Rush!",
         "emoji": "💰",
-        "description": "Today is a special day! All earnings are doubled!",
-        "effect": "All earnings doubled for 24 hours"
+        "description": "The California sun calls you! All money 1.5x for this day!",
+        "effect": "All earnings x1.5 for 24 hours"
     },
     {
         "id": "speed_day",
-        "name": "Speed Day!",
+        "name": "Overdrive!",
         "emoji": "🏃",
-        "description": "Move faster today! Cooldowns are reduced!",
-        "effect": "Cooldown reduced by 15 seconds for 24 hours"
+        "description": "Your equipment's going into high gear! Cooldowns are reduced!",
+        "effect": "Gather cooldown -5s, Harvest cooldown -1 min for 24 hours"
     },
     {
         "id": "gmo_surge",
-        "name": "GMO Surge!",
+        "name": "Mutagenic Acceleration!",
         "emoji": "✨",
-        "description": "GMO mutations are surging! Increased GMO chance all day!",
-        "effect": "GMO chance +25% for 24 hours"
+        "description": "The plants are evolving!! Increased GMO chance all day!",
+        "effect": "GMO chance +10% for 24 hours"
     },
     {
         "id": "harvest_festival",
-        "name": "Harvest Festival!",
+        "name": "Plenty o' Prosperity!",
         "emoji": "🎉",
-        "description": "A grand festival! All items are worth more today!",
+        "description": "All items are worth more today!",
         "effect": "All item values +50% for 24 hours"
     },
     {
         "id": "ripeness_rush",
-        "name": "Ripeness Rush!",
+        "name": "Perfect Timing!",
         "emoji": "🌿",
-        "description": "Perfect ripeness is everywhere! Double the chance for perfect ripeness!",
+        "description": "Everything's in season! All plants have a higher chance to be perfectly ripe!",
         "effect": "Perfect ripeness chance doubled for 24 hours"
     }
 ]
@@ -2612,6 +3018,9 @@ async def play_roulette_round(channel, game_id):
         # remove player from active games
         if current_player_id in user_active_games:
             del user_active_games[current_player_id]
+        
+        # Check russian roulette achievement (player died = game completed)
+        await check_russian_roulette_achievement(current_player_id)
     
         # check if anyone is left
         await asyncio.sleep(2)
@@ -3063,6 +3472,9 @@ class RouletteContinueView(discord.ui.View):
                 except Exception as e:
                     print(f"Error sending Beating The Odds achievement notification: {e}")
             
+            # Check russian roulette achievement (cashout = game completed)
+            await check_russian_roulette_achievement(current_player_id, interaction=interaction)
+            
             # Check if game ends
             alive_count = len(game.get_alive_players())
             
@@ -3131,6 +3543,9 @@ class RouletteContinueView(discord.ui.View):
         
         await channel.send(embed=embed)
         
+        # Check russian roulette achievement (auto-cashout = game completed)
+        await check_russian_roulette_achievement(current_player_id)
+        
         # Check if game ends
         alive_count = len(game.get_alive_players())
         
@@ -3192,6 +3607,9 @@ async def end_roulette_game(channel, game_id):
             )
         
         await channel.send(embed=embed)
+        
+        # Check russian roulette achievement (winner = game completed)
+        await check_russian_roulette_achievement(winner_id)
         
     elif len(alive_players) == 0:
         # Everyone eliminated (all died on same round)
@@ -3625,6 +4043,10 @@ async def on_ready():
     bot.loop.create_task(gardener_background_task())
     print("Started automatic gardener gathering")
     
+    # Start the secret gardener background task
+    bot.loop.create_task(secret_gardener_background_task())
+    print("Started automatic secret gardener gathering")
+    
     # Start the GPU background task
     bot.loop.create_task(gpu_background_task())
     print("Started automatic GPU mining")
@@ -3636,32 +4058,80 @@ async def on_ready():
     print("Started daily event checking")
     bot.loop.create_task(event_cleanup_task())
     print("Started event cleanup task")
+    
+    # Cache invites for invite tracking
+    global _invite_cache
+    _invite_cache = {}
+    for guild in bot.guilds:
+        try:
+            invites = await guild.invites()
+            _invite_cache[guild.id] = {inv.code: inv.uses for inv in invites}
+        except Exception as e:
+            print(f"Error caching invites for guild {guild.name}: {e}")
 
 
 @bot.event
 async def on_member_join(member):
-    # Find the welcome channel
-    welcome_channel = discord.utils.get(member.guild.text_channels, name="welcome")
+    global _invite_cache
+    guild = member.guild
+    inviter = None
     
-    if welcome_channel:
-        
-        #send welcome message to the welcome channel
-        await welcome_channel.send(f"🌿 Welcome to /GATHER, {member.mention}! 🌿")
-    # else:
-    #     #fallback in case it fails
-    #     for channel in member.guild.text_channels:
-    #         if "welcome" in channel.name.lower():
-    #             await channel.send(f"🌿 Welcome to /GATHER, {member.mention}! 🌿")
-    #             break
-    #     else:
-    #         #if no welcome channel found
-    #         print(f"Warning: No 'welcome' channel found in {member.guild.name}. Could not welcome {member.name}.")
-
-    #assign gatherer1 role or whatever they have incase they joined and then left, and then rejoined
+    # Determine who invited this member by comparing invite uses
     try:
-        await assign_gatherer_role(member, member.guild)
+        current_invites = await guild.invites()
+        cached = _invite_cache.get(guild.id, {})
+        
+        for invite in current_invites:
+            old_uses = cached.get(invite.code, 0)
+            if invite.uses > old_uses and invite.inviter:
+                inviter = invite.inviter
+                break
+        
+        # Update the cache
+        _invite_cache[guild.id] = {inv.code: inv.uses for inv in current_invites}
+    except Exception as e:
+        print(f"Error tracking invites for guild {guild.name}: {e}")
+    
+    # Send welcome message in #welcome channel
+    welcome_channel = discord.utils.get(guild.text_channels, name="welcome")
+    if welcome_channel:
+        if inviter and inviter.id != member.id:
+            await welcome_channel.send(
+                f"\U0001f333 Welcome {member.mention} to /gather, thank you {inviter.mention} for inviting them! \U0001f338"
+            )
+            # Increment the inviter's invite count
+            try:
+                increment_invite_joins_count_only(inviter.id)
+            except Exception as e:
+                print(f"Error incrementing invite count for {inviter.id}: {e}")
+        else:
+            await welcome_channel.send(f"\U0001f333 Welcome {member.mention} to /gather! \U0001f338")
+    
+    # Assign gatherer role
+    try:
+        await assign_gatherer_role(member, guild)
     except Exception as e:
         print(f"Error assigning gatherer role to user {member.id}: {e}")
+
+
+@bot.event
+async def on_invite_create(invite):
+    """Keep invite cache updated when new invites are created."""
+    global _invite_cache
+    guild_id = invite.guild.id
+    if guild_id not in _invite_cache:
+        _invite_cache[guild_id] = {}
+    _invite_cache[guild_id][invite.code] = invite.uses
+
+
+@bot.event
+async def on_invite_delete(invite):
+    """Keep invite cache updated when invites are deleted."""
+    global _invite_cache
+    guild_id = invite.guild.id
+    if guild_id in _invite_cache and invite.code in _invite_cache[guild_id]:
+        del _invite_cache[guild_id][invite.code]
+
 
 @bot.tree.command(name="gather", description="Gather a random item from nature!")
 async def gather(interaction: discord.Interaction):
@@ -3670,8 +4140,19 @@ async def gather(interaction: discord.Interaction):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
-        # Fetch user data and events once at the start
+        # Check if command is used in a valid gathering channel
+        channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
         user_id = interaction.user.id
+        
+        allowed, error_msg = check_area_access(interaction.user, channel_name, user_id)
+        if not allowed:
+            await safe_interaction_response(interaction, interaction.followup.send, error_msg, ephemeral=True)
+            return
+        
+        # Get the area multiplier for this channel
+        area_mult = GATHERING_AREAS.get(channel_name, {}).get("multiplier", 1.0)
+
+        # Fetch user data and events once at the start
         user_data = get_user_gather_data(user_id)   
         active_events = get_active_events_cached()
 
@@ -3702,9 +4183,10 @@ async def gather(interaction: discord.Interaction):
         # Increment gather command count (only for actual /gather commands, not gardeners)
         increment_user_gather_command_count(user_id)
         
-        # Perform the gather with pre-fetched data
+        # Perform the gather with pre-fetched data (include area multiplier)
         gather_result = await perform_gather_for_user(user_id, apply_cooldown=True, 
-                                                      user_data=user_data, active_events=active_events)
+                                                      user_data=user_data, active_events=active_events,
+                                                      area_multiplier=area_mult)
 
         # Check if a Tree Ring was awarded
         tree_rings_after = get_user_tree_rings(user_id)
@@ -3763,7 +4245,7 @@ async def gather(interaction: discord.Interaction):
                 title="\U0001f4a5 CRITICAL HIT! \U0001f4a5",
                 description=(
                     f"**{interaction.user.name}** foraged for a(n) **{gather_result['name']}** "
-                    f"and got a **CRIT HIT**!\n\n"
+                    f"and got a **CRIT**!\n\n"
                     f"\U0001f4a5 **2X MONEY** \U0001f4a5"
                 ),
                 color=discord.Color.orange()
@@ -3784,10 +4266,8 @@ async def gather(interaction: discord.Interaction):
                 inline=False
             )
 
-            # add a line to show [username] in [month]
-            embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
-            embed.add_field(name="💰 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
-            embed.add_field(name="💵 New Balance", value=f"**${gather_result['new_balance']:.2f}**", inline=True)
+            embed.add_field(name="\U0001f4b0 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
+            embed.add_field(name="\U0001f4b5 New Balance", value=f"**${gather_result['new_balance']:.2f}**", inline=True)
 
         else:
             # ---------- NORMAL GATHER EMBED ----------
@@ -3852,10 +4332,8 @@ async def gather(interaction: discord.Interaction):
                     inline=False
                 )
             
-            # add a line to show [username] in [month]
-            embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
-            embed.add_field(name="💰 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
-            embed.add_field(name="💵 New Balance", value=f"**${gather_result['new_balance']:.2f}**", inline=True)
+            embed.add_field(name="\U0001f4b0 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
+            embed.add_field(name="\U0001f4b5 New Balance", value=f"**${gather_result['new_balance']:.2f}**", inline=True)
         
         # Check for chain chance (gloves upgrade + hoe attunement Resonance) - use pre-fetched data
         user_upgrades = user_data["basket_upgrades"]
@@ -3877,7 +4355,7 @@ async def gather(interaction: discord.Interaction):
             if hourly_event:
                 event_id = hourly_event.get("effects", {}).get("event_id", "")
                 if event_id == "chain_reaction":
-                    chain_chance *= 2  # Double the chain chance
+                    chain_chance += 0.10  # Flat +10% chain chance
             
             chain_triggered = random.random() < chain_chance
             if chain_triggered:
@@ -3928,34 +4406,55 @@ async def water(interaction: discord.Interaction):
         EST_OFFSET = datetime.timedelta(hours=-5)
         now_utc = datetime.datetime.utcnow()
         now_est = now_utc + EST_OFFSET
+        current_date = now_est.date()
+        current_hour = now_est.hour
         
-        # Get next midnight in EST
-        next_midnight_est = (now_est + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        time_until_midnight = (next_midnight_est - now_est).total_seconds()
+        # Check if user has double-water perk (invite reward tier 19)
+        invite_reductions = get_invite_cooldown_reductions(user_id)
+        has_double_water = invite_reductions.get("water_double", False)
         
-        # Check if user has already watered today
+        # Get next reset time
+        # If before 12 PM EST and has double water: next reset is 12 PM today
+        # Otherwise: next reset is midnight (12 AM) tomorrow
+        if has_double_water and current_hour < 12:
+            next_reset_est = now_est.replace(hour=12, minute=0, second=0, microsecond=0)
+        else:
+            next_reset_est = (now_est + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        time_until_reset = (next_reset_est - now_est).total_seconds()
+        
+        # Check if user has already watered in the current window
         if last_water_time > 0:
-            # Check if last water was today (same calendar day in EST)
             last_water_utc = datetime.datetime.utcfromtimestamp(last_water_time)
             last_water_est = last_water_utc + EST_OFFSET
             last_water_date = last_water_est.date()
-            current_date = now_est.date()
+            last_water_hour = last_water_est.hour
             
+            already_watered = False
             if last_water_date == current_date:
-                # Already watered today, show time until midnight
-                time_left = int(time_until_midnight)
+                if has_double_water:
+                    # With double water: two windows per day (12 AM-12 PM and 12 PM-12 AM)
+                    # Check if they already watered in the current 12-hour window
+                    in_afternoon_window = current_hour >= 12
+                    last_in_afternoon_window = last_water_hour >= 12
+                    if in_afternoon_window and last_in_afternoon_window:
+                        already_watered = True  # Already watered in PM window
+                    elif not in_afternoon_window and not last_in_afternoon_window:
+                        already_watered = True  # Already watered in AM window
+                    # If current is PM and last was AM (or vice versa), they can water again
+                else:
+                    already_watered = True  # Without perk, once per day
+            
+            if already_watered:
+                time_left = int(time_until_reset)
                 
-                # Format time remaining based on duration
+                # Format time remaining
                 if time_left < 60:
-                    # Less than 1 minute - show seconds only
                     time_msg = f"{time_left} second{'s' if time_left != 1 else ''}"
                 elif time_left < 3600:
-                    # Less than 1 hour - show minutes and seconds
                     minutes_left = time_left // 60
                     seconds_left = time_left % 60
                     time_msg = f"{minutes_left} minute{'s' if minutes_left != 1 else ''} and {seconds_left} second{'s' if seconds_left != 1 else ''}"
                 else:
-                    # 1 hour or more - show hours, minutes, and seconds
                     hours_left = time_left // 3600
                     minutes_left = (time_left % 3600) // 60
                     seconds_left = time_left % 60
@@ -3966,24 +4465,32 @@ async def water(interaction: discord.Interaction):
                 return
         
         # Calculate consecutive days
+        # Streak only breaks if the user missed an ENTIRE calendar day (midnight reset)
+        # Missing the 12 PM double-water window does NOT break the streak
         consecutive_days = get_user_consecutive_water_days(user_id)
         
-        # Check if streak should be reset (last water was not yesterday)
+        # Only update streak on the FIRST water of the day (not the second double-water)
+        is_first_water_today = True
         if last_water_time > 0:
             last_water_utc = datetime.datetime.utcfromtimestamp(last_water_time)
             last_water_est = last_water_utc + EST_OFFSET
             last_water_date = last_water_est.date()
-            yesterday_date = (now_est - datetime.timedelta(days=1)).date()
             
-            # If last water was not yesterday, reset streak
-            if last_water_date != yesterday_date:
-                consecutive_days = 0  # Reset streak
+            if last_water_date == current_date:
+                # This is the second water today (double-water perk) - don't change streak
+                is_first_water_today = False
+            else:
+                # First water of a new day - check if streak continues
+                yesterday_date = (now_est - datetime.timedelta(days=1)).date()
+                if last_water_date != yesterday_date and last_water_date != current_date:
+                    # Last water was not yesterday and not today - streak breaks
+                    consecutive_days = 0
         else:
             consecutive_days = 0  # First time watering
         
-        # Increment consecutive days
-        consecutive_days += 1
-        set_user_consecutive_water_days(user_id, consecutive_days)
+        if is_first_water_today:
+            consecutive_days += 1
+            set_user_consecutive_water_days(user_id, consecutive_days)
         
         # Update last water time and increment water count
         update_user_last_water_time(user_id, current_time)
@@ -4005,12 +4512,13 @@ async def water(interaction: discord.Interaction):
         
         # Award 10 Tree Rings on 5th consecutive day
         tree_rings_awarded = 0
-        if consecutive_days == 5:
+        if consecutive_days == 5 and is_first_water_today:
             increment_tree_rings(user_id, 10)
             tree_rings_awarded = 10
         
         # Build the message
-        message = f"{interaction.user.mention}, you've been rewarded with **${money_reward:,.2f}**. Your streak is **{consecutive_days}**! (**{daily_bonus_multiplier:.2f}x**)"
+        water_label = "💧💧 **Double Water!** " if not is_first_water_today else ""
+        message = f"{water_label}{interaction.user.mention}, you've been rewarded with **${money_reward:,.2f}**. Your streak is **{consecutive_days}**! (**{daily_bonus_multiplier:.2f}x**)"
         
         # Add Tree Rings message if it's the 5th day
         if tree_rings_awarded > 0:
@@ -4019,26 +4527,28 @@ async def water(interaction: discord.Interaction):
         await safe_interaction_response(interaction, interaction.followup.send, message, ephemeral=False)
         
         # Check and update water_streak achievement level (after main response)
-        new_water_streak_level = get_achievement_level_for_stat("water_streak", consecutive_days)
-        current_water_streak_level = get_user_achievement_level(user_id, "water_streak")
-        if new_water_streak_level > current_water_streak_level:
-            set_user_achievement_level(user_id, "water_streak", new_water_streak_level)
-            await send_achievement_notification(interaction, "water_streak", new_water_streak_level)
-        
-        # Check for hidden achievement: Leap Year (water streak of 366)
-        if consecutive_days == 366 and unlock_hidden_achievement(user_id, "leap_year"):
-            await send_hidden_achievement_notification(interaction, "leap_year")
+        if is_first_water_today:
+            new_water_streak_level = get_achievement_level_for_stat("water_streak", consecutive_days)
+            current_water_streak_level = get_user_achievement_level(user_id, "water_streak")
+            if new_water_streak_level > current_water_streak_level:
+                set_user_achievement_level(user_id, "water_streak", new_water_streak_level)
+                await send_achievement_notification(interaction, "water_streak", new_water_streak_level)
+            
+            # Check for hidden achievement: Leap Year (water streak of 366)
+            if consecutive_days == 366 and unlock_hidden_achievement(user_id, "leap_year"):
+                await send_hidden_achievement_notification(interaction, "leap_year")
     except Exception as e:
         print(f"Error in water command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
-async def perform_harvest_for_user(user_id: int, allow_chain: bool = True) -> dict:
+async def perform_harvest_for_user(user_id: int, allow_chain: bool = True, area_multiplier: float = 1.0) -> dict:
     """Perform a full harvest for a user (balance, items, stats, tree rings). Does NOT set harvest cooldown.
     Uses orchard (harvest) upgrades: car (extra items), fertilizer, basket, etc., so gardener auto-harvests
     benefit from the user's /orchard upgrades. Set allow_chain=False for gardener-triggered harvests (no chain).
     Returns dict with total_value, gathered_items, current_balance, chain_chance, total_base_value,
-    bloom_multiplier, water_multiplier, total_value_before_daily, tree_rings_to_award."""
+    bloom_multiplier, water_multiplier, total_value_before_daily, tree_rings_to_award.
+    area_multiplier: Multiplier based on the gathering area (e.g. 1.2x for grove, 2x for marsh)."""
     active_events = get_active_events_cached()
     user_upgrades = get_user_basket_upgrades(user_id)
     basket_tier = user_upgrades["basket"]
@@ -4072,13 +4582,13 @@ async def perform_harvest_for_user(user_id: int, allow_chain: bool = True) -> di
     hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
     daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
     if allow_chain and hourly_event and hourly_event.get("effects", {}).get("event_id", "") == "chain_reaction":
-        chain_chance *= 2
+        chain_chance += 0.10  # Flat +10% chain chance
     if not allow_chain:
         chain_chance = 0.0  # Gardener auto-harvests/auto-gathers never get chain
     if hourly_event and hourly_event.get("effects", {}).get("event_id", "") == "radiation_leak":
-        gmo_chance += 0.25
+        gmo_chance += 0.20  # GMO chance +20%
     if daily_event and daily_event.get("effects", {}).get("event_id", "") == "gmo_surge":
-        gmo_chance += 0.25
+        gmo_chance += 0.10  # GMO chance +10%
     gmo_chance = min(gmo_chance, 1.0)
     if hourly_event and hourly_event.get("effects", {}).get("event_id", "") == "basket_boost":
         basket_multiplier *= 1.5
@@ -4090,6 +4600,11 @@ async def perform_harvest_for_user(user_id: int, allow_chain: bool = True) -> di
     total_base_value = 0.0
     total_value_before_daily = 0.0  # Kept for backward compatibility
     current_balance = get_user_balance(user_id)
+    # Generate one random month for the entire harvest
+    month_index = random.randint(0, 11)
+    month_name = MONTHS[month_index]
+    total_seasonal_bonus = 0.0
+    seasonal_label = None
     for i in range(total_items_to_harvest):
         item = random.choice(GATHERABLE_ITEMS)
         name = item["name"]
@@ -4102,6 +4617,8 @@ async def perform_harvest_for_user(user_id: int, allow_chain: bool = True) -> di
         else:
             ripeness_list = []
         base_value = item["base_value"]
+        # Apply area multiplier (e.g. grove = 1.2x, marsh = 2x, etc.)
+        base_value *= area_multiplier
         if hourly_event:
             event_id = hourly_event.get("effects", {}).get("event_id", "")
             if event_id == "may_flowers" and item["category"] == "Flower":
@@ -4143,10 +4660,18 @@ async def perform_harvest_for_user(user_id: int, allow_chain: bool = True) -> di
         if daily_event:
             event_id = daily_event.get("effects", {}).get("event_id", "")
             if event_id == "double_money":
-                value_multiplier *= 2.0
+                value_multiplier *= 1.5  # All earnings x1.5
             elif event_id == "harvest_festival":
                 value_multiplier *= 1.5
         final_value *= value_multiplier
+        # Apply seasonal month bonus
+        item_seasonal_mult, item_seasonal_label = get_seasonal_multiplier(month_index, item["category"])
+        if item_seasonal_mult > 1.0:
+            seasonal_bonus_for_item = final_value * (item_seasonal_mult - 1.0)
+            total_seasonal_bonus += seasonal_bonus_for_item
+            final_value *= item_seasonal_mult
+            if item_seasonal_label:
+                seasonal_label = item_seasonal_label
         base_value_before_boosts = final_value
         # Additive boosts from base value, then rank multiplies the subtotal
         daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
@@ -4194,6 +4719,9 @@ async def perform_harvest_for_user(user_id: int, allow_chain: bool = True) -> di
         "tractor_enchant": tractor_enchant,
         "enchant_extra_plants": enchant_extra_plants,
         "enchant_money_bonus": enchant_money_bonus,
+        "month_name": month_name,
+        "seasonal_label": seasonal_label,
+        "total_seasonal_bonus": total_seasonal_bonus,
     }
 
 
@@ -4204,6 +4732,17 @@ async def harvest(interaction: discord.Interaction):
         if not await safe_defer(interaction, ephemeral=False):
             return
         user_id = interaction.user.id
+        
+        # Check if command is used in a valid gathering channel
+        channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
+        allowed, error_msg = check_area_access(interaction.user, channel_name, user_id)
+        if not allowed:
+            await safe_interaction_response(interaction, interaction.followup.send, error_msg, ephemeral=True)
+            return
+        
+        # Get the area multiplier for this channel
+        area_mult = GATHERING_AREAS.get(channel_name, {}).get("multiplier", 1.0)
+        
         can_user_harvest, time_left, is_roulette_cooldown = can_harvest(user_id)
         if not can_user_harvest:
             if is_roulette_cooldown:
@@ -4219,7 +4758,7 @@ async def harvest(interaction: discord.Interaction):
                     f"You must wait {minutes_left} minutes and {seconds_left} seconds before harvesting again, {interaction.user.name}.", ephemeral=True)
             return
         set_harvest_cooldown(user_id)
-        result = await perform_harvest_for_user(user_id)
+        result = await perform_harvest_for_user(user_id, area_multiplier=area_mult)
         gathered_items = result["gathered_items"]
         total_value = result["total_value"]
         current_balance = result["current_balance"]
@@ -4354,8 +4893,6 @@ async def harvest(interaction: discord.Interaction):
                 inline=False
             )
         
-        embed.add_field(name="~", value=f"{interaction.user.name} in {MONTHS[random.randint(0, 11)]}", inline=False)
-
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
         
         # Check and update planter achievement level (after main response)
@@ -4423,13 +4960,12 @@ async def achievements(interaction: discord.Interaction):
             else:
                 current_level_data = levels[-1]  # Use max level if somehow exceeded
             
-            # Build progress bar (10 squares for levels 0-10)
-            # current_level represents the level achieved (0-10)
-            # Level 0 = all grey (0 green), Level 1 = 1 green + 9 grey, Level 10 = 10 green (all green)
+            # Build progress bar (squares = max earnable levels, excluding level 0)
+            # e.g. 10 levels (1-10) = 10 squares, 7 levels (1-7) = 7 squares
+            max_earnable = len(levels) - 1  # Exclude level 0
             progress_bar = ""
-            # Show current_level green squares (0 for level 0, 1 for level 1, ..., 10 for level 10)
             num_green_squares = current_level
-            for i in range(10):
+            for i in range(max_earnable):
                 if i < num_green_squares:
                     progress_bar += "🟩"  # Green square for completed
                 else:
@@ -4481,6 +5017,14 @@ async def bloom(interaction: discord.Interaction):
         
         user_id = interaction.user.id
         
+        # Block bloom if user is in an active roulette game (prevent exploit:
+        # deposit money into /russian, bloom to reset balance, then cash out to recover money)
+        if user_id in user_active_games:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ You cannot bloom while in an active **/russian** game, {interaction.user.name}! Finish or cash out first.",
+                ephemeral=True)
+            return
+        
         # Check if user has PLANTER X role
         planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V", "PLANTER VI", "PLANTER VII", "PLANTER VIII", "PLANTER IX", "PLANTER X"]
         user_roles = [role.name for role in interaction.user.roles]
@@ -4506,11 +5050,17 @@ async def bloom(interaction: discord.Interaction):
         old_rank = get_bloom_rank(user_id)
         tree_rings = get_user_tree_rings(user_id)
         
-        # Perform bloom (only resets money, plants persist)
+        # Perform bloom (resets money, cycle plants, upgrades; keeps lifetime total_items, achievements, tree rings)
         perform_bloom(user_id)
         
         # Get new stats
         new_rank = get_bloom_rank(user_id)
+        
+        # Reset PLANTER rank role back to PLANTER I (bloom_cycle_plants is now 0)
+        try:
+            await assign_gatherer_role(interaction.user, interaction.guild)
+        except Exception as e:
+            print(f"Error resetting planter role for user {user_id}: {e}")
         
         # Assign Bloom Rank role
         old_bloom_role = None
@@ -4538,9 +5088,252 @@ async def bloom(interaction: discord.Interaction):
                 value=f"+{multiplier_percent:.1f}% on all earnings", 
                 inline=False
             )
+        embed.add_field(name="🗺️ Areas Reset", value="All unlocked areas have been reset. You're back in **#forest**!", inline=False)
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+        
+        # Check and update blooming achievement level (after main response)
+        bloom_count = get_user_bloom_count(user_id)
+        new_blooming_level = get_achievement_level_for_stat("blooming", bloom_count)
+        current_blooming_level = get_user_achievement_level(user_id, "blooming")
+        if new_blooming_level > current_blooming_level:
+            set_user_achievement_level(user_id, "blooming", new_blooming_level)
+            await send_achievement_notification(interaction, "blooming", new_blooming_level)
     except Exception as e:
         print(f"Error in bloom command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+# /unlock command - unlock new gathering areas
+@bot.tree.command(name="unlock", description="Unlock a new gathering area!")
+@app_commands.describe(area="The area to unlock")
+@app_commands.choices(area=[
+    app_commands.Choice(name="Grove ($250,000 & PLANTER III)", value="grove"),
+    app_commands.Choice(name="Marsh ($5,000,000 & PLANTER V)", value="marsh"),
+    app_commands.Choice(name="Bog ($75,000,000 & PLANTER VII)", value="bog"),
+    app_commands.Choice(name="Mire ($300,000,000 & PLANTER IX)", value="mire"),
+])
+async def unlock(interaction: discord.Interaction, area: app_commands.Choice[str]):
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        
+        user_id = interaction.user.id
+        area_key = area.value
+        
+        if area_key not in GATHERING_AREAS or GATHERING_AREAS[area_key]["unlocked_by_default"]:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ Invalid area!", ephemeral=True)
+            return
+        
+        area_data = GATHERING_AREAS[area_key]
+        
+        # Check if already unlocked
+        unlocked_areas = get_user_unlocked_areas(user_id)
+        if unlocked_areas.get(area_key, False):
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ You've already unlocked **{area_data['display_name']}**, {interaction.user.name}!",
+                ephemeral=True)
+            return
+        
+        # Check if previous area is unlocked (progression order)
+        if area_data["previous_area"]:
+            if not unlocked_areas.get(area_data["previous_area"], False):
+                prev_display = GATHERING_AREAS[area_data["previous_area"]]["display_name"]
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ You must unlock **{prev_display}** before you can unlock **{area_data['display_name']}**, {interaction.user.name}!",
+                    ephemeral=True)
+                return
+        
+        # Check planter rank requirement
+        user_planter_level = get_user_planter_level(interaction.user)
+        if user_planter_level < area_data["required_planter_level"]:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ You must be **{area_data['required_planter_rank']}** or above to unlock **{area_data['display_name']}**, {interaction.user.name}! Keep gathering to rank up!",
+                ephemeral=True)
+            return
+        
+        # Check if user has enough money
+        unlock_cost = area_data["unlock_cost"]
+        user_balance = get_user_balance(user_id)
+        if user_balance < unlock_cost:
+            money_needed = unlock_cost - user_balance
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ You need **${money_needed:,.2f}** more to unlock **{area_data['display_name']}**, {interaction.user.name}! (Cost: **${unlock_cost:,}**)",
+                ephemeral=True)
+            return
+        
+        # Deduct the money and unlock the area
+        new_balance = normalize_money(user_balance - unlock_cost)
+        update_user_balance(user_id, new_balance)
+        unlock_user_area(user_id, area_key)
+        
+        # Create success embed
+        embed = discord.Embed(
+            title=f"{area_data['emoji']} Area Unlocked!",
+            description=f"{interaction.user.mention} has unlocked **{area_data['display_name']}**!",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="📈 Area Multiplier", value=f"**{area_data['multiplier']}x**", inline=False)
+        embed.add_field(name="💵 New Balance", value=f"**${new_balance:,.2f}**", inline=False)
+        
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+        
+        # Award areas_unlocked achievement
+        # Count how many areas the user now has unlocked
+        updated_unlocked = get_user_unlocked_areas(user_id)
+        areas_count = sum(1 for v in updated_unlocked.values() if v)
+        current_areas_achievement = get_user_achievement_level(user_id, "areas_unlocked")
+        if areas_count > current_areas_achievement:
+            set_user_achievement_level(user_id, "areas_unlocked", areas_count)
+            await send_achievement_notification(interaction, "areas_unlocked", areas_count)
+    except Exception as e:
+        print(f"Error in unlock command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+# ─── Invite Awards System ───
+# 20 tiers of invite rewards, claimed in order
+INVITE_REWARDS = {
+    1:  {"type": "money", "amount": 50_000, "description": "**$50,000**"},
+    2:  {"type": "money", "amount": 200_000, "description": "**$200,000**"},
+    3:  {"type": "tree_rings", "amount": 5, "description": "**5 Tree Rings**"},
+    4:  {"type": "money", "amount": 1_000_000, "description": "**$1,000,000**"},
+    5:  {"type": "tree_rings", "amount": 10, "description": "**10 Tree Rings**"},
+    6:  {"type": "money", "amount": 5_000_000, "description": "**$5,000,000**"},
+    7:  {"type": "money", "amount": 10_000_000, "description": "**$10,000,000**"},
+    8:  {"type": "tree_rings", "amount": 20, "description": "**20 Tree Rings**"},
+    9:  {"type": "money", "amount": 15_000_000, "description": "**$15,000,000**"},
+    10: {"type": "secret_gardener", "amount": 0, "description": "**SECRET GARDENER**"},
+    11: {"type": "tree_rings", "amount": 30, "description": "**30 Tree Rings**"},
+    12: {"type": "secret_gardener_harvest", "amount": 0, "description": "**SECRET GARDENER UNLOCKS AUTO HARVEST!**"},
+    13: {"type": "gather_cooldown", "amount": 10, "description": "**Permanent /gather cooldown reduction by 10 seconds**"},
+    14: {"type": "harvest_cooldown", "amount": 300, "description": "**Permanent /harvest cooldown reduction by 5 minutes**"},
+    15: {"type": "mine_cooldown", "amount": 1200, "description": "**Permanent /mine cooldown reduction by 20 minutes**"},
+    16: {"type": "tree_rings", "amount": 100, "description": "**100 Tree Rings**"},
+    17: {"type": "money", "amount": 100_000_000, "description": "**$100,000,000**"},
+    18: {"type": "tree_rings", "amount": 300, "description": "**300 Tree Rings**"},
+    19: {"type": "water_double", "amount": 0, "description": "**Permanent /water cooldown reduction! Water twice a day (12 PM & 12 AM EST)**"},
+    20: {"type": "hidden_achievement", "amount": 0, "description": "**HIDDEN ACHIEVEMENT**"},
+}
+
+
+@bot.tree.command(name="inviteawards", description="Check or claim your invite rewards!")
+@app_commands.describe(action="Check your invite progress or claim rewards")
+@app_commands.choices(action=[
+    app_commands.Choice(name="Check", value="check"),
+    app_commands.Choice(name="Claim", value="claim"),
+])
+async def inviteawards(interaction: discord.Interaction, action: app_commands.Choice[str]):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        
+        user_id = interaction.user.id
+        invite_stats = get_user_invite_stats(user_id)
+        total_invites = invite_stats["total_joins"]
+        claimed_rewards = invite_stats.get("claimed_rewards", [])
+        
+        if action.value == "check":
+            # Show invite rewards progress
+            embed = discord.Embed(
+                title=f"🎁 {interaction.user.name}'s Invite Awards",
+                color=discord.Color.gold()
+            )
+            embed.add_field(name="Invites", value=f"**{total_invites}**", inline=False)
+            
+            rewards_text = ""
+            for tier in range(1, 21):
+                reward = INVITE_REWARDS[tier]
+                is_claimed = tier in claimed_rewards
+                can_claim = total_invites >= tier and not is_claimed
+                
+                if is_claimed:
+                    prefix = "✅"
+                elif can_claim:
+                    prefix = "🟡"
+                else:
+                    prefix = "⬜"
+                
+                rewards_text += f"{prefix} {tier} Invite{'s' if tier != 1 else ''}: {reward['description']}\n"
+            
+            embed.add_field(name="Rewards:", value=rewards_text, inline=False)
+            embed.set_footer(text="Do /inviteawards claim to claim your invite awards!")
+            
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+        
+        elif action.value == "claim":
+            # Try to claim the next unclaimed reward
+            next_tier = None
+            for tier in range(1, 21):
+                if tier not in claimed_rewards and total_invites >= tier:
+                    next_tier = tier
+                    break
+            
+            if next_tier is None:
+                # Check if all are claimed or not enough invites
+                all_claimed = all(t in claimed_rewards for t in range(1, 21))
+                if all_claimed:
+                    await safe_interaction_response(interaction, interaction.followup.send,
+                        f"🎁 You've already claimed all invite rewards, {interaction.user.name}!", ephemeral=True)
+                else:
+                    # Find next unclaimed tier to show requirement
+                    next_unclaimed = next((t for t in range(1, 21) if t not in claimed_rewards), None)
+                    if next_unclaimed:
+                        await safe_interaction_response(interaction, interaction.followup.send,
+                            f"❌ You need **{next_unclaimed} invite{'s' if next_unclaimed != 1 else ''}** to claim the next reward! You have **{total_invites}**.",
+                            ephemeral=True)
+                    else:
+                        await safe_interaction_response(interaction, interaction.followup.send,
+                            f"❌ No rewards available to claim right now.", ephemeral=True)
+                return
+            
+            # Claim the reward
+            reward = INVITE_REWARDS[next_tier]
+            success = claim_invite_reward(user_id, next_tier)
+            if not success:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ You've already claimed this reward!", ephemeral=True)
+                return
+            
+            # Apply the reward
+            reward_msg = ""
+            if reward["type"] == "money":
+                current_balance = get_user_balance(user_id)
+                new_balance = normalize_money(current_balance + reward["amount"])
+                update_user_balance(user_id, new_balance)
+                reward_msg = f"You received {reward['description']}!"
+            elif reward["type"] == "tree_rings":
+                increment_tree_rings(user_id, reward["amount"])
+                reward_msg = f"You received {reward['description']}!"
+            elif reward["type"] == "secret_gardener":
+                reward_msg = f"You unlocked the {reward['description']}! Check `/hire` page 6!"
+            elif reward["type"] == "secret_gardener_harvest":
+                reward_msg = f"You unlocked {reward['description']}"
+            elif reward["type"] == "gather_cooldown":
+                reward_msg = f"You unlocked {reward['description']}!"
+            elif reward["type"] == "harvest_cooldown":
+                reward_msg = f"You unlocked {reward['description']}!"
+            elif reward["type"] == "mine_cooldown":
+                reward_msg = f"You unlocked {reward['description']}!"
+            elif reward["type"] == "water_double":
+                reward_msg = f"You unlocked {reward['description']}!"
+            elif reward["type"] == "hidden_achievement":
+                # Award the social_butterfly hidden achievement
+                newly_unlocked = unlock_hidden_achievement(user_id, "social_butterfly")
+                reward_msg = f"You unlocked a {reward['description']}!"
+                if newly_unlocked:
+                    await send_hidden_achievement_notification(interaction, "social_butterfly")
+            
+            embed = discord.Embed(
+                title="🎁 Invite Reward Claimed!",
+                description=f"**Tier {next_tier}** — {reward_msg}",
+                color=discord.Color.green()
+            )
+            embed.set_footer(text=f"Invites: {total_invites} | Use /inviteawards check to see all rewards")
+            
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+    except Exception as e:
+        print(f"Error in inviteawards command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
@@ -4565,50 +5358,41 @@ async def userstats(interaction: discord.Interaction):
         user_id = interaction.user.id
         user_balance = get_user_balance(user_id)
         total_items = get_user_total_items(user_id)
+        cycle_plants = get_user_bloom_cycle_plants(user_id)
         
-        # Calculate items needed for next rankup
-        # PLANTER I: 0-49 (need 50 for PLANTER II)
-        # PLANTER II: 50-149 (need 150 for PLANTER III)
-        # PLANTER III: 150-299 (need 300 for PLANTER IV)
-        # PLANTER IV: 300-499 (need 500 for PLANTER V)
-        # PLANTER V: 500-999 (need 1000 for PLANTER VI)
-        # PLANTER VI: 1000-1999 (need 2000 for PLANTER VII)
-        # PLANTER VII: 2000-3999 (need 4000 for PLANTER VIII)
-        # PLANTER VIII: 4000-9999 (need 10000 for PLANTER IX)
-        # PLANTER IX: 10000-14999 (need 15000 for PLANTER X)
-        # PLANTER X: 15000+ (max rank)
+        # Calculate items needed for next rankup (based on bloom cycle plants, not lifetime)
         items_needed = None
         next_rank = None
         
-        if total_items < 50:
-            items_needed = 50 - total_items
+        if cycle_plants < 50:
+            items_needed = 50 - cycle_plants
             next_rank = "PLANTER II"
-        elif total_items < 150:
-            items_needed = 150 - total_items
+        elif cycle_plants < 150:
+            items_needed = 150 - cycle_plants
             next_rank = "PLANTER III"
-        elif total_items < 300:
-            items_needed = 300 - total_items
+        elif cycle_plants < 300:
+            items_needed = 300 - cycle_plants
             next_rank = "PLANTER IV"
-        elif total_items < 500:
-            items_needed = 500 - total_items
+        elif cycle_plants < 500:
+            items_needed = 500 - cycle_plants
             next_rank = "PLANTER V"
-        elif total_items < 1000:
-            items_needed = 1000 - total_items
+        elif cycle_plants < 1000:
+            items_needed = 1000 - cycle_plants
             next_rank = "PLANTER VI"
-        elif total_items < 2000:
-            items_needed = 2000 - total_items
+        elif cycle_plants < 2000:
+            items_needed = 2000 - cycle_plants
             next_rank = "PLANTER VII"
-        elif total_items < 4000:
-            items_needed = 4000 - total_items
+        elif cycle_plants < 4000:
+            items_needed = 4000 - cycle_plants
             next_rank = "PLANTER VIII"
-        elif total_items < 10000:
-            items_needed = 10000 - total_items
+        elif cycle_plants < 10000:
+            items_needed = 10000 - cycle_plants
             next_rank = "PLANTER IX"
-        elif total_items < 15000:
-            items_needed = 15000 - total_items
+        elif cycle_plants < 15000:
+            items_needed = 15000 - cycle_plants
             next_rank = "PLANTER X"
         else:
-            # Max rank achieved
+            # Max rank achieved this cycle
             items_needed = 0
             next_rank = "MAX RANK"
         
@@ -4618,7 +5402,8 @@ async def userstats(interaction: discord.Interaction):
         )
         
         embed.add_field(name="💰 Balance", value=f"**${user_balance:.2f}**", inline=True)
-        embed.add_field(name="🌱 Plants Gathered", value=f"**{total_items}** plants", inline=True)
+        embed.add_field(name="🌱 Plants Gathered (Total)", value=f"**{total_items}** plants", inline=True)
+        embed.add_field(name="🌿 Cycle Plants", value=f"**{cycle_plants}** plants", inline=True)
         
         # Add Bloom Rank and Tree Rings
         bloom_rank = get_bloom_rank(user_id)
@@ -5260,6 +6045,23 @@ class ImbueView(discord.ui.View):
 
         # Send public announcement
         await self._send_public_announcement(self.rolled_enchant)
+
+        # Check for hidden achievement: High Reroller (NETHERITE, LUMINITE, CELESTIAL, or SECRET)
+        high_rarities = {"NETHERITE", "LUMINITE", "CELESTIAL", "SECRET"}
+        if self.rolled_enchant.get("rarity") in high_rarities:
+            if unlock_hidden_achievement(self.user_id, "high_reroller"):
+                try:
+                    await interaction.followup.send(
+                        embed=discord.Embed(
+                            title="🏆 Hidden Achievement Unlocked!",
+                            description=f"**High Reroller**\nGet an imbue enchantment that is NETHERITE, LUMINITE, CELESTIAL, or SECRET",
+                            color=discord.Color.gold()
+                        ),
+                        ephemeral=True
+                    )
+                except Exception as e:
+                    print(f"Error sending High Reroller achievement notification: {e}")
+
         self.stop()
 
     @discord.ui.button(label="Keep Current Attunement", style=discord.ButtonStyle.secondary, emoji="\U0001f6e1\ufe0f")
@@ -5381,11 +6183,15 @@ class HireView(discord.ui.View):
     def __init__(self, user_id: int, timeout=300):
         super().__init__(timeout=timeout)
         self.user_id = user_id
-        self.current_page = 0  # 0-4 for gardeners 1-5
-        self.total_pages = 5
+        self.current_page = 0  # 0-5 for gardeners 1-5 + secret gardener page 6
+        self.total_pages = 6
     
     def create_embed(self, page: int) -> discord.Embed:
         """Create the embed for a specific gardener page."""
+        # Page 5 (index) = Secret Gardener page (page 6 of 6)
+        if page == 5:
+            return self._create_secret_gardener_embed()
+        
         slot_id = page + 1  # Convert 0-4 to 1-5
         gardeners = get_user_gardeners(self.user_id)
         balance = get_user_balance(self.user_id)
@@ -5456,11 +6262,50 @@ class HireView(discord.ui.View):
         
         return embed
     
+    def _create_secret_gardener_embed(self) -> discord.Embed:
+        """Create the Secret Gardener page embed (page 6 of 6)."""
+        sg_unlocked = has_secret_gardener(self.user_id)
+        sg_harvest = has_secret_gardener_harvest(self.user_id)
+        
+        embed = discord.Embed(
+            title="\U0001f331\u2728 Secret Gardener",
+            description="A mysterious gardener with incredible abilities!",
+            color=discord.Color.purple() if sg_unlocked else discord.Color.dark_grey()
+        )
+        
+        # Status field
+        if sg_unlocked:
+            embed.add_field(name="Status", value="**UNLOCKED** \u2705", inline=False)
+        else:
+            embed.add_field(name="Status", value="\U0001f512 Locked \u2014 Invite 10 people to unlock!", inline=False)
+        
+        # Gather Chance
+        embed.add_field(name="Gather Chance", value="**50%** chance to /gather every minute", inline=False)
+        
+        # Auto Harvest
+        if sg_harvest:
+            embed.add_field(name="Auto Harvest", value="**UNLOCKED** \u2705 \u2014 Can auto-harvest like other gardeners!", inline=False)
+        else:
+            embed.add_field(name="Auto Harvest", value="\U0001f512 Locked \u2014 Invite 12 people to unlock!", inline=False)
+        
+        embed.set_footer(text=f"Page 6 of {self.total_pages}")
+        return embed
+    
     def update_buttons(self):
         """Update button states based on current page and gardener status."""
         # Update navigation buttons
         self.previous_button.disabled = self.current_page == 0
         self.next_button.disabled = self.current_page >= self.total_pages - 1
+        
+        # Secret Gardener page (page 5 index = page 6 display)
+        if self.current_page == 5:
+            self.hire_button.disabled = True
+            self.hire_button.label = "Invite Reward Only"
+            self.hire_button.style = discord.ButtonStyle.secondary
+            self.buy_tool_button.disabled = True
+            self.buy_tool_button.label = "No Tool Needed"
+            self.buy_tool_button.style = discord.ButtonStyle.secondary
+            return
         
         # Update hire button
         slot_id = self.current_page + 1
@@ -5496,7 +6341,7 @@ class HireView(discord.ui.View):
         if gardener:
             if gardener.get("has_tool", False):
                 self.buy_tool_button.disabled = True
-                self.buy_tool_button.label = f"Tool: {tool_info['name']} ✓"
+                self.buy_tool_button.label = f"Tool: {tool_info['name']} \u2713"
                 self.buy_tool_button.style = discord.ButtonStyle.secondary
             else:
                 tool_cost = tool_info["cost"]
@@ -6284,18 +7129,19 @@ async def wipe(interaction: discord.Interaction, type: str):
 
 
 # Set command - Admin only, #hidden channel
-@bot.tree.command(name="set", description="[ADMIN] Set a user's money, plants, or crypto amount")
+@bot.tree.command(name="set", description="[ADMIN] Set a user's money, plants, crypto, or invites")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     user="The user to set the value for (defaults to yourself)",
     amount="The amount to set",
-    type="The type of value to set: money, plants, or crypto",
+    type="The type of value to set: money, plants, crypto, or invites",
     coin="The crypto coin type (RTC, TER, or CNY) - required if type is crypto"
 )
 @app_commands.choices(type=[
     app_commands.Choice(name="Money", value="money"),
     app_commands.Choice(name="Plants", value="plants"),
-    app_commands.Choice(name="Crypto", value="crypto")
+    app_commands.Choice(name="Crypto", value="crypto"),
+    app_commands.Choice(name="Invites", value="invites"),
 ])
 @app_commands.choices(coin=[
     app_commands.Choice(name="RTC", value="RTC"),
@@ -6315,13 +7161,13 @@ async def set_command(
         
         # Check if user has administrator permissions
         if not interaction.user.guild_permissions.administrator:
-            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            await safe_interaction_response(interaction, interaction.followup.send, "\u274c **Error**: You need administrator permissions to use this command.", ephemeral=True)
             return
         
         # Check if command is being used in the #hidden channel
         if not hasattr(interaction.channel, 'name') or interaction.channel.name != "hidden":
             await safe_interaction_response(interaction, interaction.followup.send,
-                f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
+                f"\u274c This command can only be used in the #hidden channel, {interaction.user.name}!",
                 ephemeral=True)
             return
         
@@ -6331,16 +7177,16 @@ async def set_command(
         
         # Validate and normalize type
         type_lower = type.lower()
-        if type_lower not in ["money", "plants", "crypto"]:
+        if type_lower not in ["money", "plants", "crypto", "invites"]:
             await safe_interaction_response(interaction, interaction.followup.send,
-                "❌ **Error**: Type must be one of: `money`, `plants`, or `crypto`.",
+                "\u274c **Error**: Type must be one of: `money`, `plants`, `crypto`, or `invites`.",
                 ephemeral=True)
             return
         
         # Validate amount
         if amount < 0:
             await safe_interaction_response(interaction, interaction.followup.send,
-                "❌ **Error**: Amount cannot be negative.",
+                "\u274c **Error**: Amount cannot be negative.",
                 ephemeral=True)
             return
         
@@ -6350,43 +7196,62 @@ async def set_command(
         if type_lower == "money":
             update_user_balance(user_id, amount)
             embed = discord.Embed(
-                title="✅ Money Set",
+                title="\u2705 Money Set",
                 description=f"{target_user.mention}'s balance has been set to **${amount:,.2f}**!",
                 color=discord.Color.green()
             )
             print(f"Admin {interaction.user.name} used /set to set {target_user.name}'s money to ${amount:,.2f}")
         
         elif type_lower == "plants":
-            # Set gather_stats.total_items and total_forage_count
+            # Set gather_stats.total_items, total_forage_count, and bloom_cycle_plants
             users.update_one(
                 {"_id": int(user_id)},
                 {
                     "$set": {
                         "gather_stats.total_items": int(amount),
-                        "total_forage_count": int(amount)
+                        "total_forage_count": int(amount),
+                        "bloom_cycle_plants": int(amount)
                     }
                 },
                 upsert=True
             )
             embed = discord.Embed(
-                title="✅ Plants Set",
-                description=f"{target_user.mention}'s plant count has been set to **{int(amount):,}**!",
+                title="\u2705 Plants Set",
+                description=f"{target_user.mention}'s plant count has been set to **{int(amount):,}**!\n*(Lifetime total and current bloom cycle both updated)*",
                 color=discord.Color.green()
             )
             print(f"Admin {interaction.user.name} used /set to set {target_user.name}'s plants to {int(amount):,}")
+        
+        elif type_lower == "invites":
+            # Set invite_stats.total_joins directly
+            users.update_one(
+                {"_id": int(user_id)},
+                {
+                    "$set": {
+                        "invite_stats.total_joins": int(amount)
+                    }
+                },
+                upsert=True
+            )
+            embed = discord.Embed(
+                title="\u2705 Invites Set",
+                description=f"{target_user.mention}'s invite count has been set to **{int(amount)}**!",
+                color=discord.Color.green()
+            )
+            print(f"Admin {interaction.user.name} used /set to set {target_user.name}'s invites to {int(amount)}")
         
         elif type_lower == "crypto":
             # Validate coin parameter
             if not coin:
                 await safe_interaction_response(interaction, interaction.followup.send,
-                    "❌ **Error**: `coin` parameter is required when type is `crypto`. Choose from: `RTC`, `TER`, or `CNY`.",
+                    "\u274c **Error**: `coin` parameter is required when type is `crypto`. Choose from: `RTC`, `TER`, or `CNY`.",
                     ephemeral=True)
                 return
             
             coin_upper = coin.upper()
             if coin_upper not in ["RTC", "TER", "CNY"]:
                 await safe_interaction_response(interaction, interaction.followup.send,
-                    "❌ **Error**: Coin must be one of: `RTC`, `TER`, or `CNY`.",
+                    "\u274c **Error**: Coin must be one of: `RTC`, `TER`, or `CNY`.",
                     ephemeral=True)
                 return
             
@@ -6401,7 +7266,7 @@ async def set_command(
                 upsert=True
             )
             embed = discord.Embed(
-                title="✅ Crypto Set",
+                title="\u2705 Crypto Set",
                 description=f"{target_user.mention}'s {coin_upper} holdings have been set to **{amount:,.2f}**!",
                 color=discord.Color.green()
             )
@@ -6410,7 +7275,122 @@ async def set_command(
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
     except Exception as e:
         print(f"Error in set command: {e}")
-        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+        await safe_interaction_response(interaction, interaction.followup.send, "\u274c An error occurred. Please try again.", ephemeral=True)
+
+
+# Adminpay command - Admin only, #hidden channel
+@bot.tree.command(name="adminpay", description="[ADMIN] Give a user money from the bot (giveaways, refunds, etc.)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    user="The user to pay",
+    amount="The amount to give"
+)
+async def adminpay(interaction: discord.Interaction, user: discord.Member, amount: float):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "\u274c You don't have permission to use this command.", ephemeral=True)
+            return
+        
+        if not hasattr(interaction.channel, 'name') or interaction.channel.name != "hidden":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"\u274c This command can only be used in the #hidden channel, {interaction.user.name}!",
+                ephemeral=True)
+            return
+        
+        if amount <= 0:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "\u274c Amount must be greater than zero.", ephemeral=True)
+            return
+        
+        # Add money to user's balance
+        current_balance = get_user_balance(user.id)
+        new_balance = normalize_money(current_balance + amount)
+        update_user_balance(user.id, new_balance)
+        
+        embed = discord.Embed(
+            title="\U0001f4b8 Admin Payment Sent!",
+            description=f"**${amount:,.2f}** has been given to {user.mention}!",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Previous Balance", value=f"${current_balance:,.2f}", inline=True)
+        embed.add_field(name="New Balance", value=f"${new_balance:,.2f}", inline=True)
+        embed.set_footer(text=f"Paid by {interaction.user.name}")
+        
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+        print(f"Admin {interaction.user.name} used /adminpay to give {user.name} ${amount:,.2f}")
+    except Exception as e:
+        print(f"Error in adminpay command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "\u274c An error occurred. Please try again.", ephemeral=True)
+
+
+# Market admin command
+@bot.tree.command(name="market", description="[ADMIN] Toggle market news on/off and reset stock prices")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(news="Turn market news on or off. Toggling also resets stock prices to real-life values.")
+@app_commands.choices(news=[
+    app_commands.Choice(name="On", value="on"),
+    app_commands.Choice(name="Off", value="off"),
+])
+async def market_admin(interaction: discord.Interaction, news: app_commands.Choice[str]):
+    try:
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ You don't have permission to use this command.", ephemeral=True)
+            return
+        
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        
+        guild_id = interaction.guild.id
+        enabled = news.value == "on"
+        market_news_enabled[guild_id] = enabled
+        
+        # Reset all stock prices to real-life API values (remove news multiplier)
+        reset_count = 0
+        if guild_id in stock_data:
+            for symbol, info in stock_data[guild_id].items():
+                # Reset news multiplier
+                info["news_multiplier"] = 1.0
+                
+                # Re-fetch real price from API
+                real_ticker = REAL_STOCK_MAPPING.get(symbol)
+                if real_ticker:
+                    real_data = await asyncio.to_thread(fetch_real_stock_data, real_ticker)
+                    if real_data:
+                        info["real_price"] = real_data["price"]
+                        info["price"] = real_data["price"]
+                        info["shares_outstanding"] = real_data["shares_outstanding"]
+                        info["market_cap"] = real_data.get("market_cap")
+                        info["price_history"] = [real_data["price"]] * 6
+                        info["last_api_fetch"] = time.time()
+                        reset_count += 1
+                    else:
+                        # If API fails, just reset multiplier (price = real_price * 1.0)
+                        real_price = info.get("real_price", info.get("price", 0))
+                        info["price"] = real_price
+                        info["price_history"] = [real_price] * 6
+                        reset_count += 1
+                else:
+                    real_price = info.get("real_price", info.get("price", 0))
+                    info["price"] = real_price
+                    info["price_history"] = [real_price] * 6
+                    reset_count += 1
+        
+        status_str = "**ON** \u2705" if enabled else "**OFF** \u274c"
+        embed = discord.Embed(
+            title="\U0001f4f0 Market News Updated",
+            description=f"Market news is now {status_str}",
+            color=discord.Color.green() if enabled else discord.Color.red()
+        )
+        embed.add_field(name="Prices Reset", value=f"**{reset_count}** stock(s) reset to real-life API values", inline=False)
+        
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+    except Exception as e:
+        print(f"Error in market admin command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "\u274c An error occurred. Please try again.", ephemeral=True)
 
 
 # Pay command
@@ -6867,6 +7847,9 @@ STOCK_TICKERS = [
 # Stock data storage: {guild_id: {ticker_symbol: {"price": float, "price_history": [float], "available_shares": int, "real_price": float, "shares_outstanding": int, "market_cap": float, "news_multiplier": float, "last_api_fetch": float}}}
 stock_data = {}
 
+# Market news toggle: {guild_id: bool} — True = enabled (default)
+market_news_enabled = {}
+
 def fetch_real_stock_data(real_ticker: str) -> dict:
     """Fetch real-world stock data from yfinance API.
     
@@ -7306,6 +8289,10 @@ NEGATIVE_NEWS = [
 async def send_market_news(guild: discord.Guild):
     """Send a random news alert to the #market-news channel and affect stock price."""
     try:
+        # Check if market news is enabled for this guild
+        if not market_news_enabled.get(guild.id, True):
+            return
+        
         # Find the market-news channel
         news_channel = discord.utils.get(guild.text_channels, name="market-news")
         
@@ -7818,6 +8805,84 @@ async def gardener_background_task():
         await asyncio.sleep(60)
 
 
+async def secret_gardener_background_task():
+    """Background task for the Secret Gardener to auto-gather every minute (50% chance)."""
+    await bot.wait_until_ready()
+    await asyncio.sleep(8)
+    
+    while not bot.is_closed():
+        try:
+            sg_user_ids = get_all_users_with_secret_gardener()
+            
+            for user_id in sg_user_ids:
+                # 50% chance to gather every minute
+                if random.random() < 0.50:
+                    try:
+                        sg_has_harvest = has_secret_gardener_harvest(user_id)
+                        
+                        # Determine if this is a harvest or gather
+                        # If user has auto-harvest (tier 12), use the same tool-upgrade logic
+                        if sg_has_harvest and random.random() < 0.25:
+                            harvest_result = await perform_harvest_for_user(user_id, allow_chain=False)
+                            total_value = harvest_result["total_value"]
+                            
+                            # Notify in #lawn
+                            for guild in bot.guilds:
+                                member = guild.get_member(user_id)
+                                if member:
+                                    lawn_channel = discord.utils.get(guild.text_channels, name="lawn")
+                                    if lawn_channel and lawn_channel.permissions_for(guild.me).send_messages:
+                                        try:
+                                            embed = discord.Embed(
+                                                title="\U0001f33f\u2728 SECRET GARDENER HARVEST! \u2728\U0001f33f",
+                                                description=f"{member.mention}, the Secret Gardener sparked!",
+                                                color=discord.Color.purple()
+                                            )
+                                            items_text = ""
+                                            for item in harvest_result["gathered_items"][:20]:
+                                                gmo_text = " GMO! \u2728" if item["is_gmo"] else ""
+                                                items_text += f"\u2022 **{item['name']}** \u2013 ${item['base_value']:,.2f} ({item['ripeness']}){gmo_text}\n"
+                                            embed.add_field(name="\U0001f4e6 Items Harvested", value=items_text or "No items", inline=False)
+                                            embed.add_field(name="\U0001f4b0 Total Value", value=f"**${total_value:,.2f}**", inline=True)
+                                            embed.add_field(name="\U0001f4b5 New Balance", value=f"**${harvest_result['current_balance']:,.2f}**", inline=True)
+                                            await lawn_channel.send(embed=embed)
+                                        except Exception as e:
+                                            print(f"Error sending secret gardener harvest notification: {e}")
+                                    break
+                        else:
+                            # Normal single gather
+                            gather_result = await perform_gather_for_user(user_id, apply_cooldown=False, apply_orchard_fertilizer=True)
+                            
+                            user_name = "User"
+                            for guild in bot.guilds:
+                                member = guild.get_member(user_id)
+                                if member:
+                                    user_name = member.display_name or member.name
+                                    lawn_channel = discord.utils.get(guild.text_channels, name="lawn")
+                                    if lawn_channel and lawn_channel.permissions_for(guild.me).send_messages:
+                                        try:
+                                            embed = discord.Embed(
+                                                title=f"\U0001f33f\u2728 {user_name}'s Secret Gardener gathered!",
+                                                description=f"The Secret Gardener found a **{gather_result['name']}**!",
+                                                color=discord.Color.purple()
+                                            )
+                                            embed.add_field(name="Value", value=f"**${gather_result['base_value']:,.2f}**", inline=True)
+                                            embed.add_field(name="Ripeness", value=gather_result['ripeness'], inline=True)
+                                            embed.add_field(name="GMO?", value="Yes \u2728" if gather_result['is_gmo'] else "No", inline=False)
+                                            await lawn_channel.send(embed=embed)
+                                        except Exception as e:
+                                            print(f"Error sending secret gardener notification: {e}")
+                                    break
+                    except Exception as e:
+                        print(f"Error processing secret gardener for user {user_id}: {e}")
+            
+            await asyncio.sleep(1)
+        except Exception as e:
+            print(f"Error in secret gardener background task: {e}")
+        
+        await asyncio.sleep(60)
+
+
 async def gpu_background_task():
     """Background task to check GPU mining actions every minute."""
     await bot.wait_until_ready()
@@ -7937,7 +9002,7 @@ async def send_event_start_embed(guild: discord.Guild, event: dict, duration_min
     
     event_name = event_info['name'].rstrip('!')
     embed = discord.Embed(
-        title=f"{event_info['emoji']} {event_name} Event Has Started!",
+        title=f"{event_info['emoji']} {event_name} Event Started!",
         description=event_info["description"],
         color=discord.Color.green()
     )
@@ -7947,8 +9012,8 @@ async def send_event_start_embed(guild: discord.Guild, event: dict, duration_min
         duration_display = f"{duration_seconds} Seconds"
     else:
         duration_display = f"{duration_minutes} Minutes"
-    embed.add_field(name="Duration", value=duration_display, inline=False)
     embed.add_field(name="Effect", value=event_info["effect"], inline=False)
+    embed.add_field(name="Duration", value=duration_display, inline=False)
     embed.set_footer(text="Go /gather!!")
     
     try:
@@ -8007,8 +9072,8 @@ async def send_event_end_embed(guild: discord.Guild, event: dict):
     
     event_name = event_info['name'].rstrip('!')
     embed = discord.Embed(
-        title=f"{event_info['emoji']} {event_name} Event Has Ended",
-        description="Event has ended! Forest conditions go back to normal.\n\nThe event is over. Stay tuned for any future events..",
+        title=f"{event_info['emoji']} {event_name} Event Ended",
+        description="Conditions are back to normal. Stay tuned for any future events...",
         color=discord.Color.red()
     )
     
@@ -8590,8 +9655,13 @@ async def mine(interaction: discord.Interaction):
         last_mine_time = get_user_last_mine_time(user_id)
         current_time = time.time()
         
+        # Apply invite reward cooldown reduction (tier 15: -20 minutes = -1200 seconds)
+        mine_cooldown = MINE_COOLDOWN
+        invite_reductions = get_invite_cooldown_reductions(user_id)
+        mine_cooldown = max(0, mine_cooldown - invite_reductions.get("mine_reduction", 0))
+        
         if last_mine_time > 0:
-            cooldown_end = last_mine_time + MINE_COOLDOWN
+            cooldown_end = last_mine_time + mine_cooldown
             if current_time < cooldown_end:
                 time_left = int(cooldown_end - current_time)
                 minutes_left = time_left // 60
