@@ -354,6 +354,32 @@ async def send_hidden_achievement_notification_async(channel, user_mention: str,
         print(f"Error sending hidden achievement notification: {e}")
 
 
+async def send_hidden_achievement_notification_dm(user_id: int, achievement_key: str):
+    """Send a hidden achievement notification via DM when it can't be sent as ephemeral."""
+    if achievement_key not in HIDDEN_ACHIEVEMENTS:
+        return
+    
+    achievement_data = HIDDEN_ACHIEVEMENTS[achievement_key]
+    achievement_name = achievement_data["name"]
+    achievement_description = achievement_data["description"]
+    boost_percent = achievement_data["boost"] * 100
+    
+    embed = discord.Embed(
+        title="\U0001f3c6 Hidden Achievement Unlocked!",
+        description=f"**{achievement_name}**\n{achievement_description}",
+        color=discord.Color.gold()
+    )
+    if boost_percent > 0:
+        embed.add_field(name="\U0001f4b0 Boost", value=f"**+{boost_percent:.1f}%**", inline=False)
+    
+    try:
+        user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+        if user:
+            await user.send(embed=embed)
+    except Exception as e:
+        print(f"Error sending hidden achievement DM to user {user_id}: {e}")
+
+
 async def send_achievement_notification_dm(user_id: int, achievement_name: str, level: int):
     """Send an achievement notification via DM when no interaction is available (e.g. Russian Roulette)."""
     if achievement_name not in ACHIEVEMENTS:
@@ -603,7 +629,7 @@ RARITY_EMOJI = {
     "NETHERITE":   "<:IMBUE_N:1472431697642520576>",
     "LUMINITE":    "<:IMBUE_LUM:1472431119466107000>",
     "CELESTIAL":   "<:IMBUE_CE:1472431208859439295>",
-    "SECRET":      "<:IMBUE_SEC:1472432257544491009>",
+    "SECRET":      "<:IMBUE_SEC:1473395529554591848>"
 }
 
 def _to_roman(num):
@@ -2515,6 +2541,8 @@ GATHERABLE_ITEMS = [
     {"category": "Flower", "name": "Sakura 🌸", "base_value": 6},
     {"category": "Flower", "name": "Clover 🍀", "base_value": 7.77},
     {"category": "Flower", "name": "Herb 🌿", "base_value": 5},
+    {"category": "Flower", "name": "Hyacinth 🪻", "base_value": 3},
+    {"category": "Flower", "name": "Wilted Rose 🥀", "base_value": 0.5},
 
 
     {"category": "Fruit","name": "Strawberry 🍓", "base_value": 8},
@@ -2536,6 +2564,9 @@ GATHERABLE_ITEMS = [
     {"category": "Fruit","name": "Melon 🍈", "base_value": 7},
     {"category": "Fruit","name": "Green Apple 🍏", "base_value": 8},
     {"category": "Fruit","name": "Olive 🫒", "base_value": 6},
+    {"category": "Fruit","name": "Rice Plant 🌾", "base_value": 0.7},
+    {"category": "Fruit","name": "Lime 🍋", "base_value": 5.5},
+    {"category": "Fruit","name": "Chestnut 🌰", "base_value": 0.35},
 
     {"category": "Vegetable","name": "Carrot 🥕", "base_value": 2},
     {"category": "Vegetable","name": "Potato 🥔", "base_value": 1},
@@ -2555,6 +2586,7 @@ GATHERABLE_ITEMS = [
     {"category": "Vegetable","name": "Beans 🫘", "base_value": 3},
     {"category": "Vegetable","name": "Pea Pod 🫛", "base_value": 2},
     {"category": "Vegetable","name": "Eggplant 🍆", "base_value": 6},
+    {"category": "Vegetable","name": "Sweet Potato 🍠", "base_value": 13.13},
 ]   
 
 # Item descriptions for almanac
@@ -2570,6 +2602,8 @@ ITEM_DESCRIPTIONS = {
     "Sakura 🌸": "I really want to go to Japan one day...",
     "Clover 🍀": "Lucky four-leaf clover brings good fortune!",
     "Herb 🌿": "Fresh and aromatic, perfect for cooking!",
+    "Hyacinth 🪻": "Fragrant spring bloom with clustered bell-shaped flowers!",
+    "Wilted Rose 🥀": "What's a gather?",
     "Strawberry 🍓": "Sweet and juicy, nature's candy!",
     "Blueberry 🫐": "Tiny but packed with flavor!",
     "Raspberry": "Tart and tangy, perfect for desserts!",
@@ -2577,7 +2611,7 @@ ITEM_DESCRIPTIONS = {
     "Apple 🍎": "One a day keeps the doctor away!",
     "Pear 🍐": "Sweet and crisp!",
     "Orange 🍊": "Yeah, we're from Florida. Hey Apple!",
-    "Grape 🍇": "Not statuatory!",
+    "Grape 🍇": "Gabo!",
     "Banana 🍌": "Ape-approved and potassium-packed!",
     "Watermelon 🍉": "Perfect for hot summer days!",
     "Peach 🍑": "Soft, fuzzy, and oh so sweet!",
@@ -2589,6 +2623,9 @@ ITEM_DESCRIPTIONS = {
     "Melon 🍈": "Sweet and refreshing, a summer favorite!",
     "Green Apple 🍏": "Crisp and tart, the other apple!",
     "Olive 🫒": "Mediterranean delight, small but mighty!",
+    "Rice Plant 🌾": "The staple grain that feeds the world!",
+    "Lime 🍋": "Tart citrus burst, perfect for cocktails and pies!",
+    "Chestnut 🌰": "Roast 'em on an open fire, or eat 'em any way!",
     "Carrot 🥕": "Good for your eyes!",
     "Potato 🥔": "An Irish delight!",
     "Onion 🧅": "Makes you cry...!",
@@ -2607,6 +2644,7 @@ ITEM_DESCRIPTIONS = {
     "Beans 🫘": "Protein-packed pods of goodness!",
     "Pea Pod 🫛": "Sweet little green pearls in a pod!",
     "Eggplant 🍆": "Purple and versatile, a kitchen staple!",
+    "Sweet Potato 🍠": "Naturally sweet and nutritious root vegetable!",
 }
 
 #level of ripeness - FRUITS
@@ -2619,6 +2657,7 @@ LEVEL_OF_RIPENESS_FRUITS = [
     {"name": "Overripe", "multiplier": 1.6, "chance": 10},  
     {"name": "Spoiled", "multiplier": 0.9, "chance": 4.99999},
     {"name": "One in a Million", "multiplier": 50, "chance": 1},
+    {"name": "Mikellion", "multiplier": 200, "chance": 0.000111},
 ]
 
 #level of ripeness - VEGETABLES
@@ -2630,6 +2669,7 @@ LEVEL_OF_RIPENESS_VEGETABLES = [
     {"name": "Overripe", "multiplier": 1.6, "chance": 10},
     {"name": "Spoiled", "multiplier": 0.9, "chance": 4.99999},
     {"name": "One in a Million", "multiplier": 50, "chance": 1},
+    {"name": "Mikellion", "multiplier": 200, "chance": 0.000101},
 ]
 
 #level of ripeness - FLOWERS
@@ -2639,6 +2679,7 @@ LEVEL_OF_RIPENESS_FLOWERS = [
     {"name": "Full Bloom", "multiplier": 1.5, "chance": 20},
     {"name": "Wilted", "multiplier": 0.6, "chance": 4.99999},
     {"name": "One in a Million", "multiplier": 50, "chance": 1},
+    {"name": "Mikellion", "multiplier": 200, "chance": 0.000101},
 ]
 
 MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
@@ -6009,12 +6050,10 @@ class HarvestUpgradeView(discord.ui.View):
             achievement_unlocked = check_maxed_out_achievement(self.user_id)
             
             # Send quick confirmation and update the main embed
+            await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
+            
             if achievement_unlocked:
-                await safe_interaction_response(interaction, interaction.response.send_message, 
-                    f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.\n\n"
-                    f"🎉 **Hidden Achievement Unlocked: Maxed Out!** 🎉", ephemeral=True)
-            else:
-                await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
+                await send_hidden_achievement_notification(interaction, "maxed_out")
             
             embed = self.create_embed()
             try:
@@ -6531,12 +6570,10 @@ class HireView(discord.ui.View):
             achievement_unlocked = check_maxed_out_achievement(self.user_id)
             
             # Send confirmation and update embed
+            await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Hired **Gardener #{slot_id}** for ${price:,.2f}! They'll start gathering for you automatically.", ephemeral=True)
+            
             if achievement_unlocked:
-                await safe_interaction_response(interaction, interaction.response.send_message, 
-                    f"✅ Hired **Gardener #{slot_id}** for ${price:,.2f}! They'll start gathering for you automatically.\n\n"
-                    f"🎉 **Hidden Achievement Unlocked: Maxed Out!** 🎉", ephemeral=True)
-            else:
-                await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Hired **Gardener #{slot_id}** for ${price:,.2f}! They'll start gathering for you automatically.", ephemeral=True)
+                await send_hidden_achievement_notification(interaction, "maxed_out")
             
             embed = self.create_embed(self.current_page)
             self.update_buttons()
@@ -6586,13 +6623,11 @@ class HireView(discord.ui.View):
             achievement_unlocked = check_maxed_out_achievement(self.user_id)
             
             chance_pct = tool_info["chance"] * 100
+            await safe_interaction_response(interaction, interaction.response.send_message,
+                f"✅ **{tool_info['name']}** purchased for ${tool_cost:,.2f}! This gardener's auto gather now has a **{chance_pct}%** chance to upgrade to a full harvest!", ephemeral=True)
+            
             if achievement_unlocked:
-                await safe_interaction_response(interaction, interaction.response.send_message,
-                    f"✅ **{tool_info['name']}** purchased for ${tool_cost:,.2f}! This gardener's auto gather now has a **{chance_pct}%** chance to upgrade to a full harvest!\n\n"
-                    f"🎉 **Hidden Achievement Unlocked: Maxed Out!** 🎉", ephemeral=True)
-            else:
-                await safe_interaction_response(interaction, interaction.response.send_message,
-                    f"✅ **{tool_info['name']}** purchased for ${tool_cost:,.2f}! This gardener's auto gather now has a **{chance_pct}%** chance to upgrade to a full harvest!", ephemeral=True)
+                await send_hidden_achievement_notification(interaction, "maxed_out")
             
             embed = self.create_embed(self.current_page)
             self.update_buttons()
@@ -6773,12 +6808,10 @@ class GpuView(discord.ui.View):
             achievement_unlocked = check_maxed_out_achievement(self.user_id)
             
             # Send confirmation and update embed
+            await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Purchased **{gpu_name}** for ${price:,.2f}! It will boost your mining!", ephemeral=True)
+            
             if achievement_unlocked:
-                await safe_interaction_response(interaction, interaction.response.send_message, 
-                    f"✅ Purchased **{gpu_name}** for ${price:,.2f}! It will boost your mining!\n\n"
-                    f"🎉 **Hidden Achievement Unlocked: Maxed Out!** 🎉", ephemeral=True)
-            else:
-                await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Purchased **{gpu_name}** for ${price:,.2f}! It will boost your mining!", ephemeral=True)
+                await send_hidden_achievement_notification(interaction, "maxed_out")
             
             embed = self.create_embed(self.current_page)
             self.update_buttons()
@@ -7722,15 +7755,11 @@ async def pay(interaction: discord.Interaction, amount: float, user: discord.Mem
             await send_hidden_achievement_notification(interaction, "john_rockefeller")
         
         # Beneficiary: Receive over $1,000,000 from someone
-        # Send as channel message mentioning the recipient (visible to everyone, but clearly for them)
-        # Note: Cannot send ephemeral message to recipient since they didn't initiate the interaction
+        # DM the recipient since we can't send ephemeral to someone who didn't initiate the interaction
         if amount >= 1000000.0:
             newly_unlocked = unlock_hidden_achievement(recipient_id, "beneficiary")
             if newly_unlocked:
-                # Send as regular channel message with recipient mention
-                channel = getattr(interaction, 'channel', None)
-                if channel:
-                    await send_hidden_achievement_notification_async(channel, user.mention, "beneficiary")
+                await send_hidden_achievement_notification_dm(recipient_id, "beneficiary")
     except Exception as e:
         print(f"Error in pay command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
@@ -10429,15 +10458,6 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
                 await safe_interaction_response(interaction, interaction.followup.send,
                     f"❌ You don't have enough balance to buy {amount} share(s) of {ticker_info['name']} ({ticker})!\n\n"
                     f"You need **${total_cost:.2f}** but only have **${user_balance:.2f}**.",
-                    ephemeral=True)
-                return
-            
-            # Check if user would exceed max shares (per user limit)
-            max_shares = ticker_info["max_shares"]
-            if (current_shares + amount) > max_shares:
-                await safe_interaction_response(interaction, interaction.followup.send,
-                    f"❌ You cannot buy {amount:,} share(s)! Maximum shares per user for {ticker_info['name']} is {max_shares:,}.\n\n"
-                    f"You currently own {current_shares:,} share(s).",
                     ephemeral=True)
                 return
             

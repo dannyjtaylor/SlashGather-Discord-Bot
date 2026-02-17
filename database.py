@@ -216,10 +216,7 @@ def perform_gather_update(user_id: int, balance_increment: float, item_name: str
     new_total = current_total + 1
     should_award_tree_ring = (new_total % 200 == 0) and new_total > 0
     
-    # Sync bloom_cycle_plants with total_items when out of sync (e.g. users affected by reset bug).
-    # Plants Gathered (This Bloom) = max(current + 1, new_total) so it matches total after gather.
-    # On next bloom, bloom_cycle_plants is reset to 0 while total_items stays.
-    new_bloom_cycle = max(current_bloom_cycle + 1, new_total)
+    new_bloom_cycle = current_bloom_cycle + 1
     
     # Build the update operation with all increments and sets
     update_ops = {
@@ -233,7 +230,7 @@ def perform_gather_update(user_id: int, balance_increment: float, item_name: str
             "total_forage_count": 1,  # Keep in sync with gather_stats.total_items for backwards compatibility
         },
         "$set": {
-            "bloom_cycle_plants": new_bloom_cycle,  # Synced with total; resets on bloom
+            "bloom_cycle_plants": new_bloom_cycle,
         }
     }
     
@@ -305,22 +302,13 @@ def increment_forage_count(user_id: int) -> None:
 
 def increment_total_items_only(user_id: int) -> None:
     """Increment only gather_stats.total_items (for harvests to update userstats, but not gatherer achievements).
-    Syncs bloom_cycle_plants with total_items when out of sync (same logic as perform_gather_update)."""
+    Also increments bloom_cycle_plants to track plants gathered this bloom cycle."""
     users = _get_users_collection()
     _ensure_user_document(user_id)
-    doc = users.find_one(
-        {"_id": int(user_id)},
-        {"gather_stats.total_items": 1, "bloom_cycle_plants": 1}
-    )
-    current_total = int(doc.get("gather_stats", {}).get("total_items", 0)) if doc else 0
-    current_bloom_cycle = int(doc.get("bloom_cycle_plants", 0)) if doc else 0
-    new_total = current_total + 1
-    new_bloom_cycle = max(current_bloom_cycle + 1, new_total)
     users.update_one(
         {"_id": int(user_id)},
         {
-            "$inc": {"gather_stats.total_items": 1, "total_forage_count": 1},
-            "$set": {"bloom_cycle_plants": new_bloom_cycle},
+            "$inc": {"gather_stats.total_items": 1, "total_forage_count": 1, "bloom_cycle_plants": 1},
         },
         upsert=True,
     )
@@ -1042,7 +1030,8 @@ def perform_bloom(user_id: int) -> None:
                     "marsh": False,
                     "bog": False,
                     "mire": False
-                }
+                },
+                "last_roulette_elimination_time": 0.0
                 # All achievements persist through bloom (gatherer, planter, harvesting, coinflip, water_streak, hidden)
             },
             "$inc": {
@@ -2125,7 +2114,7 @@ def perform_harvest_batch_update(
         if pre_total_items < milestone <= new_total:
             tree_rings_to_award += 1
 
-    new_bloom_cycle = max(pre_bloom_cycle + num_items, new_total)
+    new_bloom_cycle = pre_bloom_cycle + num_items
 
     inc_ops: Dict[str, float | int] = {
         "balance": float(balance_increment),
