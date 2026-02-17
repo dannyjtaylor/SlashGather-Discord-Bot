@@ -181,10 +181,12 @@ def increment_gather_stats(userid: int, category: str, item: str) -> None:
 
 
 def perform_gather_update(user_id: int, balance_increment: float, item_name: str, 
-                          ripeness_name: str, category: str, apply_cooldown: bool = True) -> bool:
+                          ripeness_name: str, category: str, apply_cooldown: bool = True,
+                          increment_command_count: bool = False) -> bool:
     """
     Perform all gather-related database updates in a single MongoDB operation.
-    This batches: balance update, item addition, ripeness stat, gather stats, and cooldown.
+    This batches: balance update, item addition, ripeness stat, gather stats, cooldown,
+    and optionally the gather command count.
     
     Args:
         user_id: User ID
@@ -193,19 +195,31 @@ def perform_gather_update(user_id: int, balance_increment: float, item_name: str
         ripeness_name: Name of the ripeness level
         category: Item category (Fruit, Vegetable, Flower, etc.)
         apply_cooldown: If True, update last_gather_time to current time
+        increment_command_count: If True, also increment gather_command_count
     """
     users = _get_users_collection()
     _ensure_user_document(user_id)
     
-    # Get current total_items to check for Tree Ring milestone
-    doc = users.find_one({"_id": int(user_id)}, {"gather_stats.total_items": 1})
+    # Get current total_items and bloom_cycle_plants for Tree Ring and sync logic
+    doc = users.find_one(
+        {"_id": int(user_id)},
+        {"gather_stats.total_items": 1, "bloom_cycle_plants": 1}
+    )
     current_total = 0
-    if doc and "gather_stats" in doc:
-        current_total = int(doc.get("gather_stats", {}).get("total_items", 0))
+    current_bloom_cycle = 0
+    if doc:
+        if doc.get("gather_stats"):
+            current_total = int(doc.get("gather_stats", {}).get("total_items", 0))
+        current_bloom_cycle = int(doc.get("bloom_cycle_plants", 0))
     
     # Check if this gather will cross a 200-plant milestone
     new_total = current_total + 1
     should_award_tree_ring = (new_total % 200 == 0) and new_total > 0
+    
+    # Sync bloom_cycle_plants with total_items when out of sync (e.g. users affected by reset bug).
+    # Plants Gathered (This Bloom) = max(current + 1, new_total) so it matches total after gather.
+    # On next bloom, bloom_cycle_plants is reset to 0 while total_items stays.
+    new_bloom_cycle = max(current_bloom_cycle + 1, new_total)
     
     # Build the update operation with all increments and sets
     update_ops = {
@@ -217,13 +231,19 @@ def perform_gather_update(user_id: int, balance_increment: float, item_name: str
             f"gather_stats.categories.{category}": 1,
             f"gather_stats.items.{item_name}": 1,
             "total_forage_count": 1,  # Keep in sync with gather_stats.total_items for backwards compatibility
-            "bloom_cycle_plants": 1,  # Track plants in current bloom cycle (resets on bloom)
+        },
+        "$set": {
+            "bloom_cycle_plants": new_bloom_cycle,  # Synced with total; resets on bloom
         }
     }
     
     # Award Tree Ring if milestone reached
     if should_award_tree_ring:
         update_ops["$inc"]["tree_rings"] = 1
+    
+    # Optionally include gather command count in the same write
+    if increment_command_count:
+        update_ops["$inc"]["gather_command_count"] = 1
     
     # Add cooldown update if requested
     if apply_cooldown:
@@ -284,12 +304,24 @@ def increment_forage_count(user_id: int) -> None:
 
 
 def increment_total_items_only(user_id: int) -> None:
-    """Increment only gather_stats.total_items (for harvests to update userstats, but not gatherer achievements)."""
+    """Increment only gather_stats.total_items (for harvests to update userstats, but not gatherer achievements).
+    Syncs bloom_cycle_plants with total_items when out of sync (same logic as perform_gather_update)."""
     users = _get_users_collection()
     _ensure_user_document(user_id)
+    doc = users.find_one(
+        {"_id": int(user_id)},
+        {"gather_stats.total_items": 1, "bloom_cycle_plants": 1}
+    )
+    current_total = int(doc.get("gather_stats", {}).get("total_items", 0)) if doc else 0
+    current_bloom_cycle = int(doc.get("bloom_cycle_plants", 0)) if doc else 0
+    new_total = current_total + 1
+    new_bloom_cycle = max(current_bloom_cycle + 1, new_total)
     users.update_one(
         {"_id": int(user_id)},
-        {"$inc": {"gather_stats.total_items": 1, "total_forage_count": 1, "bloom_cycle_plants": 1}},
+        {
+            "$inc": {"gather_stats.total_items": 1, "total_forage_count": 1},
+            "$set": {"bloom_cycle_plants": new_bloom_cycle},
+        },
         upsert=True,
     )
 
@@ -1843,3 +1875,285 @@ def reset_user_areas(user_id: int) -> None:
         }}},
         upsert=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Atomic balance operations (for /imbue safety)
+# ---------------------------------------------------------------------------
+
+def atomic_deduct_balance(user_id: int, cost: float) -> tuple:
+    """Atomically deduct *cost* from the user's balance **only** if they can
+    afford it.  Uses ``findOneAndUpdate`` so the check-and-deduct is a single
+    database round-trip – no race window between reading and writing.
+
+    Returns ``(success, new_balance)``.  On failure *new_balance* is the
+    current (unchanged) balance.
+    """
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+
+    normalized_cost = round(float(cost), 2)
+    result = users.find_one_and_update(
+        {"_id": int(user_id), "balance": {"$gte": normalized_cost - 0.001}},
+        {"$inc": {"balance": -normalized_cost}},
+        return_document=True,
+        projection={"balance": 1},
+    )
+    if result is None:
+        # Could not afford – return current balance unchanged
+        doc = users.find_one({"_id": int(user_id)}, {"balance": 1})
+        bal = float(doc.get("balance", 0)) if doc else 0.0
+        return False, round(bal, 2)
+    return True, round(float(result.get("balance", 0)), 2)
+
+
+def refund_balance(user_id: int, amount: float) -> None:
+    """Add *amount* back to the user's balance (used when an operation that
+    already deducted money fails afterwards)."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$inc": {"balance": round(float(amount), 2)}},
+        upsert=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Full-data single-query fetchers (gather / harvest optimisation)
+# ---------------------------------------------------------------------------
+
+def get_user_gather_full_data(user_id: int) -> Dict:
+    """Fetch **all** fields required for a complete ``/gather`` operation in
+    one database round-trip.  This replaces 10+ individual queries."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+
+    doc = users.find_one(
+        {"_id": int(user_id)},
+        {
+            "balance": 1,
+            "basket_upgrades": 1,
+            "last_gather_time": 1,
+            "last_roulette_elimination_time": 1,
+            "hoe_enchantment": 1,
+            "tree_rings": 1,
+            "water_count": 1,
+            "bloom_count": 1,
+            "bloom_cycle_plants": 1,
+            "achievements": 1,
+            "consecutive_water_days": 1,
+            "invite_stats.claimed_rewards": 1,
+            "gather_stats.total_items": 1,
+            "total_forage_count": 1,
+            "harvest_upgrades": 1,
+            "unlocked_areas": 1,
+            "gather_command_count": 1,
+        },
+    )
+
+    if not doc:
+        return {
+            "balance": _get_default_balance(),
+            "basket_upgrades": {"basket": 0, "shoes": 0, "gloves": 0, "soil": 0},
+            "last_gather_time": 0.0,
+            "last_roulette_elimination_time": 0.0,
+            "hoe_enchantment": None,
+            "tree_rings": 0,
+            "water_count": 0,
+            "bloom_count": 0,
+            "bloom_cycle_plants": 0,
+            "achievements": {},
+            "consecutive_water_days": 0,
+            "invite_claimed_rewards": [],
+            "gather_stats_total_items": 0,
+            "total_forage_count": 0,
+            "harvest_upgrades": {"car": 0, "chain": 0, "fertilizer": 0, "cooldown": 0},
+            "unlocked_areas": {},
+            "gather_command_count": 0,
+        }
+
+    upgrades = doc.get("basket_upgrades", {})
+    h_upgrades = doc.get("harvest_upgrades", {})
+    achievements = doc.get("achievements", {})
+    invite_stats = doc.get("invite_stats", {})
+
+    return {
+        "balance": float(doc.get("balance", _get_default_balance())),
+        "basket_upgrades": {
+            "basket": upgrades.get("basket", 0),
+            "shoes": upgrades.get("shoes", 0),
+            "gloves": upgrades.get("gloves", 0),
+            "soil": upgrades.get("soil", 0),
+        },
+        "last_gather_time": float(doc.get("last_gather_time", 0.0)),
+        "last_roulette_elimination_time": float(doc.get("last_roulette_elimination_time", 0.0)),
+        "hoe_enchantment": doc.get("hoe_enchantment", None),
+        "tree_rings": int(doc.get("tree_rings", 0)),
+        "water_count": int(doc.get("water_count", 0)),
+        "bloom_count": int(doc.get("bloom_count", 0)),
+        "bloom_cycle_plants": int(doc.get("bloom_cycle_plants", 0)),
+        "achievements": achievements,
+        "consecutive_water_days": int(doc.get("consecutive_water_days", 0)),
+        "invite_claimed_rewards": list(invite_stats.get("claimed_rewards", [])),
+        "gather_stats_total_items": int(doc.get("gather_stats", {}).get("total_items", 0)),
+        "total_forage_count": int(doc.get("total_forage_count", 0)),
+        "harvest_upgrades": {
+            "car": h_upgrades.get("car", 0),
+            "chain": h_upgrades.get("chain", 0),
+            "fertilizer": h_upgrades.get("fertilizer", 0),
+            "cooldown": h_upgrades.get("cooldown", 0),
+        },
+        "unlocked_areas": dict(doc.get("unlocked_areas", {})),
+        "gather_command_count": int(doc.get("gather_command_count", 0)),
+    }
+
+
+def get_user_harvest_full_data(user_id: int) -> Dict:
+    """Fetch **all** fields required for a complete ``/harvest`` operation in
+    one database round-trip.  This replaces 15+ individual queries."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+
+    doc = users.find_one(
+        {"_id": int(user_id)},
+        {
+            "balance": 1,
+            "basket_upgrades": 1,
+            "harvest_upgrades": 1,
+            "last_harvest_time": 1,
+            "last_roulette_elimination_time": 1,
+            "tractor_enchantment": 1,
+            "tree_rings": 1,
+            "water_count": 1,
+            "bloom_count": 1,
+            "bloom_cycle_plants": 1,
+            "achievements": 1,
+            "consecutive_water_days": 1,
+            "invite_stats.claimed_rewards": 1,
+            "gather_stats.total_items": 1,
+            "total_forage_count": 1,
+            "unlocked_areas": 1,
+            "harvest_command_count": 1,
+        },
+    )
+
+    if not doc:
+        return {
+            "balance": _get_default_balance(),
+            "basket_upgrades": {"basket": 0, "shoes": 0, "gloves": 0, "soil": 0},
+            "harvest_upgrades": {"car": 0, "chain": 0, "fertilizer": 0, "cooldown": 0},
+            "last_harvest_time": 0.0,
+            "last_roulette_elimination_time": 0.0,
+            "tractor_enchantment": None,
+            "tree_rings": 0,
+            "water_count": 0,
+            "bloom_count": 0,
+            "bloom_cycle_plants": 0,
+            "achievements": {},
+            "consecutive_water_days": 0,
+            "invite_claimed_rewards": [],
+            "gather_stats_total_items": 0,
+            "total_forage_count": 0,
+            "unlocked_areas": {},
+            "harvest_command_count": 0,
+        }
+
+    basket_ups = doc.get("basket_upgrades", {})
+    harvest_ups = doc.get("harvest_upgrades", {})
+    achievements = doc.get("achievements", {})
+    invite_stats = doc.get("invite_stats", {})
+
+    return {
+        "balance": float(doc.get("balance", _get_default_balance())),
+        "basket_upgrades": {
+            "basket": basket_ups.get("basket", 0),
+            "shoes": basket_ups.get("shoes", 0),
+            "gloves": basket_ups.get("gloves", 0),
+            "soil": basket_ups.get("soil", 0),
+        },
+        "harvest_upgrades": {
+            "car": harvest_ups.get("car", 0),
+            "chain": harvest_ups.get("chain", 0),
+            "fertilizer": harvest_ups.get("fertilizer", 0),
+            "cooldown": harvest_ups.get("cooldown", 0),
+        },
+        "last_harvest_time": float(doc.get("last_harvest_time", 0.0)),
+        "last_roulette_elimination_time": float(doc.get("last_roulette_elimination_time", 0.0)),
+        "tractor_enchantment": doc.get("tractor_enchantment", None),
+        "tree_rings": int(doc.get("tree_rings", 0)),
+        "water_count": int(doc.get("water_count", 0)),
+        "bloom_count": int(doc.get("bloom_count", 0)),
+        "bloom_cycle_plants": int(doc.get("bloom_cycle_plants", 0)),
+        "achievements": achievements,
+        "consecutive_water_days": int(doc.get("consecutive_water_days", 0)),
+        "invite_claimed_rewards": list(invite_stats.get("claimed_rewards", [])),
+        "gather_stats_total_items": int(doc.get("gather_stats", {}).get("total_items", 0)),
+        "total_forage_count": int(doc.get("total_forage_count", 0)),
+        "unlocked_areas": dict(doc.get("unlocked_areas", {})),
+        "harvest_command_count": int(doc.get("harvest_command_count", 0)),
+    }
+
+
+def perform_harvest_batch_update(
+    user_id: int,
+    items_inc: Dict[str, int],
+    ripeness_inc: Dict[str, int],
+    balance_increment: float,
+    num_items: int,
+    pre_total_items: int,
+    pre_bloom_cycle: int,
+    set_cooldown: bool = False,
+    increment_command_count: bool = False,
+) -> int:
+    """Perform **all** harvest-related writes in a single MongoDB operation.
+
+    Replaces N×3 individual writes (``add_user_item``, ``add_ripeness_stat``,
+    ``increment_total_items_only`` per item) with **one** ``update_one``.
+
+    When *set_cooldown* is True the harvest cooldown is set in the same write.
+    When *increment_command_count* is True the harvest_command_count is
+    incremented in the same write.
+
+    Returns the number of Tree Rings awarded by this harvest.
+    """
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+
+    new_total = pre_total_items + num_items
+    tree_rings_to_award = 0
+    for milestone in range(200, new_total + 1, 200):
+        if pre_total_items < milestone <= new_total:
+            tree_rings_to_award += 1
+
+    new_bloom_cycle = max(pre_bloom_cycle + num_items, new_total)
+
+    inc_ops: Dict[str, float | int] = {
+        "balance": float(balance_increment),
+        "gather_stats.total_items": num_items,
+        "total_forage_count": num_items,
+    }
+    if tree_rings_to_award > 0:
+        inc_ops["tree_rings"] = tree_rings_to_award
+    if increment_command_count:
+        inc_ops["harvest_command_count"] = 1
+
+    for item_name, count in items_inc.items():
+        inc_ops[f"items.{item_name}"] = count
+
+    for ripeness_name, count in ripeness_inc.items():
+        inc_ops[f"ripeness_stats.{ripeness_name}"] = count
+
+    set_ops: Dict[str, object] = {"bloom_cycle_plants": new_bloom_cycle}
+    if set_cooldown:
+        set_ops["last_harvest_time"] = float(time.time())
+
+    users.update_one(
+        {"_id": int(user_id)},
+        {
+            "$inc": inc_ops,
+            "$set": set_ops,
+        },
+        upsert=True,
+    )
+
+    return tree_rings_to_award

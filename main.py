@@ -162,6 +162,11 @@ from database import (
     get_user_unlocked_areas,
     unlock_user_area,
     reset_user_areas,
+    atomic_deduct_balance,
+    refund_balance,
+    get_user_gather_full_data,
+    get_user_harvest_full_data,
+    perform_harvest_batch_update,
 )
 
 try:
@@ -203,6 +208,9 @@ bot = commands.Bot(command_prefix='/', intents=intents)
 
 # Global invite cache for tracking who invited whom
 _invite_cache = {}
+
+# Per-user locks to prevent concurrent /imbue operations for the same user
+_imbue_locks: dict[int, asyncio.Lock] = {}
 
 # Helper function to safely handle interaction responses and prevent "interaction failed" messages
 async def safe_interaction_response(interaction: discord.Interaction, 
@@ -890,21 +898,36 @@ def check_roulette_elimination_cooldown(user_id):
             return True, time_left
     return False, 0
 
-def can_harvest(user_id):
-    last_harvest_time = get_user_last_harvest_time(user_id)
+def can_harvest(user_id, full_data=None):
+    """Check if user can harvest. Returns (can_harvest, time_left, is_roulette_cooldown).
+    When *full_data* is provided, avoids all extra DB reads."""
+
+    # Russian Roulette elimination cooldown
+    if full_data is not None:
+        roulette_time = full_data.get("last_roulette_elimination_time", 0)
+    else:
+        roulette_time = get_user_last_roulette_elimination_time(user_id)
+
     current_time = time.time()
-    
-    # Check Russian Roulette elimination cooldown first
-    is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
-    if is_roulette_cooldown:
-        return False, roulette_time_left, True  # Return True as third param to indicate it's a roulette cooldown
-    
+    if roulette_time > 0:
+        cooldown_end = roulette_time + ROULETTE_ELIMINATION_COOLDOWN
+        if current_time < cooldown_end:
+            return False, int(cooldown_end - current_time), True
+
+    if full_data is not None:
+        last_harvest_time = full_data.get("last_harvest_time", 0)
+    else:
+        last_harvest_time = get_user_last_harvest_time(user_id)
+
     if last_harvest_time == 0:
         return True, 0, False
     
     # Get harvest upgrades for cooldown reduction
-    harvest_upgrades = get_user_harvest_upgrades(user_id)
-    cooldown_tier = harvest_upgrades["cooldown"]
+    if full_data is not None:
+        harvest_upgrades = full_data.get("harvest_upgrades", {})
+    else:
+        harvest_upgrades = get_user_harvest_upgrades(user_id)
+    cooldown_tier = harvest_upgrades.get("cooldown", 0)
     cooldown_reduction = 0
     if cooldown_tier > 0:
         cooldown_reduction = HARVEST_COOLDOWN_UPGRADES[cooldown_tier - 1]["reduction"]
@@ -917,24 +940,30 @@ def can_harvest(user_id):
     if hourly_event:
         event_id = hourly_event.get("effects", {}).get("event_id", "")
         if event_id == "speed_harvest":
-            cooldown_reduction += 180  # Harvest cooldown reduced by 3 minutes
+            cooldown_reduction += 180
     
     if daily_event:
         event_id = daily_event.get("effects", {}).get("event_id", "")
         if event_id == "speed_day":
-            cooldown_reduction += 60  # Harvest cooldown reduced by 1 minute
+            cooldown_reduction += 60
     
     # Apply tractor attunement cooldown reduction (Renewal)
-    tractor_enchant = get_user_tractor_attunement(user_id)
+    if full_data is not None:
+        tractor_enchant = full_data.get("tractor_enchantment")
+    else:
+        tractor_enchant = get_user_tractor_attunement(user_id)
     if tractor_enchant:
         enchant_cd = tractor_enchant.get("cooldown_reduction", 0)
-        cooldown_reduction += enchant_cd  # positive = less cooldown, negative = more cooldown
+        cooldown_reduction += enchant_cd
     
     # Apply invite reward cooldown reduction (tier 14: -5 minutes = -300 seconds)
-    invite_reductions = get_invite_cooldown_reductions(user_id)
-    cooldown_reduction += invite_reductions.get("harvest_reduction", 0)
+    if full_data is not None:
+        claimed = full_data.get("invite_claimed_rewards", [])
+        cooldown_reduction += 300 if 14 in claimed else 0
+    else:
+        invite_reductions = get_invite_cooldown_reductions(user_id)
+        cooldown_reduction += invite_reductions.get("harvest_reduction", 0)
     
-    # Apply cooldown reduction
     effective_cooldown = max(0, HARVEST_COOLDOWN - cooldown_reduction)
     cooldown_end = last_harvest_time + effective_cooldown
     if current_time >= cooldown_end:
@@ -1998,148 +2027,93 @@ def get_planter_level_from_total_items(total_items: int) -> int:
         return 10  # PLANTER X role -> achievement level 10
 
 
-def get_achievement_multiplier(user_id: int) -> float:
+def get_achievement_multiplier(user_id: int, full_data=None) -> float:
     """
     Calculate the total achievement multiplier based on all achievement levels.
     Returns a multiplier (e.g., 1.005 for 0.5% boost).
     All achievement boosts stack additively.
+
+    When *full_data* (from ``get_user_gather_full_data`` / ``get_user_harvest_full_data``)
+    is provided, all values are read from the dict and **no** extra DB queries are made.
     """
     total_boost = 0.0
-    
-    # Check gatherer achievement
-    gatherer_level = get_user_achievement_level(user_id, "gatherer")
-    if gatherer_level > 0 and "gatherer" in ACHIEVEMENTS:
-        gatherer_achievement = ACHIEVEMENTS["gatherer"]
-        if gatherer_level < len(gatherer_achievement["levels"]):
-            level_data = gatherer_achievement["levels"][gatherer_level]
-            total_boost += level_data["boost"]
-    
-    # Check coinflip_total achievement
-    coinflip_total_level = get_user_achievement_level(user_id, "coinflip_total")
-    if coinflip_total_level > 0 and "coinflip_total" in ACHIEVEMENTS:
-        coinflip_total_achievement = ACHIEVEMENTS["coinflip_total"]
-        if coinflip_total_level < len(coinflip_total_achievement["levels"]):
-            level_data = coinflip_total_achievement["levels"][coinflip_total_level]
-            total_boost += level_data["boost"]
-    
-    # Check coinflip_win_streak achievement
-    coinflip_streak_level = get_user_achievement_level(user_id, "coinflip_win_streak")
-    if coinflip_streak_level > 0 and "coinflip_win_streak" in ACHIEVEMENTS:
-        coinflip_streak_achievement = ACHIEVEMENTS["coinflip_win_streak"]
-        if coinflip_streak_level < len(coinflip_streak_achievement["levels"]):
-            level_data = coinflip_streak_achievement["levels"][coinflip_streak_level]
-            total_boost += level_data["boost"]
-    
-    # Check harvesting achievement
-    harvesting_level = get_user_achievement_level(user_id, "harvesting")
-    if harvesting_level > 0 and "harvesting" in ACHIEVEMENTS:
-        harvesting_achievement = ACHIEVEMENTS["harvesting"]
-        if harvesting_level < len(harvesting_achievement["levels"]):
-            level_data = harvesting_achievement["levels"][harvesting_level]
-            total_boost += level_data["boost"]
-    
-    # Check planter achievement
-    planter_level = get_user_achievement_level(user_id, "planter")
-    if planter_level > 0 and "planter" in ACHIEVEMENTS:
-        planter_achievement = ACHIEVEMENTS["planter"]
-        if planter_level < len(planter_achievement["levels"]):
-            level_data = planter_achievement["levels"][planter_level]
-            total_boost += level_data["boost"]
-    
-    # Check water_streak achievement
-    water_streak_level = get_user_achievement_level(user_id, "water_streak")
-    if water_streak_level > 0 and "water_streak" in ACHIEVEMENTS:
-        water_streak_achievement = ACHIEVEMENTS["water_streak"]
-        if water_streak_level < len(water_streak_achievement["levels"]):
-            level_data = water_streak_achievement["levels"][water_streak_level]
-            total_boost += level_data["boost"]
-    
-    # Check blooming achievement
-    blooming_level = get_user_achievement_level(user_id, "blooming")
-    if blooming_level > 0 and "blooming" in ACHIEVEMENTS:
-        blooming_achievement = ACHIEVEMENTS["blooming"]
-        if blooming_level < len(blooming_achievement["levels"]):
-            level_data = blooming_achievement["levels"][blooming_level]
-            total_boost += level_data["boost"]
-    
-    # Check russian_roulette achievement
-    russian_level = get_user_achievement_level(user_id, "russian_roulette")
-    if russian_level > 0 and "russian_roulette" in ACHIEVEMENTS:
-        russian_achievement = ACHIEVEMENTS["russian_roulette"]
-        if russian_level < len(russian_achievement["levels"]):
-            level_data = russian_achievement["levels"][russian_level]
-            total_boost += level_data["boost"]
-    
-    # Check areas_unlocked achievement
-    areas_unlocked_level = get_user_achievement_level(user_id, "areas_unlocked")
-    if areas_unlocked_level > 0 and "areas_unlocked" in ACHIEVEMENTS:
-        areas_achievement = ACHIEVEMENTS["areas_unlocked"]
-        if areas_unlocked_level < len(areas_achievement["levels"]):
-            level_data = areas_achievement["levels"][areas_unlocked_level]
-            total_boost += level_data["boost"]
-    
-    # Check hidden achievements
+
+    if full_data is not None:
+        achievements = full_data.get("achievements", {})
+        hidden_achievements = achievements.get("hidden_achievements", {})
+
+        for achievement_name, achievement_def in ACHIEVEMENTS.items():
+            level = int(achievements.get(achievement_name, 0))
+            if level > 0:
+                levels = achievement_def["levels"]
+                if level < len(levels):
+                    total_boost += levels[level]["boost"]
+
+        for achievement_key, achievement_data in HIDDEN_ACHIEVEMENTS.items():
+            if hidden_achievements.get(achievement_key, False):
+                total_boost += achievement_data["boost"]
+
+        return 1.0 + total_boost
+
+    # Fallback: individual DB queries (used by callers that don't pre-fetch)
+    for achievement_name, achievement_def in ACHIEVEMENTS.items():
+        level = get_user_achievement_level(user_id, achievement_name)
+        if level > 0:
+            levels = achievement_def["levels"]
+            if level < len(levels):
+                total_boost += levels[level]["boost"]
+
     for achievement_key, achievement_data in HIDDEN_ACHIEVEMENTS.items():
         if has_hidden_achievement(user_id, achievement_key):
             total_boost += achievement_data["boost"]
-    
+
     return 1.0 + total_boost
 
 
-def get_rank_perma_buff_multiplier(user_id):
+_RANK_LEVELS = {
+    "PINE I": 0, "PINE II": 1, "PINE III": 2,
+    "CEDAR I": 3, "CEDAR II": 4, "CEDAR III": 5,
+    "BIRCH I": 6, "BIRCH II": 7, "BIRCH III": 8,
+    "MAPLE I": 9, "MAPLE II": 10, "MAPLE III": 11,
+    "OAK I": 12, "OAK II": 13, "OAK III": 14,
+    "FIR I": 15, "FIR II": 16, "FIR III": 17,
+    "REDWOOD": 18,
+}
+
+
+def _bloom_count_to_rank(bloom_count: int) -> str:
+    """Pure helper: derive bloom rank string from bloom_count (no DB)."""
+    if bloom_count >= 18:
+        return "REDWOOD"
+    ranks = [
+        "PINE I", "PINE II", "PINE III",
+        "CEDAR I", "CEDAR II", "CEDAR III",
+        "BIRCH I", "BIRCH II", "BIRCH III",
+        "MAPLE I", "MAPLE II", "MAPLE III",
+        "OAK I", "OAK II", "OAK III",
+        "FIR I", "FIR II", "FIR III",
+        "REDWOOD",
+    ]
+    return ranks[min(bloom_count, 18)]
+
+
+def get_rank_perma_buff_multiplier(user_id, full_data=None):
     """
     Calculate the rank perma buff multiplier based on bloom rank.
     Each rank-up permanently multiplies ALL money earned by 1.2x (compounding).
-    
-    PINE I: 1.0x (no boost)
-    PINE II: 1.2x (1.2^1)
-    PINE III: 1.44x (1.2^2)
-    CEDAR I: 1.728x (1.2^3)
-    CEDAR II: 2.0736x (1.2^4)
-    CEDAR III: 2.48832x (1.2^5)
-    BIRCH I: 2.98598x (1.2^6)
-    BIRCH II: 3.58318x (1.2^7)
-    BIRCH III: 4.29982x (1.2^8)
-    MAPLE I: 5.15978x (1.2^9)
-    MAPLE II: 6.19174x (1.2^10)
-    MAPLE III: 7.43008x (1.2^11)
-    OAK I: 8.91610x (1.2^12)
-    OAK II: 10.69932x (1.2^13)
-    OAK III: 12.83918x (1.2^14)
-    FIR I: 15.40702x (1.2^15)
-    FIR II: 18.48843x (1.2^16)
-    FIR III: 22.18611x (1.2^17)
-    REDWOOD: 26.62333x (1.2^18)
+
+    When *full_data* is provided, bloom_count is read from it (no DB query).
     """
-    bloom_rank = get_bloom_rank(user_id)
-    
-    rank_levels = {
-        "PINE I": 0,
-        "PINE II": 1,
-        "PINE III": 2,
-        "CEDAR I": 3,
-        "CEDAR II": 4,
-        "CEDAR III": 5,
-        "BIRCH I": 6,
-        "BIRCH II": 7,
-        "BIRCH III": 8,
-        "MAPLE I": 9,
-        "MAPLE II": 10,
-        "MAPLE III": 11,
-        "OAK I": 12,
-        "OAK II": 13,
-        "OAK III": 14,
-        "FIR I": 15,
-        "FIR II": 16,
-        "FIR III": 17,
-        "REDWOOD": 18,
-    }
-    
-    level = rank_levels.get(bloom_rank, 0)
+    if full_data is not None:
+        bloom_rank = _bloom_count_to_rank(full_data.get("bloom_count", 0))
+    else:
+        bloom_rank = get_bloom_rank(user_id)
+
+    level = _RANK_LEVELS.get(bloom_rank, 0)
     return 1.2 ** level
 
 
-def can_gather(user_id, user_data=None, active_events=None):
+def can_gather(user_id, user_data=None, active_events=None, full_data=None):
     """
     Check if user can gather. Returns (can_gather: bool, time_left: int, is_roulette_cooldown: bool).
     
@@ -2147,23 +2121,33 @@ def can_gather(user_id, user_data=None, active_events=None):
         user_id: User ID
         user_data: Optional pre-fetched user data dict (from get_user_gather_data)
         active_events: Optional pre-fetched active events list
+        full_data: Optional pre-fetched full data dict (from get_user_gather_full_data).
+                   When provided, avoids extra DB calls for attunement / invite reductions.
     """
     # Check Russian Roulette elimination cooldown first
-    is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
-    if is_roulette_cooldown:
-        return False, roulette_time_left, True  # Return True as third param to indicate it's a roulette cooldown
+    if full_data is not None:
+        roulette_time = full_data.get("last_roulette_elimination_time", 0)
+    else:
+        roulette_time = get_user_last_roulette_elimination_time(user_id)
+
+    if roulette_time > 0:
+        current_time = time.time()
+        cooldown_end = roulette_time + ROULETTE_ELIMINATION_COOLDOWN
+        if current_time < cooldown_end:
+            return False, int(cooldown_end - current_time), True
     
     # Fetch data if not provided
     if user_data is None:
-        user_data = get_user_gather_data(user_id)
+        if full_data is not None:
+            user_data = full_data
+        else:
+            user_data = get_user_gather_data(user_id)
     
     if active_events is None:
         active_events = get_active_events_cached()
     
     last_gather_time = user_data["last_gather_time"]
     current_time = time.time()
-    #check if the user is on cooldown, return true/false and how much time left
-    #right off the bat if the user is new they have no cooldown
     if last_gather_time == 0:
         return True, 0, False
     
@@ -2181,22 +2165,29 @@ def can_gather(user_id, user_data=None, active_events=None):
     if hourly_event:
         event_id = hourly_event.get("effects", {}).get("event_id", "")
         if event_id == "speed_harvest":
-            cooldown_reduction += 15  # Gather cooldown reduced by 15 seconds
+            cooldown_reduction += 15
     
     if daily_event:
         event_id = daily_event.get("effects", {}).get("event_id", "")
         if event_id == "speed_day":
-            cooldown_reduction += 5  # Gather cooldown reduced by 5 seconds
+            cooldown_reduction += 5
     
     # Apply hoe attunement cooldown reduction (Renewal)
-    hoe_enchant = get_user_hoe_attunement(user_id)
+    if full_data is not None:
+        hoe_enchant = full_data.get("hoe_enchantment")
+    else:
+        hoe_enchant = get_user_hoe_attunement(user_id)
     if hoe_enchant:
         enchant_cd = hoe_enchant.get("cooldown_reduction", 0)
-        cooldown_reduction += enchant_cd  # positive = less cooldown, negative = more cooldown
+        cooldown_reduction += enchant_cd
     
     # Apply invite reward cooldown reduction (tier 13: -10 seconds)
-    invite_reductions = get_invite_cooldown_reductions(user_id)
-    cooldown_reduction += invite_reductions.get("gather_reduction", 0)
+    if full_data is not None:
+        claimed = full_data.get("invite_claimed_rewards", [])
+        cooldown_reduction += 10 if 13 in claimed else 0
+    else:
+        invite_reductions = get_invite_cooldown_reductions(user_id)
+        cooldown_reduction += invite_reductions.get("gather_reduction", 0)
     
     # Calculate effective cooldown (base cooldown minus reduction, minimum 0)
     effective_cooldown = max(0, GATHER_COOLDOWN - cooldown_reduction)
@@ -2212,27 +2203,25 @@ def set_cooldown(user_id):
     # set cooldown for user, p self explanatory
     update_user_last_gather_time(user_id, time.time())
 
-async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True, 
+def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True, 
                                   user_data=None, active_events=None,
                                   apply_orchard_fertilizer: bool = False,
-                                  area_multiplier: float = 1.0) -> dict:
+                                  area_multiplier: float = 1.0,
+                                  full_data=None,
+                                  increment_command_count: bool = False) -> dict:
     """
-    Perform a gather action for a user. Returns dict with gathered item info.
-    When apply_orchard_fertilizer=True (e.g. gardener auto-gather), orchard (harvest) fertilizer
-    upgrade is applied to the value. Gardener auto-gathers never get chain chance (chain is only
-    in the /gather command, not in this function).
-    
-    Args:
-        user_id: User ID
-        apply_cooldown: If True, sets cooldown. If False, skips cooldown (for gardeners).
-        user_data: Optional pre-fetched user data dict (from get_user_gather_data)
-        active_events: Optional pre-fetched active events list
-        apply_orchard_fertilizer: If True, apply orchard (harvest) fertilizer multiplier (for gardener auto-gather).
-        area_multiplier: Multiplier based on the gathering area (e.g. 1.2x for grove, 2x for marsh).
+    Synchronous implementation of gather logic. Runs in a thread via asyncio.to_thread()
+    to avoid blocking the event loop with pymongo calls.
+
+    When *full_data* (from ``get_user_gather_full_data``) is supplied, all
+    multiplier look-ups read from it instead of issuing individual DB queries.
     """
     # Fetch data if not provided
     if user_data is None:
-        user_data = get_user_gather_data(user_id)
+        if full_data is not None:
+            user_data = full_data
+        else:
+            user_data = get_user_gather_data(user_id)
     
     if active_events is None:
         active_events = get_active_events_cached()
@@ -2408,13 +2397,19 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
             final_value *= fertilizer_multiplier
 
     # Additive boosts from base value, then rank multiplies the subtotal
-    bloom_multiplier = get_bloom_multiplier(user_id)
+    if full_data is not None:
+        bloom_multiplier = 1.0 + (full_data.get("tree_rings", 0) * 0.005)
+        water_multiplier = 1.0 + (full_data.get("water_count", 0) * 0.01)
+        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
+        achievement_multiplier = get_achievement_multiplier(user_id, full_data=full_data)
+        daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * 0.02)
+    else:
+        bloom_multiplier = get_bloom_multiplier(user_id)
+        water_multiplier = get_water_multiplier(user_id)
+        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
+        achievement_multiplier = get_achievement_multiplier(user_id)
+        daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
     base_final_value = final_value  # Base value after orchard/gear upgrades
-
-    water_multiplier = get_water_multiplier(user_id)
-    rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
-    achievement_multiplier = get_achievement_multiplier(user_id)
-    daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
 
     # Calculate each boost as a percentage of the base value (additive, not compounding)
     extra_money_from_bloom = base_final_value * (bloom_multiplier - 1.0)
@@ -2423,7 +2418,10 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
     extra_money_from_daily = base_final_value * (daily_bonus_multiplier - 1.0)
 
     # Apply hoe attunement money bonus (Prosperity) - additive from base
-    hoe_enchant = get_user_hoe_attunement(user_id)
+    if full_data is not None:
+        hoe_enchant = full_data.get("hoe_enchantment")
+    else:
+        hoe_enchant = get_user_hoe_attunement(user_id)
     enchant_money_bonus = 0.0
     is_critical_gather = False
     if hoe_enchant:
@@ -2452,17 +2450,15 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
     new_balance = current_balance + final_value
     
     # Perform all database updates in a single batched operation
-    perform_gather_update(
+    tree_ring_awarded = perform_gather_update(
         user_id=user_id,
         balance_increment=final_value,
         item_name=name,
         ripeness_name=ripeness["name"],
         category=item["category"],
-        apply_cooldown=apply_cooldown
+        apply_cooldown=apply_cooldown,
+        increment_command_count=increment_command_count,
     )
-    
-    # Note: Achievement checking is now done in the /gather command handler
-    # to only count actual /gather commands, not gardener auto-gathers
 
     return {
         "name": name,
@@ -2486,7 +2482,25 @@ async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True,
         "month_name": month_name,
         "seasonal_multiplier": seasonal_multiplier,
         "seasonal_label": seasonal_label,
+        "tree_ring_awarded": tree_ring_awarded,
     }
+
+async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True, 
+                                  user_data=None, active_events=None,
+                                  apply_orchard_fertilizer: bool = False,
+                                  area_multiplier: float = 1.0,
+                                  full_data=None,
+                                  increment_command_count: bool = False) -> dict:
+    """
+    Perform a gather action for a user. Returns dict with gathered item info.
+    Runs the synchronous DB-heavy logic in a thread to avoid blocking the event loop.
+    """
+    return await asyncio.to_thread(
+        _perform_gather_for_user_sync,
+        user_id, apply_cooldown, user_data, active_events,
+        apply_orchard_fertilizer, area_multiplier, full_data,
+        increment_command_count
+    )
 
 #gatherable items
 GATHERABLE_ITEMS = [
@@ -4133,259 +4147,259 @@ async def on_invite_delete(invite):
         del _invite_cache[guild_id][invite.code]
 
 
-@bot.tree.command(name="gather", description="Gather a random item from nature!")
-async def gather(interaction: discord.Interaction):
+def _gather_critical_path(user_id: int, channel_name: str, area_mult: float,
+                          user_planter_level: int, area: dict) -> dict:
+    """All DB work for /gather in ONE sync call (runs in a single thread).
+
+    1 read (full_data) + 1 write (gather + command-count + cooldown).
+    Area check, cooldown check and chain roll are pure computation.
+    Returns a dict describing the outcome so the caller can build the embed
+    and send Discord messages without touching the database again.
+    """
+    full_data = get_user_gather_full_data(user_id)
+    active_events = get_active_events_cached()
+
+    # --- area access check (no DB call, uses pre-fetched unlocked_areas) ---
+    if not area.get("unlocked_by_default", False):
+        unlocked = full_data.get("unlocked_areas", {})
+        prev = area.get("previous_area")
+        if prev and not unlocked.get(prev, False):
+            prev_display = GATHERING_AREAS[prev]["display_name"]
+            return {"area_error": f"❌ You must unlock **{prev_display}** before accessing **{area['display_name']}**!"}
+        if not unlocked.get(channel_name, False):
+            return {"area_error": f"❌ You haven't unlocked **{area['display_name']}** yet! Use `/unlock {channel_name}` to unlock it for **${area['unlock_cost']:,}**."}
+        if user_planter_level < area.get("required_planter_level", 0):
+            return {"area_error": f"❌ You must be **{area['required_planter_rank']}** or above to gather in **{area['display_name']}**! You need to gather more plants to rank up."}
+
+    # --- cooldown check (pure computation on pre-fetched data) ---
+    can_user, time_left, is_roulette = can_gather(
+        user_id, user_data=full_data, active_events=active_events, full_data=full_data)
+    if not can_user:
+        # Hidden achievement check for time_left == 0 (rare, safe to do in-thread)
+        almost_unlocked = False
+        if time_left == 0:
+            almost_unlocked = unlock_hidden_achievement(user_id, "almost_got_it")
+        return {"on_cooldown": True, "time_left": time_left,
+                "is_roulette": is_roulette, "almost_unlocked": almost_unlocked}
+
+    # --- perform gather + cooldown + command-count in ONE write ---
+    gather_result = _perform_gather_for_user_sync(
+        user_id, apply_cooldown=True, user_data=full_data,
+        active_events=active_events, area_multiplier=area_mult,
+        full_data=full_data, increment_command_count=True)
+
+    # --- chain roll (pure computation) ---
+    user_upgrades = full_data["basket_upgrades"]
+    gloves_tier = user_upgrades["gloves"]
+    chain_chance = GLOVES_UPGRADES[gloves_tier - 1]["chain_chance"] if gloves_tier > 0 else 0.0
+    hoe_enc = gather_result.get("hoe_enchant")
+    if hoe_enc:
+        chain_chance += hoe_enc.get("chain_chance", 0)
+    chain_chance = max(0.0, chain_chance)
+    if chain_chance > 0:
+        hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
+        if hourly_event and hourly_event.get("effects", {}).get("event_id", "") == "chain_reaction":
+            chain_chance += 0.10
+    chain_triggered = chain_chance > 0 and random.random() < chain_chance
+    if chain_triggered:
+        update_user_last_gather_time(user_id, 0)
+
+    return {
+        "gather_result": gather_result,
+        "full_data": full_data,
+        "chain_triggered": chain_triggered,
+    }
+
+
+async def _gather_post_response(interaction: discord.Interaction, user_id: int,
+                                full_data: dict, gather_result: dict):
+    """Background task: role assignment, achievement checks, tree-ring notice.
+
+    Runs AFTER the main embed is already sent so the user sees the response
+    instantly.  All blocking DB calls are wrapped in ``asyncio.to_thread``.
+    """
     try:
-        #use defer for custom message
-        if not await safe_defer(interaction, ephemeral=False):
-            return
-
-        # Check if command is used in a valid gathering channel
-        channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
-        user_id = interaction.user.id
-        
-        allowed, error_msg = check_area_access(interaction.user, channel_name, user_id)
-        if not allowed:
-            await safe_interaction_response(interaction, interaction.followup.send, error_msg, ephemeral=True)
-            return
-        
-        # Get the area multiplier for this channel
-        area_mult = GATHERING_AREAS.get(channel_name, {}).get("multiplier", 1.0)
-
-        # Fetch user data and events once at the start
-        user_data = get_user_gather_data(user_id)   
-        active_events = get_active_events_cached()
-
-        #check if the user is on cooldown (default 1 min), if so let them know how much time they have left
-        can_user_gather, time_left, is_roulette_cooldown = can_gather(user_id, user_data=user_data, active_events=active_events)
-        if not can_user_gather:
-            #then user is on cooldown
-            if is_roulette_cooldown:
-                # Russian Roulette elimination cooldown
-                minutes_left = time_left // 60
-                await safe_interaction_response(interaction, interaction.followup.send,
-                    f"Sorry, {interaction.user.name}, you're dead. You cannot /gather for {minutes_left} minute(s)", ephemeral=True)
-            else:
-                # Normal gather cooldown
-                # Check for hidden achievement: Almost Got It (cooldown says "0" seconds)
-                if time_left == 0 and unlock_hidden_achievement(user_id, "almost_got_it"):
-                    await safe_interaction_response(interaction, interaction.followup.send,
-                        f"You must wait {time_left} seconds before gathering again, {interaction.user.name}.\n\n"
-                        f"🎉 **Hidden Achievement Unlocked: Almost Got It!** 🎉", ephemeral=True)
-                else:
-                    await safe_interaction_response(interaction, interaction.followup.send,
-                        f"You must wait {time_left} seconds before gathering again, {interaction.user.name}.", ephemeral=True)
-            return
-
-        # Get Tree Rings before gather to check if one was awarded
-        tree_rings_before = get_user_tree_rings(user_id)
-        
-        # Increment gather command count (only for actual /gather commands, not gardeners)
-        increment_user_gather_command_count(user_id)
-        
-        # Perform the gather with pre-fetched data (include area multiplier)
-        gather_result = await perform_gather_for_user(user_id, apply_cooldown=True, 
-                                                      user_data=user_data, active_events=active_events,
-                                                      area_multiplier=area_mult)
-
-        # Check if a Tree Ring was awarded
-        tree_rings_after = get_user_tree_rings(user_id)
-        if tree_rings_after > tree_rings_before:
-            tree_rings_awarded = tree_rings_after - tree_rings_before
+        # Tree Ring notice
+        if gather_result.get("tree_ring_awarded"):
             await safe_interaction_response(interaction, interaction.followup.send,
-                f"🌳 {interaction.user.mention} You've been awarded **{tree_rings_awarded} Tree Ring{'s' if tree_rings_awarded > 1 else ''}**!",
+                f"🌳 {interaction.user.mention} You've been awarded **1 Tree Ring**!",
                 ephemeral=True)
 
-        # assign role and check for rank-up
-        old_role = None
-        new_role = None
+        # Role assignment (async Discord API)
+        old_role = new_role = None
         try:
             old_role, new_role = await assign_gatherer_role(interaction.user, interaction.guild)
         except Exception as e:
             print(f"Error assigning gatherer role to user {user_id}: {e}")
 
-        # Send rank-up notification if player advanced
         if new_role:
-            # Special message for Planter I advancement (when old_role is None)
             if new_role == "PLANTER I" and old_role is None:
-                # Assign PINE I bloom rank role
                 try:
                     await assign_bloom_rank_role(interaction.user, interaction.guild)
                 except Exception as e:
                     print(f"Error assigning bloom rank role to user {user_id}: {e}")
-                
-                # Get the bloom rank to display
-                bloom_rank = get_bloom_rank(user_id)
                 rankup_embed = discord.Embed(
                     title="🌱 Rank Up!",
                     description=f"{interaction.user.mention} advanced to **PLANTER I** and is ranked **PINE I**!",
-                    color=discord.Color.gold(),
-                )
+                    color=discord.Color.gold())
             else:
                 rankup_embed = discord.Embed(
                     title="🌱 Rank Up!",
                     description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
-                    color=discord.Color.gold(),
-                )
+                    color=discord.Color.gold())
             await safe_interaction_response(interaction, interaction.followup.send, embed=rankup_embed)
 
-        #create discord embed — use a special explosive embed for critical gathers
+        # Achievement checks (run all DB calls in a single thread)
+        def _check_achievements():
+            total_items = get_user_total_items(user_id)
+            planter_lvl = get_planter_level_from_total_items(total_items)
+            cur_planter = get_user_achievement_level(user_id, "planter")
+            planter_up = None
+            if planter_lvl > cur_planter:
+                set_user_achievement_level(user_id, "planter", planter_lvl)
+                planter_up = planter_lvl
+
+            cmd_count = full_data.get("gather_command_count", 0) + 1
+            gatherer_lvl = get_achievement_level_for_stat("gatherer", cmd_count)
+            cur_gatherer = get_user_achievement_level(user_id, "gatherer")
+            gatherer_up = None
+            if gatherer_lvl > cur_gatherer:
+                set_user_achievement_level(user_id, "gatherer", gatherer_lvl)
+                gatherer_up = gatherer_lvl
+            return planter_up, gatherer_up
+
+        planter_up, gatherer_up = await asyncio.to_thread(_check_achievements)
+        if planter_up:
+            await send_achievement_notification(interaction, "planter", planter_up)
+        if gatherer_up:
+            await send_achievement_notification(interaction, "gatherer", gatherer_up)
+    except Exception as e:
+        print(f"Error in gather post-response: {e}")
+
+
+@bot.tree.command(name="gather", description="Gather a random item from nature!")
+async def gather(interaction: discord.Interaction):
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
+        user_id = interaction.user.id
+
+        # Quick validation (no DB call)
+        if channel_name not in VALID_GATHERING_CHANNELS:
+            channels_list = ", ".join(f"**{GATHERING_AREAS[a]['display_name']}**" for a in GATHERING_AREAS)
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ You can only use this command in gathering channels: {channels_list}", ephemeral=True)
+            return
+
+        area = GATHERING_AREAS[channel_name]
+        area_mult = area.get("multiplier", 1.0)
+        user_planter_level = get_user_planter_level(interaction.user)
+
+        # === ONE thread call: data fetch + area check + cooldown + gather + chain roll ===
+        result = await asyncio.to_thread(
+            _gather_critical_path, user_id, channel_name, area_mult,
+            user_planter_level, area)
+
+        # --- handle early-exit cases ---
+        if result.get("area_error"):
+            await safe_interaction_response(interaction, interaction.followup.send,
+                result["area_error"], ephemeral=True)
+            return
+
+        if result.get("on_cooldown"):
+            time_left = result["time_left"]
+            if result["is_roulette"]:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"Sorry, {interaction.user.name}, you're dead. You cannot /gather for {time_left // 60} minute(s)", ephemeral=True)
+            elif result.get("almost_unlocked"):
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"You must wait {time_left} seconds before gathering again, {interaction.user.name}.\n\n"
+                    f"🎉 **Hidden Achievement Unlocked: Almost Got It!** 🎉", ephemeral=True)
+            else:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"You must wait {time_left} seconds before gathering again, {interaction.user.name}.", ephemeral=True)
+            return
+
+        gather_result = result["gather_result"]
+        full_data = result["full_data"]
+        chain_triggered = result["chain_triggered"]
+
+        # --- build embed (pure computation, no DB) ---
         is_crit = gather_result.get('is_critical_gather', False)
 
         if is_crit:
-            # ---------- CRITICAL GATHER EMBED ----------
             hoe_enc = gather_result.get('hoe_enchant')
             hoe_name = hoe_enc.get("name", "Unknown") if hoe_enc else "Unknown"
             hoe_rarity = hoe_enc.get("rarity", "COMMON") if hoe_enc else "COMMON"
             hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]")
-            # Pre-crit value is half of the final (since final = pre_crit * 2)
             pre_crit_value = gather_result['value'] / 2
-
             embed = discord.Embed(
                 title="\U0001f4a5 CRITICAL HIT! \U0001f4a5",
                 description=(
                     f"**{interaction.user.name}** foraged for a(n) **{gather_result['name']}** "
                     f"and got a **CRIT**!\n\n"
-                    f"\U0001f4a5 **2X MONEY** \U0001f4a5"
-                ),
-                color=discord.Color.orange()
-            )
-
+                    f"\U0001f4a5 **2X MONEY** \U0001f4a5"),
+                color=discord.Color.orange())
             embed.add_field(name="Value", value=f"**${gather_result['base_value']:.2f}**", inline=True)
             embed.add_field(name="Ripeness", value=f"{gather_result['ripeness']}", inline=True)
             embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
-
-            embed.add_field(
-                name="\u2728 Attunement",
-                value=f"**{hoe_name}** {hoe_rarity_display}",
-                inline=False
-            )
-            embed.add_field(
-                name="\U0001f4a5 Critical Multiplier",
-                value=f"${pre_crit_value:.2f} \u2192 **${gather_result['value']:.2f}**",
-                inline=False
-            )
-
+            embed.add_field(name="\u2728 Attunement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
+            embed.add_field(name="\U0001f4a5 Critical Multiplier",
+                value=f"${pre_crit_value:.2f} \u2192 **${gather_result['value']:.2f}**", inline=False)
             embed.add_field(name="\U0001f4b0 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
             embed.add_field(name="\U0001f4b5 New Balance", value=f"**${gather_result['new_balance']:.2f}**", inline=True)
-
         else:
-            # ---------- NORMAL GATHER EMBED ----------
             embed = discord.Embed(
-                title= "You Gathered!",
-                description = f"You foraged for a(n) **{gather_result['name']}**!",
-                color = discord.Color.green()
-            )
-
+                title="You Gathered!",
+                description=f"You foraged for a(n) **{gather_result['name']}**!",
+                color=discord.Color.green())
             embed.add_field(name="Value", value=f"**${gather_result['base_value']:.2f}**", inline=True)
             embed.add_field(name="Ripeness", value=f"{gather_result['ripeness']}", inline=True)
             embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
-            
-            # Show bloom multiplier if applicable (only after first bloom)
-            bloom_count = get_user_bloom_count(user_id)
+
+            bloom_count = full_data.get("bloom_count", 0)
             if bloom_count > 0 and gather_result.get('extra_money_from_bloom', 0) > 0:
-                tree_rings = get_user_tree_rings(user_id)
                 multiplier_percent = (gather_result['bloom_multiplier'] - 1.0) * 100
-                embed.add_field(
-                    name="🌳 Tree Ring Boost", 
-                    value=f"+{multiplier_percent:.1f}% - **+${gather_result['extra_money_from_bloom']:.2f}**", 
-                    inline=False
-                )
-            
-            # Show rank perma buff if applicable (only if not PINE I) - multiplicative on subtotal
-            bloom_rank = get_bloom_rank(user_id)
+                embed.add_field(name="🌳 Tree Ring Boost",
+                    value=f"+{multiplier_percent:.1f}% - **+${gather_result['extra_money_from_bloom']:.2f}**", inline=False)
+
+            bloom_rank = _bloom_count_to_rank(bloom_count)
             if bloom_rank != "PINE I" and gather_result.get('extra_money_from_rank', 0) > 0:
-                rank_multiplier = gather_result['rank_perma_buff_multiplier']
-                embed.add_field(
-                    name="⭐ Rank Boost",
-                    value=f"{rank_multiplier:.2f}x - **+${gather_result['extra_money_from_rank']:.2f}**",
-                    inline=False
-                )
-            
-            # Show achievement boost if applicable
+                embed.add_field(name="⭐ Rank Boost",
+                    value=f"{gather_result['rank_perma_buff_multiplier']:.2f}x - **+${gather_result['extra_money_from_rank']:.2f}**", inline=False)
+
             if gather_result.get('extra_money_from_achievement', 0) > 0:
                 achievement_percent = (gather_result['achievement_multiplier'] - 1.0) * 100
-                embed.add_field(
-                    name="🏆 Achievement Boost",
-                    value=f"+{achievement_percent:.1f}% - **+${gather_result['extra_money_from_achievement']:.2f}**",
-                    inline=False
-                )
-            
-            # Show daily bonus if applicable (1% per consecutive day)
+                embed.add_field(name="🏆 Achievement Boost",
+                    value=f"+{achievement_percent:.1f}% - **+${gather_result['extra_money_from_achievement']:.2f}**", inline=False)
+
             if gather_result.get('extra_money_from_daily', 0) > 0:
                 daily_bonus_percent = (gather_result['daily_bonus_multiplier'] - 1.0) * 100
-                embed.add_field(
-                    name="💧 Water Streak Boost",
-                    value=f"+{daily_bonus_percent:.1f}% - **+${gather_result['extra_money_from_daily']:.2f}**",
-                    inline=False
-                )
-            
-            # Show attunement name and rarity if applicable
+                embed.add_field(name="💧 Water Streak Boost",
+                    value=f"+{daily_bonus_percent:.1f}% - **+${gather_result['extra_money_from_daily']:.2f}**", inline=False)
+
             hoe_enc = gather_result.get('hoe_enchant')
             if hoe_enc:
                 hoe_name = hoe_enc.get("name", "Unknown")
                 hoe_rarity = hoe_enc.get("rarity", "COMMON")
                 hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]")
-                embed.add_field(
-                    name="\u2728 Attunement",
-                    value=f"**{hoe_name}** {hoe_rarity_display}",
-                    inline=False
-                )
-            
+                embed.add_field(name="\u2728 Attunement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
+
             embed.add_field(name="\U0001f4b0 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
             embed.add_field(name="\U0001f4b5 New Balance", value=f"**${gather_result['new_balance']:.2f}**", inline=True)
-        
-        # Check for chain chance (gloves upgrade + hoe attunement Resonance) - use pre-fetched data
-        user_upgrades = user_data["basket_upgrades"]
-        gloves_tier = user_upgrades["gloves"]
-        chain_triggered = False
-        chain_chance = 0.0
-        if gloves_tier > 0:
-            chain_chance = GLOVES_UPGRADES[gloves_tier - 1]["chain_chance"]
-        
-        # Add hoe attunement chain chance bonus (Resonance)
-        hoe_enc = gather_result.get('hoe_enchant')
-        if hoe_enc:
-            chain_chance += hoe_enc.get("chain_chance", 0)
-        chain_chance = max(0, chain_chance)  # Floor at 0
-        
-        if chain_chance > 0:
-            # Apply Chain Reaction event (hourly) - use pre-fetched events
-            hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
-            if hourly_event:
-                event_id = hourly_event.get("effects", {}).get("event_id", "")
-                if event_id == "chain_reaction":
-                    chain_chance += 0.10  # Flat +10% chain chance
-            
-            chain_triggered = random.random() < chain_chance
-            if chain_triggered:
-                # Reset cooldown by setting last_gather_time to 0 (allows immediate next gather)
-                update_user_last_gather_time(user_id, 0)
-        
-        # Send the main gather embed first
+
+        # === Send the response ASAP ===
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
-        
-        # Check and update planter achievement level (after main response)
-        total_items = get_user_total_items(user_id)
-        new_planter_level = get_planter_level_from_total_items(total_items)
-        current_planter_achievement_level = get_user_achievement_level(user_id, "planter")
-        if new_planter_level > current_planter_achievement_level:
-            set_user_achievement_level(user_id, "planter", new_planter_level)
-            # Send achievement notification (ephemeral, only visible to user)
-            await send_achievement_notification(interaction, "planter", new_planter_level)
-        
-        # Check and update achievement levels based on gather_command_count (after main response)
-        gather_command_count = get_user_gather_command_count(user_id)
-        new_gatherer_level = get_achievement_level_for_stat("gatherer", gather_command_count)
-        current_gatherer_level = get_user_achievement_level(user_id, "gatherer")
-        if new_gatherer_level > current_gatherer_level:
-            set_user_achievement_level(user_id, "gatherer", new_gatherer_level)
-            # Send achievement notification (ephemeral, only visible to user)
-            await send_achievement_notification(interaction, "gatherer", new_gatherer_level)
-        
-        # Send separate chain message if triggered
+
+        # Chain message (must be after the main embed)
         if chain_triggered:
-            await safe_interaction_response(interaction, interaction.followup.send, f"🔗🔗 **CHAIN!** Your cooldown has been reset! Gather again! 🔗🔗")
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"🔗🔗 **CHAIN!** Your cooldown has been reset! Gather again! 🔗🔗")
+
+        # === Background: role assignment + achievements (user already has the response) ===
+        asyncio.create_task(_gather_post_response(interaction, user_id, full_data, gather_result))
     except Exception as e:
         print(f"Error in gather command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
@@ -4542,25 +4556,54 @@ async def water(interaction: discord.Interaction):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
-async def perform_harvest_for_user(user_id: int, allow_chain: bool = True, area_multiplier: float = 1.0) -> dict:
-    """Perform a full harvest for a user (balance, items, stats, tree rings). Does NOT set harvest cooldown.
-    Uses orchard (harvest) upgrades: car (extra items), fertilizer, basket, etc., so gardener auto-harvests
-    benefit from the user's /orchard upgrades. Set allow_chain=False for gardener-triggered harvests (no chain).
-    Returns dict with total_value, gathered_items, current_balance, chain_chance, total_base_value,
-    bloom_multiplier, water_multiplier, total_value_before_daily, tree_rings_to_award.
-    area_multiplier: Multiplier based on the gathering area (e.g. 1.2x for grove, 2x for marsh)."""
+def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
+                                   area_multiplier: float = 1.0,
+                                   full_data=None,
+                                   set_cooldown: bool = False,
+                                   increment_command_count: bool = False) -> dict:
+    """Synchronous implementation of harvest logic.  Runs in a thread via
+    ``asyncio.to_thread()`` to avoid blocking the event loop.
+
+    When *full_data* (from ``get_user_harvest_full_data``) is supplied, all
+    look-ups read from it and per-item DB writes are batched into **one**
+    ``perform_harvest_batch_update`` call at the end.
+    """
     active_events = get_active_events_cached()
-    user_upgrades = get_user_basket_upgrades(user_id)
-    basket_tier = user_upgrades["basket"]
-    soil_tier = user_upgrades["soil"]
-    harvest_upgrades = get_user_harvest_upgrades(user_id)
-    car_tier = harvest_upgrades["car"]
-    chain_tier = harvest_upgrades["chain"]
-    fertilizer_tier = harvest_upgrades["fertilizer"]
+
+    # ----- read upgrades (from pre-fetched data or individual queries) -----
+    if full_data is not None:
+        user_upgrades = full_data.get("basket_upgrades", {})
+        harvest_upgrades = full_data.get("harvest_upgrades", {})
+        tractor_enchant = full_data.get("tractor_enchantment")
+        bloom_multiplier = 1.0 + (full_data.get("tree_rings", 0) * 0.005)
+        water_multiplier = 1.0 + (full_data.get("water_count", 0) * 0.01)
+        plants_before_harvest = full_data.get("gather_stats_total_items", 0)
+        current_balance = full_data.get("balance", 0)
+        achievement_multiplier = get_achievement_multiplier(user_id, full_data=full_data)
+        daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * 0.02)
+        rank_perma_buff_mult = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
+        pre_bloom_cycle = full_data.get("bloom_cycle_plants", 0)
+    else:
+        user_upgrades = get_user_basket_upgrades(user_id)
+        harvest_upgrades = get_user_harvest_upgrades(user_id)
+        tractor_enchant = get_user_tractor_attunement(user_id)
+        bloom_multiplier = get_bloom_multiplier(user_id)
+        water_multiplier = get_water_multiplier(user_id)
+        plants_before_harvest = get_user_total_items(user_id)
+        current_balance = get_user_balance(user_id)
+        achievement_multiplier = get_achievement_multiplier(user_id)
+        daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
+        rank_perma_buff_mult = get_rank_perma_buff_multiplier(user_id)
+        pre_bloom_cycle = get_user_bloom_cycle_plants(user_id)
+
+    basket_tier = user_upgrades.get("basket", 0)
+    soil_tier = user_upgrades.get("soil", 0)
+    car_tier = harvest_upgrades.get("car", 0)
+    chain_tier = harvest_upgrades.get("chain", 0)
+    fertilizer_tier = harvest_upgrades.get("fertilizer", 0)
+
     base_items = 10
     extra_items = HARVEST_CAR_UPGRADES[car_tier - 1]["extra_items"] if car_tier > 0 else 0
-    # Add tractor attunement additional plants (Nature's Favor)
-    tractor_enchant = get_user_tractor_attunement(user_id)
     enchant_extra_plants = 0
     enchant_money_bonus = 0.0
     if tractor_enchant:
@@ -4575,37 +4618,37 @@ async def perform_harvest_for_user(user_id: int, allow_chain: bool = True, area_
     if fertilizer_tier > 0:
         fertilizer_multiplier = 1.0 + HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["multiplier"]
     chain_chance = HARVEST_CHAIN_UPGRADES[chain_tier - 1]["chain_chance"] if chain_tier > 0 else 0.0
-    # Add tractor attunement chain chance bonus (Resonance)
     if tractor_enchant:
         chain_chance += tractor_enchant.get("chain_chance", 0)
-    chain_chance = max(0, chain_chance)  # Floor at 0
+    chain_chance = max(0, chain_chance)
+
     hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
     daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
     if allow_chain and hourly_event and hourly_event.get("effects", {}).get("event_id", "") == "chain_reaction":
-        chain_chance += 0.10  # Flat +10% chain chance
+        chain_chance += 0.10
     if not allow_chain:
-        chain_chance = 0.0  # Gardener auto-harvests/auto-gathers never get chain
+        chain_chance = 0.0
     if hourly_event and hourly_event.get("effects", {}).get("event_id", "") == "radiation_leak":
-        gmo_chance += 0.20  # GMO chance +20%
+        gmo_chance += 0.20
     if daily_event and daily_event.get("effects", {}).get("event_id", "") == "gmo_surge":
-        gmo_chance += 0.10  # GMO chance +10%
+        gmo_chance += 0.10
     gmo_chance = min(gmo_chance, 1.0)
     if hourly_event and hourly_event.get("effects", {}).get("event_id", "") == "basket_boost":
         basket_multiplier *= 1.5
-    bloom_multiplier = get_bloom_multiplier(user_id)
-    water_multiplier = get_water_multiplier(user_id)
-    plants_before_harvest = get_user_total_items(user_id)
+
+    # ----- harvest loop (pure math, no DB writes) -----
     gathered_items = []
     total_value = 0.0
     total_base_value = 0.0
-    total_value_before_daily = 0.0  # Kept for backward compatibility
-    current_balance = get_user_balance(user_id)
-    # Generate one random month for the entire harvest
+    total_value_before_daily = 0.0
+    items_inc: dict[str, int] = {}
+    ripeness_inc: dict[str, int] = {}
     month_index = random.randint(0, 11)
     month_name = MONTHS[month_index]
     total_seasonal_bonus = 0.0
     seasonal_label = None
-    for i in range(total_items_to_harvest):
+
+    for _ in range(total_items_to_harvest):
         item = random.choice(GATHERABLE_ITEMS)
         name = item["name"]
         if item["category"] == "Fruit":
@@ -4616,27 +4659,25 @@ async def perform_harvest_for_user(user_id: int, allow_chain: bool = True, area_
             ripeness_list = LEVEL_OF_RIPENESS_FLOWERS
         else:
             ripeness_list = []
-        base_value = item["base_value"]
-        # Apply area multiplier (e.g. grove = 1.2x, marsh = 2x, etc.)
-        base_value *= area_multiplier
+        base_value = item["base_value"] * area_multiplier
         if hourly_event:
-            event_id = hourly_event.get("effects", {}).get("event_id", "")
-            if event_id == "may_flowers" and item["category"] == "Flower":
+            eid = hourly_event.get("effects", {}).get("event_id", "")
+            if eid == "may_flowers" and item["category"] == "Flower":
                 base_value *= 3
-            elif event_id == "fruit_festival" and item["category"] == "Fruit":
+            elif eid == "fruit_festival" and item["category"] == "Fruit":
                 base_value *= 2
-            elif event_id == "vegetable_boom" and item["category"] == "Vegetable":
+            elif eid == "vegetable_boom" and item["category"] == "Vegetable":
                 base_value *= 2
         if ripeness_list:
             weights = [r["chance"] for r in ripeness_list]
-            hourly_event_id = hourly_event.get("effects", {}).get("event_id", "") if hourly_event else ""
-            daily_event_id = daily_event.get("effects", {}).get("event_id", "") if daily_event else ""
-            if hourly_event_id == "perfect_ripeness":
+            h_eid = hourly_event.get("effects", {}).get("event_id", "") if hourly_event else ""
+            d_eid = daily_event.get("effects", {}).get("event_id", "") if daily_event else ""
+            if h_eid == "perfect_ripeness":
                 ripeness = random.choices(ripeness_list, weights=weights, k=1)[0]
                 ripeness_multiplier = ripeness["multiplier"] * 1.5
-            elif daily_event_id == "ripeness_rush":
-                weights = [r["chance"] * 2 if "Perfect" in r["name"] else r["chance"] for r in ripeness_list]
-                ripeness = random.choices(ripeness_list, weights=weights, k=1)[0]
+            elif d_eid == "ripeness_rush":
+                rw = [r["chance"] * 2 if "Perfect" in r["name"] else r["chance"] for r in ripeness_list]
+                ripeness = random.choices(ripeness_list, weights=rw, k=1)[0]
                 ripeness_multiplier = ripeness["multiplier"]
             else:
                 ripeness = random.choices(ripeness_list, weights=weights, k=1)[0]
@@ -4645,66 +4686,70 @@ async def perform_harvest_for_user(user_id: int, allow_chain: bool = True, area_
         else:
             final_value = base_value
             ripeness = {"name": "Normal"}
+
         is_gmo = random.choices([True, False], weights=[gmo_chance, 1 - gmo_chance], k=1)[0]
         if is_gmo:
             final_value *= 2
-        final_value *= basket_multiplier
-        final_value *= fertilizer_multiplier
+        final_value *= basket_multiplier * fertilizer_multiplier
+
         value_multiplier = 1.0
         if hourly_event:
-            event_id = hourly_event.get("effects", {}).get("event_id", "")
-            if event_id == "bumper_crop":
+            eid = hourly_event.get("effects", {}).get("event_id", "")
+            if eid == "bumper_crop":
                 value_multiplier *= 2.0
-            elif event_id == "lucky_strike":
+            elif eid == "lucky_strike":
                 value_multiplier *= 1.25
         if daily_event:
-            event_id = daily_event.get("effects", {}).get("event_id", "")
-            if event_id == "double_money":
-                value_multiplier *= 1.5  # All earnings x1.5
-            elif event_id == "harvest_festival":
+            eid = daily_event.get("effects", {}).get("event_id", "")
+            if eid == "double_money":
+                value_multiplier *= 1.5
+            elif eid == "harvest_festival":
                 value_multiplier *= 1.5
         final_value *= value_multiplier
-        # Apply seasonal month bonus
+
         item_seasonal_mult, item_seasonal_label = get_seasonal_multiplier(month_index, item["category"])
         if item_seasonal_mult > 1.0:
-            seasonal_bonus_for_item = final_value * (item_seasonal_mult - 1.0)
-            total_seasonal_bonus += seasonal_bonus_for_item
+            total_seasonal_bonus += final_value * (item_seasonal_mult - 1.0)
             final_value *= item_seasonal_mult
             if item_seasonal_label:
                 seasonal_label = item_seasonal_label
+
         base_value_before_boosts = final_value
-        # Additive boosts from base value, then rank multiplies the subtotal
-        daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
         extra_bloom = base_value_before_boosts * (bloom_multiplier - 1.0)
         extra_water = base_value_before_boosts * (water_multiplier - 1.0)
-        extra_achievement = base_value_before_boosts * (get_achievement_multiplier(user_id) - 1.0)
+        extra_achievement = base_value_before_boosts * (achievement_multiplier - 1.0)
         extra_daily = base_value_before_boosts * (daily_bonus_multiplier - 1.0)
         extra_enchant = base_value_before_boosts * enchant_money_bonus if enchant_money_bonus != 0 else 0.0
-        # Subtotal = base + additive boosts (before rank)
         subtotal = base_value_before_boosts + extra_bloom + extra_water + extra_achievement + extra_daily + extra_enchant
-        # Rank boost is multiplicative on the entire subtotal (1.2x per rank-up)
-        final_value = subtotal * get_rank_perma_buff_multiplier(user_id)
+        final_value = subtotal * rank_perma_buff_mult
+
         current_balance += final_value
         total_value += final_value
         total_base_value += base_value_before_boosts
-        add_user_item(user_id, name)
-        add_ripeness_stat(user_id, ripeness["name"])
-        # Increment total_items for userstats display (harvests should count towards total plants)
-        # But do NOT increment gather_stats categories/items (those are for gatherer achievements only)
-        increment_total_items_only(user_id)
-        gathered_items.append({"name": name, "value": final_value, "base_value": base_value_before_boosts, "ripeness": ripeness["name"], "is_gmo": is_gmo})
-    current_total = get_user_total_items(user_id)
-    tree_rings_to_award = 0
-    for milestone in range(200, current_total + 1, 200):
-        if plants_before_harvest < milestone <= current_total:
-            tree_rings_to_award += 1
-    if tree_rings_to_award > 0:
-        increment_tree_rings(user_id, tree_rings_to_award)
-    
-    # Note: Gatherer achievement check removed - harvests should not contribute to gatherer achievements
-    # Achievement checking is now done in the /harvest command handler to only count actual /harvest commands
-    
-    update_user_balance(user_id, current_balance)
+
+        # Accumulate for batch write instead of per-item DB calls
+        items_inc[name] = items_inc.get(name, 0) + 1
+        ripeness_inc[ripeness["name"]] = ripeness_inc.get(ripeness["name"], 0) + 1
+        gathered_items.append({
+            "name": name, "value": final_value,
+            "base_value": base_value_before_boosts,
+            "ripeness": ripeness["name"], "is_gmo": is_gmo,
+        })
+
+    # ----- single batch write: items + ripeness + balance + counts + tree rings + cooldown -----
+    num_items = total_items_to_harvest
+    tree_rings_to_award = perform_harvest_batch_update(
+        user_id=user_id,
+        items_inc=items_inc,
+        ripeness_inc=ripeness_inc,
+        balance_increment=total_value,
+        num_items=num_items,
+        pre_total_items=plants_before_harvest,
+        pre_bloom_cycle=pre_bloom_cycle,
+        set_cooldown=set_cooldown,
+        increment_command_count=increment_command_count,
+    )
+
     return {
         "total_value": total_value,
         "gathered_items": gathered_items,
@@ -4724,104 +4769,189 @@ async def perform_harvest_for_user(user_id: int, allow_chain: bool = True, area_
         "total_seasonal_bonus": total_seasonal_bonus,
     }
 
+async def perform_harvest_for_user(user_id: int, allow_chain: bool = True,
+                                   area_multiplier: float = 1.0,
+                                   full_data=None,
+                                   set_cooldown: bool = False,
+                                   increment_command_count: bool = False) -> dict:
+    """Perform a full harvest for a user. Runs the synchronous DB-heavy logic in a thread
+    to avoid blocking the event loop."""
+    return await asyncio.to_thread(
+        _perform_harvest_for_user_sync,
+        user_id, allow_chain, area_multiplier, full_data,
+        set_cooldown, increment_command_count
+    )
+
 
 #/harvest command, basically /castnet
-@bot.tree.command(name="harvest", description="Harvest a bunch of plants at once!")
-async def harvest(interaction: discord.Interaction):
-    try:
-        if not await safe_defer(interaction, ephemeral=False):
-            return
-        user_id = interaction.user.id
-        
-        # Check if command is used in a valid gathering channel
-        channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
-        allowed, error_msg = check_area_access(interaction.user, channel_name, user_id)
-        if not allowed:
-            await safe_interaction_response(interaction, interaction.followup.send, error_msg, ephemeral=True)
-            return
-        
-        # Get the area multiplier for this channel
-        area_mult = GATHERING_AREAS.get(channel_name, {}).get("multiplier", 1.0)
-        
-        can_user_harvest, time_left, is_roulette_cooldown = can_harvest(user_id)
-        if not can_user_harvest:
-            if is_roulette_cooldown:
-                # Russian Roulette elimination cooldown
-                minutes_left = time_left // 60
-                await safe_interaction_response(interaction, interaction.followup.send,
-                    f"Sorry, {interaction.user.name}, you're dead. You cannot /harvest for {minutes_left} minute(s)", ephemeral=True)
-            else:
-                # Normal harvest cooldown
-                minutes_left = time_left // 60
-                seconds_left = time_left % 60   
-                await safe_interaction_response(interaction, interaction.followup.send,
-                    f"You must wait {minutes_left} minutes and {seconds_left} seconds before harvesting again, {interaction.user.name}.", ephemeral=True)
-            return
-        set_harvest_cooldown(user_id)
-        result = await perform_harvest_for_user(user_id, area_multiplier=area_mult)
-        gathered_items = result["gathered_items"]
-        total_value = result["total_value"]
-        current_balance = result["current_balance"]
-        chain_chance = result["chain_chance"]
-        total_base_value = result["total_base_value"]
-        bloom_multiplier = result["bloom_multiplier"]
-        water_multiplier = result["water_multiplier"]
-        tree_rings_to_award = result["tree_rings_to_award"]
+def _harvest_critical_path(user_id: int, channel_name: str, area_mult: float,
+                           user_planter_level: int, area: dict) -> dict:
+    """All DB work for /harvest in ONE sync call (runs in a single thread).
 
+    1 read (full_data) + 1 write (harvest batch + cooldown + command-count).
+    Returns a dict so the caller can build the embed without touching the DB.
+    """
+    full_data = get_user_harvest_full_data(user_id)
+
+    # --- area access check (no DB, uses pre-fetched unlocked_areas) ---
+    if not area.get("unlocked_by_default", False):
+        unlocked = full_data.get("unlocked_areas", {})
+        prev = area.get("previous_area")
+        if prev and not unlocked.get(prev, False):
+            prev_display = GATHERING_AREAS[prev]["display_name"]
+            return {"area_error": f"❌ You must unlock **{prev_display}** before accessing **{area['display_name']}**!"}
+        if not unlocked.get(channel_name, False):
+            return {"area_error": f"❌ You haven't unlocked **{area['display_name']}** yet! Use `/unlock {channel_name}` to unlock it for **${area['unlock_cost']:,}**."}
+        if user_planter_level < area.get("required_planter_level", 0):
+            return {"area_error": f"❌ You must be **{area['required_planter_rank']}** or above to gather in **{area['display_name']}**! You need to gather more plants to rank up."}
+
+    # --- cooldown check (pure computation) ---
+    can_user, time_left, is_roulette = can_harvest(user_id, full_data=full_data)
+    if not can_user:
+        return {"on_cooldown": True, "time_left": time_left, "is_roulette": is_roulette}
+
+    # --- perform harvest + cooldown + command-count in ONE batch write ---
+    result = _perform_harvest_for_user_sync(
+        user_id, allow_chain=True, area_multiplier=area_mult,
+        full_data=full_data, set_cooldown=True, increment_command_count=True)
+
+    # --- chain roll (pure computation) ---
+    chain_chance = result["chain_chance"]
+    chain_triggered = chain_chance > 0 and random.random() < chain_chance
+    if chain_triggered:
+        update_user_last_harvest_time(user_id, 0)
+
+    return {
+        "result": result,
+        "full_data": full_data,
+        "chain_triggered": chain_triggered,
+    }
+
+
+async def _harvest_post_response(interaction: discord.Interaction, user_id: int,
+                                 full_data: dict, result: dict):
+    """Background task: role assignment + achievement checks after harvest.
+
+    Runs AFTER the main embed is sent so the user sees the response instantly.
+    """
+    try:
+        # Tree Ring notice
+        tree_rings_to_award = result.get("tree_rings_to_award", 0)
         if tree_rings_to_award > 0:
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"🌳 {interaction.user.mention} You've been awarded **{tree_rings_to_award} Tree Ring{'s' if tree_rings_to_award > 1 else ''}**!",
                 ephemeral=True)
 
-        #assign role in case they hit a new gatherer level in a harvest
-        old_role = None
-        new_role = None
+        # Role assignment (async Discord API)
+        old_role = new_role = None
         try:
             old_role, new_role = await assign_gatherer_role(interaction.user, interaction.guild)
         except Exception as e:
             print(f"Error assigning gatherer role to user {user_id}: {e}")
 
-
-        # Send rank-up notification if player advanced
         if new_role:
-            # Special message for Planter I advancement (when old_role is None)
             if new_role == "PLANTER I" and old_role is None:
-                # Assign PINE I bloom rank role
                 try:
                     await assign_bloom_rank_role(interaction.user, interaction.guild)
                 except Exception as e:
                     print(f"Error assigning bloom rank role to user {user_id}: {e}")
-                
-                # Get the bloom rank to display
-                bloom_rank = get_bloom_rank(user_id)
                 rankup_embed = discord.Embed(
                     title="🌾 Rank Up!",
                     description=f"{interaction.user.mention} advanced to **PLANTER I** and is ranked **PINE I**!",
-                    color=discord.Color.gold(),
-                )
+                    color=discord.Color.gold())
             else:
                 rankup_embed = discord.Embed(
                     title="🌾 Rank Up!",
                     description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
-                    color=discord.Color.gold(),
-                )
+                    color=discord.Color.gold())
             await safe_interaction_response(interaction, interaction.followup.send, embed=rankup_embed)
 
-        # Check for chain chance (season upgrade)
-        chain_triggered = False
-        if chain_chance > 0:
-            chain_triggered = random.random() < chain_chance
-            if chain_triggered:
-                # Reset cooldown by setting last_harvest_time to 0 (allows immediate next harvest)
-                update_user_last_harvest_time(user_id, 0)
-        
-        #create harvest embed
-        embed = discord.Embed(
-            title = "You Harvested!",
-            color = discord.Color.green()
-        )
+        # Achievement checks in a single thread
+        def _check_achievements():
+            total_items = get_user_total_items(user_id)
+            planter_lvl = get_planter_level_from_total_items(total_items)
+            cur_planter = get_user_achievement_level(user_id, "planter")
+            planter_up = None
+            if planter_lvl > cur_planter:
+                set_user_achievement_level(user_id, "planter", planter_lvl)
+                planter_up = planter_lvl
 
-        #show gathered items, just using 20 for now (show base value per item)
+            cmd_count = full_data.get("harvest_command_count", 0) + 1
+            harvesting_lvl = get_achievement_level_for_stat("harvesting", cmd_count)
+            cur_harvesting = get_user_achievement_level(user_id, "harvesting")
+            harvesting_up = None
+            if harvesting_lvl > cur_harvesting:
+                set_user_achievement_level(user_id, "harvesting", harvesting_lvl)
+                harvesting_up = harvesting_lvl
+            return planter_up, harvesting_up
+
+        planter_up, harvesting_up = await asyncio.to_thread(_check_achievements)
+        if planter_up:
+            await send_achievement_notification(interaction, "planter", planter_up)
+        if harvesting_up:
+            await send_achievement_notification(interaction, "harvesting", harvesting_up)
+
+        if result.get('achievement_unlocked'):
+            ach_name, ach_level = result['achievement_unlocked']
+            await send_achievement_notification(interaction, ach_name, ach_level)
+    except Exception as e:
+        print(f"Error in harvest post-response: {e}")
+
+
+@bot.tree.command(name="harvest", description="Harvest a bunch of plants at once!")
+async def harvest(interaction: discord.Interaction):
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
+        user_id = interaction.user.id
+
+        # Quick validation (no DB call)
+        if channel_name not in VALID_GATHERING_CHANNELS:
+            channels_list = ", ".join(f"**{GATHERING_AREAS[a]['display_name']}**" for a in GATHERING_AREAS)
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ You can only use this command in gathering channels: {channels_list}", ephemeral=True)
+            return
+
+        area = GATHERING_AREAS[channel_name]
+        area_mult = area.get("multiplier", 1.0)
+        user_planter_level = get_user_planter_level(interaction.user)
+
+        # === ONE thread call: data fetch + area check + cooldown + harvest + chain roll ===
+        crit = await asyncio.to_thread(
+            _harvest_critical_path, user_id, channel_name, area_mult,
+            user_planter_level, area)
+
+        if crit.get("area_error"):
+            await safe_interaction_response(interaction, interaction.followup.send,
+                crit["area_error"], ephemeral=True)
+            return
+
+        if crit.get("on_cooldown"):
+            time_left = crit["time_left"]
+            if crit["is_roulette"]:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"Sorry, {interaction.user.name}, you're dead. You cannot /harvest for {time_left // 60} minute(s)", ephemeral=True)
+            else:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"You must wait {time_left // 60} minutes and {time_left % 60} seconds before harvesting again, {interaction.user.name}.", ephemeral=True)
+            return
+
+        result = crit["result"]
+        full_data = crit["full_data"]
+        chain_triggered = crit["chain_triggered"]
+
+        gathered_items = result["gathered_items"]
+        total_value = result["total_value"]
+        current_balance = result["current_balance"]
+        total_base_value = result["total_base_value"]
+        bloom_multiplier = result["bloom_multiplier"]
+        water_multiplier = result["water_multiplier"]
+
+        # --- build embed (pure computation, no DB) ---
+        embed = discord.Embed(title="You Harvested!", color=discord.Color.green())
+
         items_text = ""
         for item in gathered_items[:20]:
             gmo_text = " GMO! ✨" if item["is_gmo"] else ""
@@ -4830,100 +4960,57 @@ async def harvest(interaction: discord.Interaction):
         embed.add_field(name="📦 Items Gathered", value=items_text or "No items", inline=False)
         embed.add_field(name="💰 Total Value", value=f"**${total_value:.2f}**", inline=True)
         embed.add_field(name="💵 New Balance", value=f"**${current_balance:.2f}**", inline=True)
-        
-        # Additive boosts from total_base_value, then rank multiplies the subtotal
-        # Show bloom multiplier if applicable (only after first bloom)
-        bloom_count = get_user_bloom_count(user_id)
+
+        bloom_count = full_data.get("bloom_count", 0)
         extra_money_from_bloom = total_base_value * (bloom_multiplier - 1.0)
         if bloom_count > 0 and extra_money_from_bloom > 0:
             multiplier_percent = (bloom_multiplier - 1.0) * 100
-            embed.add_field(
-                name="🌳 Tree Ring Boost", 
-                value=f"+{multiplier_percent:.1f}% - **+${extra_money_from_bloom:.2f}**", 
-                inline=False
-            )
-        
-        # Show achievement boost if applicable
-        achievement_multiplier = get_achievement_multiplier(user_id)
+            embed.add_field(name="🌳 Tree Ring Boost",
+                value=f"+{multiplier_percent:.1f}% - **+${extra_money_from_bloom:.2f}**", inline=False)
+
+        achievement_multiplier = get_achievement_multiplier(user_id, full_data=full_data)
         extra_money_from_achievement = total_base_value * (achievement_multiplier - 1.0)
         if extra_money_from_achievement > 0:
             achievement_percent = (achievement_multiplier - 1.0) * 100
-            embed.add_field(
-                name="🏆 Achievement Boost",
-                value=f"+{achievement_percent:.1f}% - **+${extra_money_from_achievement:.2f}**",
-                inline=False
-            )
-        
-        # Show daily bonus if applicable (1% per consecutive day)
-        daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
+            embed.add_field(name="🏆 Achievement Boost",
+                value=f"+{achievement_percent:.1f}% - **+${extra_money_from_achievement:.2f}**", inline=False)
+
+        daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * 0.02)
         extra_money_from_daily = total_base_value * (daily_bonus_multiplier - 1.0)
         if extra_money_from_daily > 0:
             daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
-            embed.add_field(
-                name="💧 Water Streak Boost",
-                value=f"+{daily_bonus_percent:.1f}% - **+${extra_money_from_daily:.2f}**",
-                inline=False
-            )
-        
-        # Show rank perma buff if applicable (only if not PINE I) - multiplicative on subtotal
-        bloom_rank = get_bloom_rank(user_id)
-        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
+            embed.add_field(name="💧 Water Streak Boost",
+                value=f"+{daily_bonus_percent:.1f}% - **+${extra_money_from_daily:.2f}**", inline=False)
+
+        bloom_rank = _bloom_count_to_rank(bloom_count)
+        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
         if bloom_rank != "PINE I" and rank_perma_buff_multiplier > 1.0:
-            # Rank multiplies the subtotal (base + all additive boosts)
             enchant_money_bonus = result.get("enchant_money_bonus", 0)
             extra_money_from_water = total_base_value * (water_multiplier - 1.0)
             enchant_total = total_base_value * enchant_money_bonus if enchant_money_bonus != 0 else 0.0
             total_subtotal = total_base_value + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + enchant_total
             extra_money_from_rank = total_subtotal * (rank_perma_buff_multiplier - 1.0)
-            embed.add_field(
-                name="⭐ Rank Boost",
-                value=f"{rank_perma_buff_multiplier:.2f}x - **+${extra_money_from_rank:.2f}**",
-                inline=False
-            )
-        
-        # Show tractor attunement name and rarity if applicable (just name, no dollar amount)
+            embed.add_field(name="⭐ Rank Boost",
+                value=f"{rank_perma_buff_multiplier:.2f}x - **+${extra_money_from_rank:.2f}**", inline=False)
+
         tractor_enc = result.get("tractor_enchant")
         if tractor_enc:
             tractor_name = tractor_enc.get("name", "Unknown")
             tractor_rarity = tractor_enc.get("rarity", "COMMON")
             tractor_rarity_display = RARITY_EMOJI.get(tractor_rarity, f"[{tractor_rarity}]")
-            embed.add_field(
-                name="\u2728 Attunement",
-                value=f"**{tractor_name}** {tractor_rarity_display}",
-                inline=False
-            )
-        
+            embed.add_field(name="\u2728 Attunement",
+                value=f"**{tractor_name}** {tractor_rarity_display}", inline=False)
+
+        # === Send the response ASAP ===
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
-        
-        # Check and update planter achievement level (after main response)
-        total_items = get_user_total_items(user_id)
-        new_planter_level = get_planter_level_from_total_items(total_items)
-        current_planter_achievement_level = get_user_achievement_level(user_id, "planter")
-        if new_planter_level > current_planter_achievement_level:
-            set_user_achievement_level(user_id, "planter", new_planter_level)
-            # Send achievement notification (ephemeral, only visible to user)
-            await send_achievement_notification(interaction, "planter", new_planter_level)
-        
-        # Increment harvest command count and check for harvesting achievements (after main response)
-        # IMPORTANT: This counts the number of times /harvest command is used, NOT the number of plants gathered
-        increment_user_harvest_command_count(user_id)
-        harvest_command_count = get_user_harvest_command_count(user_id)
-        # Use harvest_command_count (number of /harvest commands), NOT total_items (number of plants)
-        new_harvesting_level = get_achievement_level_for_stat("harvesting", harvest_command_count)
-        current_harvesting_level = get_user_achievement_level(user_id, "harvesting")
-        if new_harvesting_level > current_harvesting_level:
-            set_user_achievement_level(user_id, "harvesting", new_harvesting_level)
-            # Send achievement notification (ephemeral, only visible to user)
-            await send_achievement_notification(interaction, "harvesting", new_harvesting_level)
-        
-        # Send achievement notification if unlocked (for backward compatibility, though this should be None now)
-        if result.get('achievement_unlocked'):
-            achievement_name, achievement_level = result['achievement_unlocked']
-            await send_achievement_notification(interaction, achievement_name, achievement_level)
-        
-        # Send separate chain message if triggered
+
+        # Chain message (must be after the main embed)
         if chain_triggered:
-            await safe_interaction_response(interaction, interaction.followup.send, f"🔗🔗 **CHAIN!** Your harvest cooldown has been reset! Harvest again! 🔗🔗")
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"🔗🔗 **CHAIN!** Your harvest cooldown has been reset! Harvest again! 🔗🔗")
+
+        # === Background: role assignment + achievements (user already has the response) ===
+        asyncio.create_task(_harvest_post_response(interaction, user_id, full_data, result))
     except Exception as e:
         print(f"Error in harvest command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
@@ -5403,7 +5490,7 @@ async def userstats(interaction: discord.Interaction):
         
         embed.add_field(name="💰 Balance", value=f"**${user_balance:.2f}**", inline=True)
         embed.add_field(name="🌱 Plants Gathered (Total)", value=f"**{total_items}** plants", inline=True)
-        embed.add_field(name="🌿 Cycle Plants", value=f"**{cycle_plants}** plants", inline=True)
+        embed.add_field(name="🌿 Plants Gathered (This Bloom)", value=f"**{cycle_plants}** plants", inline=True)
         
         # Add Bloom Rank and Tree Rings
         bloom_rank = get_bloom_rank(user_id)
@@ -6090,24 +6177,27 @@ class ImbueView(discord.ui.View):
                 "\u274c This isn't your attunement menu!", ephemeral=True)
             return
 
-        # Check if user can afford another cast
-        balance = get_user_balance(self.user_id)
-        if not can_afford_rounded(balance, self.cost):
+        # Atomic deduction: check + deduct in one DB call (no race condition)
+        success, new_balance = atomic_deduct_balance(self.user_id, self.cost)
+        if not success:
             await safe_interaction_response(interaction, interaction.response.send_message,
-                f"\u274c You can't afford another recast! You need **${self.cost:,.0f}** but only have **${balance:,.2f}**.",
+                f"\u274c You can't afford another recast! You need **${self.cost:,.0f}** but only have **${new_balance:,.2f}**.",
                 ephemeral=True)
             return
 
-        # Deduct cost
-        new_balance = normalize_money(balance - self.cost)
-        update_user_balance(self.user_id, new_balance)
+        try:
+            # Roll new attunement
+            self.rolled_enchant = roll_attunement(self.tool_type)
 
-        # Roll new attunement
-        self.rolled_enchant = roll_attunement(self.tool_type)
-
-        # Update embed
-        embed = self._build_embed()
-        await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+            # Update embed
+            embed = self._build_embed()
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+        except Exception as e:
+            # Refund if we took money but failed to update the message
+            refund_balance(self.user_id, self.cost)
+            print(f"Error in recast_button (refunded ${self.cost:,.0f} to {self.user_id}): {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message,
+                "\u274c An error occurred and your money has been refunded. Please try again.", ephemeral=True)
 
     async def on_timeout(self):
         """When the view times out, disable all buttons."""
@@ -6138,40 +6228,47 @@ async def imbue(interaction: discord.Interaction, tool: app_commands.Choice[str]
         tool_type = tool.value  # "hoe" or "tractor"
         cost = IMBUE_HOE_COST if tool_type == "hoe" else IMBUE_TRACTOR_COST
 
-        # Check balance
-        balance = get_user_balance(user_id)
-        if not can_afford_rounded(balance, cost):
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"\u274c You don't have enough money! You need **${cost:,.0f}** but only have **${balance:,.2f}**.",
-                ephemeral=True)
-            return
+        # Per-user lock prevents concurrent imbue operations
+        if user_id not in _imbue_locks:
+            _imbue_locks[user_id] = asyncio.Lock()
+        async with _imbue_locks[user_id]:
+            # Atomic deduction: check + deduct in one DB call (no race condition)
+            success, new_balance = await asyncio.to_thread(atomic_deduct_balance, user_id, cost)
+            if not success:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"\u274c You don't have enough money! You need **${cost:,.0f}** but only have **${new_balance:,.2f}**.",
+                    ephemeral=True)
+                return
 
-        # Deduct cost
-        new_balance = normalize_money(balance - cost)
-        update_user_balance(user_id, new_balance)
+            try:
+                # Get current attunement
+                if tool_type == "hoe":
+                    current_enchant = get_user_hoe_attunement(user_id)
+                else:
+                    current_enchant = get_user_tractor_attunement(user_id)
 
-        # Get current attunement
-        if tool_type == "hoe":
-            current_enchant = get_user_hoe_attunement(user_id)
-        else:
-            current_enchant = get_user_tractor_attunement(user_id)
+                # Roll a new attunement
+                rolled_enchant = roll_attunement(tool_type)
 
-        # Roll a new attunement
-        rolled_enchant = roll_attunement(tool_type)
+                # Create the view and embed
+                view = ImbueView(
+                    user_id=user_id,
+                    tool_type=tool_type,
+                    rolled_enchant=rolled_enchant,
+                    current_enchant=current_enchant,
+                    channel=interaction.channel,
+                    user_name=interaction.user.name,
+                    timeout=60,
+                )
+                embed = view._build_embed()
 
-        # Create the view and embed
-        view = ImbueView(
-            user_id=user_id,
-            tool_type=tool_type,
-            rolled_enchant=rolled_enchant,
-            current_enchant=current_enchant,
-            channel=interaction.channel,
-            user_name=interaction.user.name,
-            timeout=60,
-        )
-        embed = view._build_embed()
-
-        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view, ephemeral=True)
+                await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view, ephemeral=True)
+            except Exception as inner_e:
+                # Refund if we took money but failed to show the imbue menu
+                refund_balance(user_id, cost)
+                print(f"Error in imbue command (refunded ${cost:,.0f} to {user_id}): {inner_e}")
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "\u274c An error occurred and your money has been refunded. Please try again.", ephemeral=True)
     except Exception as e:
         print(f"Error in imbue command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send,
@@ -7278,55 +7375,6 @@ async def set_command(
         await safe_interaction_response(interaction, interaction.followup.send, "\u274c An error occurred. Please try again.", ephemeral=True)
 
 
-# Adminpay command - Admin only, #hidden channel
-@bot.tree.command(name="adminpay", description="[ADMIN] Give a user money from the bot (giveaways, refunds, etc.)")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(
-    user="The user to pay",
-    amount="The amount to give"
-)
-async def adminpay(interaction: discord.Interaction, user: discord.Member, amount: float):
-    try:
-        if not await safe_defer(interaction, ephemeral=True):
-            return
-        
-        if not interaction.user.guild_permissions.administrator:
-            await safe_interaction_response(interaction, interaction.followup.send,
-                "\u274c You don't have permission to use this command.", ephemeral=True)
-            return
-        
-        if not hasattr(interaction.channel, 'name') or interaction.channel.name != "hidden":
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"\u274c This command can only be used in the #hidden channel, {interaction.user.name}!",
-                ephemeral=True)
-            return
-        
-        if amount <= 0:
-            await safe_interaction_response(interaction, interaction.followup.send,
-                "\u274c Amount must be greater than zero.", ephemeral=True)
-            return
-        
-        # Add money to user's balance
-        current_balance = get_user_balance(user.id)
-        new_balance = normalize_money(current_balance + amount)
-        update_user_balance(user.id, new_balance)
-        
-        embed = discord.Embed(
-            title="\U0001f4b8 Admin Payment Sent!",
-            description=f"**${amount:,.2f}** has been given to {user.mention}!",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Previous Balance", value=f"${current_balance:,.2f}", inline=True)
-        embed.add_field(name="New Balance", value=f"${new_balance:,.2f}", inline=True)
-        embed.set_footer(text=f"Paid by {interaction.user.name}")
-        
-        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
-        print(f"Admin {interaction.user.name} used /adminpay to give {user.name} ${amount:,.2f}")
-    except Exception as e:
-        print(f"Error in adminpay command: {e}")
-        await safe_interaction_response(interaction, interaction.followup.send, "\u274c An error occurred. Please try again.", ephemeral=True)
-
-
 # Market admin command
 @bot.tree.command(name="market", description="[ADMIN] Toggle market news on/off and reset stock prices")
 @app_commands.default_permissions(administrator=True)
@@ -7391,6 +7439,227 @@ async def market_admin(interaction: discord.Interaction, news: app_commands.Choi
     except Exception as e:
         print(f"Error in market admin command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "\u274c An error occurred. Please try again.", ephemeral=True)
+
+
+# ── Giveaway admin command ──────────────────────────────────────────────
+async def _giveaway_imbue_name_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    """Autocomplete for imbue names – filters by the tool_type and rarity
+    the user already typed, then fuzzy-matches the typed text."""
+    namespace = interaction.namespace
+
+    tool_raw = getattr(namespace, "tool_type", None)
+    rarity_raw = getattr(namespace, "rarity", None)
+
+    pool = HOE_ENCHANTMENTS if tool_raw == "hoe" else TRACTOR_ENCHANTMENTS if tool_raw == "tractor" else {}
+
+    if rarity_raw and rarity_raw in pool:
+        names = [e["name"] for e in pool[rarity_raw]]
+    else:
+        names = [e["name"] for rarity_list in pool.values() for e in rarity_list]
+
+    current_upper = current.upper()
+    matches = [n for n in names if current_upper in n] if current else names
+    return [app_commands.Choice(name=n, value=n) for n in matches[:25]]
+
+
+@bot.tree.command(name="giveaway", description="[ADMIN] Give a user money, imbues, water streak, or tree rings")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    user="The user to give the reward to",
+    type="The type of reward to give",
+    amount="Amount – money ($), water streak (days), or tree rings (count)",
+    tool_type="Hoe or Tractor (required for imbue type)",
+    rarity="Imbue rarity tier (required for imbue type)",
+    imbue_name="Specific imbue name (required for imbue type) – autocompletes based on tool & rarity",
+)
+@app_commands.choices(type=[
+    app_commands.Choice(name="Money", value="money"),
+    app_commands.Choice(name="Imbue", value="imbue"),
+    app_commands.Choice(name="Water Streak", value="water_streak"),
+    app_commands.Choice(name="Tree Rings", value="tree_rings"),
+])
+@app_commands.choices(tool_type=[
+    app_commands.Choice(name="Hoe (Gather)", value="hoe"),
+    app_commands.Choice(name="Tractor (Harvest)", value="tractor"),
+])
+@app_commands.choices(rarity=[
+    app_commands.Choice(name="Common", value="COMMON"),
+    app_commands.Choice(name="Uncommon", value="UNCOMMON"),
+    app_commands.Choice(name="Rare", value="RARE"),
+    app_commands.Choice(name="Super Rare", value="SUPER RARE"),
+    app_commands.Choice(name="Legendary", value="LEGENDARY"),
+    app_commands.Choice(name="Netherite", value="NETHERITE"),
+    app_commands.Choice(name="Luminite", value="LUMINITE"),
+    app_commands.Choice(name="Celestial", value="CELESTIAL"),
+    app_commands.Choice(name="Secret", value="SECRET"),
+])
+@app_commands.autocomplete(imbue_name=_giveaway_imbue_name_autocomplete)
+async def giveaway(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    type: str,
+    amount: float = None,
+    tool_type: str = None,
+    rarity: str = None,
+    imbue_name: str = None,
+):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        # ── permission & channel gate ──
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+
+        if not hasattr(interaction.channel, 'name') or interaction.channel.name != "hidden":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
+                ephemeral=True)
+            return
+
+        user_id = user.id
+        type_lower = type.lower()
+
+        # ── MONEY ──
+        if type_lower == "money":
+            if amount is None or amount <= 0:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ **Error**: Please provide a positive `amount` for money.", ephemeral=True)
+                return
+
+            current_balance = get_user_balance(user_id)
+            new_balance = normalize_money(current_balance + amount)
+            update_user_balance(user_id, new_balance)
+
+            embed = discord.Embed(
+                title="🎉 Giveaway – Money",
+                description=f"**${amount:,.2f}** has been given to {user.mention}!",
+                color=discord.Color.gold()
+            )
+            embed.add_field(name="Previous Balance", value=f"${current_balance:,.2f}", inline=True)
+            embed.add_field(name="New Balance", value=f"${new_balance:,.2f}", inline=True)
+            embed.set_footer(text=f"Given by {interaction.user.name}")
+            print(f"Admin {interaction.user.name} used /giveaway money to give {user.name} ${amount:,.2f}")
+
+        # ── IMBUE ──
+        elif type_lower == "imbue":
+            if not tool_type:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ **Error**: Please select a `tool_type` (Hoe or Tractor) for imbue giveaways.", ephemeral=True)
+                return
+            if not rarity:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ **Error**: Please select a `rarity` tier for the imbue.", ephemeral=True)
+                return
+            if not imbue_name:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ **Error**: Please provide an `imbue_name`. Use the autocomplete suggestions.", ephemeral=True)
+                return
+
+            pool = HOE_ENCHANTMENTS if tool_type == "hoe" else TRACTOR_ENCHANTMENTS
+            rarity_upper = rarity.upper()
+
+            if rarity_upper not in pool:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ **Error**: Invalid rarity `{rarity}`. Valid options: {', '.join(pool.keys())}",
+                    ephemeral=True)
+                return
+
+            matched = [e for e in pool[rarity_upper] if e["name"].upper() == imbue_name.upper()]
+            if not matched:
+                valid_names = ", ".join(f"`{e['name']}`" for e in pool[rarity_upper])
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ **Error**: No imbue named `{imbue_name}` found in **{rarity_upper}** {tool_type} imbues.\n"
+                    f"Valid names: {valid_names}",
+                    ephemeral=True)
+                return
+
+            attunement = dict(matched[0])
+
+            if tool_type == "hoe":
+                old = get_user_hoe_attunement(user_id)
+                set_user_hoe_attunement(user_id, attunement)
+            else:
+                old = get_user_tractor_attunement(user_id)
+                set_user_tractor_attunement(user_id, attunement)
+
+            rarity_emoji = RARITY_EMOJI.get(rarity_upper, f"[{rarity_upper}]")
+            tool_label = "Hoe (Gather)" if tool_type == "hoe" else "Tractor (Harvest)"
+            old_display = f"**{old['name']}** {RARITY_EMOJI.get(old.get('rarity', ''), '')}" if old else "None"
+
+            embed = discord.Embed(
+                title="🎉 Giveaway – Imbue",
+                description=(
+                    f"{user.mention} has been given the **{attunement['name']}** "
+                    f"{rarity_emoji} imbue for their **{tool_label}**!"
+                ),
+                color=RARITY_COLORS.get(rarity_upper, discord.Color.gold().value)
+            )
+            embed.add_field(name="Tool", value=tool_label, inline=True)
+            embed.add_field(name="Rarity", value=f"{rarity_emoji} {rarity_upper}", inline=True)
+            embed.add_field(name="Previous Imbue", value=old_display, inline=False)
+            embed.add_field(name="Description", value=f"*\"{attunement.get('description', '')}\"*", inline=False)
+            embed.set_footer(text=f"Given by {interaction.user.name}")
+            print(f"Admin {interaction.user.name} used /giveaway imbue to give {user.name} {attunement['name']} ({rarity_upper} {tool_type})")
+
+        # ── WATER STREAK ──
+        elif type_lower == "water_streak":
+            if amount is None or amount < 0:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ **Error**: Please provide a non-negative `amount` for water streak (days).", ephemeral=True)
+                return
+
+            days = int(amount)
+            old_streak = get_user_consecutive_water_days(user_id)
+            set_user_consecutive_water_days(user_id, days)
+
+            embed = discord.Embed(
+                title="🎉 Giveaway – Water Streak",
+                description=f"{user.mention}'s water streak has been set to **{days:,}** days!",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Previous Streak", value=f"{old_streak:,} days", inline=True)
+            embed.add_field(name="New Streak", value=f"{days:,} days", inline=True)
+            embed.set_footer(text=f"Set by {interaction.user.name}")
+            print(f"Admin {interaction.user.name} used /giveaway water_streak to set {user.name}'s streak to {days}")
+
+        # ── TREE RINGS ──
+        elif type_lower == "tree_rings":
+            if amount is None or amount <= 0:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ **Error**: Please provide a positive `amount` of tree rings to give.", ephemeral=True)
+                return
+
+            rings = int(amount)
+            old_rings = get_user_tree_rings(user_id)
+            increment_tree_rings(user_id, rings)
+            new_rings = old_rings + rings
+
+            embed = discord.Embed(
+                title="🎉 Giveaway – Tree Rings",
+                description=f"**{rings:,}** Tree Ring(s) have been given to {user.mention}!",
+                color=discord.Color.dark_green()
+            )
+            embed.add_field(name="Previous Rings", value=f"{old_rings:,}", inline=True)
+            embed.add_field(name="New Total", value=f"{new_rings:,}", inline=True)
+            embed.set_footer(text=f"Given by {interaction.user.name}")
+            print(f"Admin {interaction.user.name} used /giveaway tree_rings to give {user.name} {rings} rings")
+
+        else:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: Invalid type. Choose from: `money`, `imbue`, `water_streak`, `tree_rings`.",
+                ephemeral=True)
+            return
+
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+    except Exception as e:
+        print(f"Error in giveaway command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # Pay command
@@ -7609,7 +7878,7 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
     # Get all guild member IDs
     guild_member_ids = {member.id for member in guild.members}
     
-    # Get leaderboard data
+    # Get leaderboard data (plants uses Planters Gathered Total = gather_stats.total_items, same as /userstats)
     if leaderboard_type == "plants":
         all_data = get_all_users_total_items()
     elif leaderboard_type == "money":
@@ -8700,8 +8969,8 @@ async def gardener_background_task():
     
     while not bot.is_closed():
         try:
-            # Get all users with gardeners
-            users_with_gardeners = get_all_users_with_gardeners()
+            # Get all users with gardeners (run in thread to avoid blocking event loop)
+            users_with_gardeners = await asyncio.to_thread(get_all_users_with_gardeners)
             
             for user_id, gardeners in users_with_gardeners:
                 # Process each gardener
@@ -8730,7 +8999,7 @@ async def gardener_background_task():
                                 item_count = len(harvest_result["gathered_items"])
                                 
                                 # Update gardener stats with total money earned from harvest and plant count
-                                update_gardener_stats(user_id, gardener_id, total_value, plants_count=item_count)
+                                await asyncio.to_thread(update_gardener_stats, user_id, gardener_id, total_value, item_count)
                                 
                                 # Send cool upgrade message to #lawn
                                 for guild in bot.guilds:
@@ -8764,7 +9033,7 @@ async def gardener_background_task():
                                 # Normal single gather (orchard fertilizer applies; no chain)
                                 gather_result = await perform_gather_for_user(user_id, apply_cooldown=False, apply_orchard_fertilizer=True)
                                 # Single gather = 1 plant
-                                update_gardener_stats(user_id, gardener_id, gather_result["value"], plants_count=1)
+                                await asyncio.to_thread(update_gardener_stats, user_id, gardener_id, gather_result["value"], 1)
                                 
                                 user_name = "User"
                                 for guild in bot.guilds:
@@ -8812,13 +9081,13 @@ async def secret_gardener_background_task():
     
     while not bot.is_closed():
         try:
-            sg_user_ids = get_all_users_with_secret_gardener()
+            sg_user_ids = await asyncio.to_thread(get_all_users_with_secret_gardener)
             
             for user_id in sg_user_ids:
                 # 50% chance to gather every minute
                 if random.random() < 0.50:
                     try:
-                        sg_has_harvest = has_secret_gardener_harvest(user_id)
+                        sg_has_harvest = await asyncio.to_thread(has_secret_gardener_harvest, user_id)
                         
                         # Determine if this is a harvest or gather
                         # If user has auto-harvest (tier 12), use the same tool-upgrade logic
@@ -8892,8 +9161,8 @@ async def gpu_background_task():
     
     while not bot.is_closed():
         try:
-            # Get all users with GPUs
-            users_with_gpus = get_all_users_with_gpus()
+            # Get all users with GPUs (run in thread to avoid blocking event loop)
+            users_with_gpus = await asyncio.to_thread(get_all_users_with_gpus)
             
             for user_id, gpus in users_with_gpus:
                 # Process each GPU
@@ -8943,8 +9212,8 @@ async def gpu_background_task():
                             percent_multiplier = 1.0 + (percent_increase / 100.0)
                             amount = round(base_amount * percent_multiplier, 4)
                             
-                            # Add crypto to user's holdings
-                            update_user_crypto_holdings(user_id, symbol, amount)
+                            # Add crypto to user's holdings (run in thread to avoid blocking event loop)
+                            await asyncio.to_thread(update_user_crypto_holdings, user_id, symbol, amount)
                             
                             # Optional: Could send notification to #gathercoin channel
                             # (Skipping for now to reduce spam, similar to plan note)
