@@ -2625,7 +2625,22 @@ GATHERABLE_ITEMS = [
     {"category": "Vegetable","name": "Pea Pod 🫛", "base_value": 2},
     {"category": "Vegetable","name": "Eggplant 🍆", "base_value": 6},
     {"category": "Vegetable","name": "Sweet Potato 🍠", "base_value": 13.13},
-]   
+]
+
+# Custom Discord emojis for items that don't have a Unicode emoji in the name (CDN IDs from server)
+CUSTOM_ITEM_EMOJIS = {
+    "Flowey": "<:Flowey:1473550098716819682>",
+    "Raspberry": "<:Raspberry:1473550163711627399>",
+}
+
+def get_item_display_emoji(item_name: str) -> str:
+    """Return emoji-only string for harvest display (avoids 1024 embed field limit).
+    Uses CUSTOM_ITEM_EMOJIS for Flowey/Raspberry; otherwise extracts emoji from name (e.g. 'Rose 🌹' -> '🌹')."""
+    if item_name in CUSTOM_ITEM_EMOJIS:
+        return CUSTOM_ITEM_EMOJIS[item_name]
+    if " " in item_name:
+        return item_name.split()[-1]
+    return item_name[-1] if item_name else ""
 
 # Item descriptions for almanac
 ITEM_DESCRIPTIONS = {
@@ -2694,8 +2709,8 @@ LEVEL_OF_RIPENESS_FRUITS = [
     {"name": "Perfectly Ripe", "multiplier": 2.5, "chance": 20},
     {"name": "Overripe", "multiplier": 1.6, "chance": 10},  
     {"name": "Spoiled", "multiplier": 0.9, "chance": 4.99999},
-    {"name": "One in a Million", "multiplier": 50, "chance": 20},
-    {"name": "Mikellion", "multiplier": 200, "chance": 50},
+    {"name": "One in a Million", "multiplier": 50, "chance": 1},
+    {"name": "Mikellion", "multiplier": 200, "chance": 0.000101},
 ]
 
 #level of ripeness - VEGETABLES
@@ -3760,6 +3775,7 @@ class GathershipGame:
         self.opponent_cursor = (2, 2)
         self.fire_cursor = (2, 2)
         self.current_turn_id = host_id  # host goes first
+        self.turn_sequence = 0  # incremented when turn ends; prevents old turn views from forfeiting new player
         self.winner_id = None
 
     def get_ships(self, is_host: bool):
@@ -3876,7 +3892,7 @@ async def end_gathership_game(channel, game_id: str, winner_id: int, loser_id: i
         description=f"**{winner_name}** sank all of **{loser_name}**'s ships and wins **${total_pot:.2f}**!",
         color=discord.Color.gold()
     )
-    embed.add_field(name="💰 Winner takes", value=f"${total_pot:.2f}", inline=True)
+    # embed.add_field(name="💰 Winner takes", value=f"${total_pot:.2f}", inline=True)
     await channel.send(embed=embed)
 
 
@@ -3938,7 +3954,7 @@ class GathershipLobbyView(discord.ui.View):
             await safe_interaction_response(interaction, interaction.response.edit_message, content="⚓ **Place your ships!**", view=GathershipOpenSetupView(self.game_id, timeout=300))
             channel = bot.get_channel(game.channel_id)
             if channel:
-                await channel.send("⚓ **Ship placement** — Click the button above to open your **ephemeral** grid and place your ships!")
+                await channel.send("⚓ **Ship Placement** — Click the button above to open your grid and place your ships!")
         except Exception as e:
             print(f"Gathership start_game: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
@@ -4098,7 +4114,7 @@ class GathershipSetupView(discord.ui.View):
                 channel = bot.get_channel(game.channel_id)
                 if channel:
                     game.phase = "battle"
-                    await channel.send("🔥 **All ships placed! Battle starting.**")
+                    await channel.send("🔥 **All ships placed! GATHERSHIP STARTS!**")
                     await _gathership_send_turn_message(channel, self.game_id)
         except Exception as e:
             print(f"Gathership place_ship: {e}")
@@ -4109,16 +4125,16 @@ async def _gathership_send_turn_message(channel, game_id: str):
     if game_id not in active_gathership_games:
         return
     game = active_gathership_games[game_id]
-    current_id = game.current_turn_id
     current_name = game.get_current_turn_name()
-    view = GathershipTurnView(game_id, timeout=120)
-    await channel.send(f"🎯 **{current_name}**'s turn! Click **Take your shot** below (2 min).", view=view)
+    view = GathershipTurnView(game_id, game.turn_sequence, timeout=120)
+    await channel.send(f"🎯 **{current_name}**'s turn! Click **Take Shot** below (2 min).", view=view)
 
 
 class GathershipTurnView(discord.ui.View):
-    def __init__(self, game_id: str, timeout=120):
+    def __init__(self, game_id: str, turn_sequence: int, timeout=120):
         super().__init__(timeout=timeout)
         self.game_id = game_id
+        self.turn_sequence = turn_sequence  # only forfeit if game still on this turn (prevents old views from forfeiting new player)
 
     @discord.ui.button(label="Take Shot", style=discord.ButtonStyle.danger, emoji="🔥")
     async def take_shot(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -4137,9 +4153,9 @@ class GathershipTurnView(discord.ui.View):
             cursor = game.fire_cursor
             grid = _gathership_grid_display(enemy_ships, cursor, show_ships=False, shot_at=shot_at)
             embed = discord.Embed(
-                title="🔥 Fire at enemy fleet (ephemeral)",
+                title="🔥 Fire at Enemy Fleet (ephemeral)",
                 description=f"Move cursor then press **Fire!**\n\n{grid}",
-                color=discord.Color.dark_red()
+                 color=discord.Color.dark_red()
             )
             view = GathershipFireView(self.game_id, timeout=120)
             await safe_interaction_response(interaction, interaction.response.send_message, embed=embed, view=view, ephemeral=True)
@@ -4151,10 +4167,12 @@ class GathershipTurnView(discord.ui.View):
         if self.game_id not in active_gathership_games:
             return
         game = active_gathership_games[self.game_id]
+        # Only forfeit if this view is for the CURRENT turn; otherwise the turn already ended (old view timing out)
+        if game.turn_sequence != self.turn_sequence:
+            return
         channel = bot.get_channel(game.channel_id)
         if not channel:
             return
-        # Current player forfeits (loses)
         loser_id = game.current_turn_id
         winner_id = game.host_id if loser_id == game.opponent_id else game.opponent_id
         await channel.send(f"⏰ **{game.get_current_turn_name()}** ran out of time and forfeits!")
@@ -4246,6 +4264,7 @@ class GathershipFireView(discord.ui.View):
                 await end_gathership_game(channel, self.game_id, winner_id, loser_id)
                 return
             game.current_turn_id = game.opponent_id if game.current_turn_id == game.host_id else game.host_id
+            game.turn_sequence += 1  # so old turn view's on_timeout won't forfeit the new player
             await _gathership_send_turn_message(channel, self.game_id)
         except Exception as e:
             print(f"Gathership fire: {e}")
@@ -4629,7 +4648,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.8.0 :3"
+            name="running /gather on V0.8.1 :3"
         )
     )
     try:
@@ -5674,12 +5693,25 @@ async def harvest(interaction: discord.Interaction):
         # --- build embed (pure computation, no DB) ---
         embed = discord.Embed(title="You Harvested!", color=discord.Color.green())
 
-        # All plants in one field (~35–50 chars per line; 20–30 items stay under Discord’s 1024 limit)
-        items_text = ""
+        # (obsolete) (~35–50 chars per line; 20–30 items stay under Discord’s 1024 limit)
+        # One line per item: emoji (ripeness) GMO? — no plant name text to stay under 1024
+        lines = []
         for item in gathered_items:
-            gmo_text = " GMO! ✨" if item["is_gmo"] else ""
-            items_text += f"• **{item['name']}** - ${item['base_value']:.2f} ({item['ripeness']}){gmo_text}\n"
-        embed.add_field(name="📦 Items Gathered", value=items_text.strip() or "No items", inline=False)
+            emoji = get_item_display_emoji(item["name"])
+            gmo = " GMO! ✨" if item["is_gmo"] else ""
+            lines.append(f"{emoji} ({item['ripeness']}){gmo}")
+        items_display = "\n".join(lines)
+        if len(items_display) > 1024:
+            max_content = 1024 - 20  # reserve space for " … and 99999 more"
+            n, current_len = 0, 0
+            for i, line in enumerate(lines):
+                need = len(line) + (1 if n else 0)  # +1 for newline
+                if current_len + need > max_content:
+                    break
+                current_len += need
+                n += 1
+            items_display = "\n".join(lines[:n]) + f" … and {len(lines) - n} more"
+        embed.add_field(name="📦 Items Gathered", value=items_display or "No items", inline=False)
         embed.add_field(name="💰 Total Value", value=f"**${total_value:.2f}**", inline=True)
         embed.add_field(name="💵 New Balance", value=f"**${current_balance:.2f}**", inline=True)
 
@@ -9096,11 +9128,11 @@ STOCK_TICKERS = [
     {"name": "IVM", "symbol": "IVM", "base_price": 100.0, "max_shares": 15000, "emoji": "<:IVM:1466497224379731968>"},
     {"name": "CisGrow", "symbol": "CSGO", "base_price": 60.0, "max_shares": 12000, "emoji": "<:CG:1472431245433508082>"},
     {"name": "Sowny", "symbol": "SWNY", "base_price": 90.0, "max_shares": 11000, "emoji": "<:SWNY:1472431904493142147>"},
-    {"name": "General Mowers", "symbol": "GM", "base_price": 45.0, "max_shares": 20000, "emoji": "<:GM:1472431754202583091>"},
-    {"name": "Raytheorn", "symbol": "RTH", "base_price": 125.0, "max_shares": 16000, "emoji": "<:RTH:1472431811887104081>"},
-    {"name": "Wells Fargrow", "symbol": "WFG", "base_price": 70.0, "max_shares": 18000, "emoji": "<:WFG:1472432146915524638>"},
+    {"name": "General Mowers", "symbol": "GM", "base_price": 45.0, "max_shares": 20000, "emoji": "<:GM:1473422888035160321>"},
+    {"name": "Raytheorn", "symbol": "RTH", "base_price": 125.0, "max_shares": 16000, "emoji": "<:RTH:1473426824074891326>"},
+    {"name": "Wells Fargrow", "symbol": "WFG", "base_price": 70.0, "max_shares": 18000, "emoji": "<:WFG:1473412133797498900>"},
     {"name": "Apple", "symbol": "AAPL", "base_price": 150.0, "max_shares": 17000, "emoji": "<:AAPL:1466507980164956283>"},
-    {"name": "Sproutify", "symbol": "SPRT", "base_price": 55.0, "max_shares": 16000, "emoji": "<:SPRT:1472432046356828252>"},
+    {"name": "Sproutify", "symbol": "SPRT", "base_price": 55.0, "max_shares": 16000, "emoji": "<:SPRT:1473422604172792024>"},
 ]
 
 # Stock data storage: {guild_id: {ticker_symbol: {"price": float, "price_history": [float], "available_shares": int, "real_price": float, "shares_outstanding": int, "market_cap": float, "news_multiplier": float, "last_api_fetch": float}}}
@@ -10005,13 +10037,13 @@ async def gardener_background_task():
                                                     color=discord.Color.gold()
                                                 )
                                                 
-                                                # Display actual items (up to 20)
-                                                items_text = ""
+                                                lines = []
                                                 for item in harvest_result["gathered_items"][:20]:
-                                                    gmo_text = " GMO! ✨" if item["is_gmo"] else ""
-                                                    items_text += f"• **{item['name']}** - ${item['base_value']:.2f} ({item['ripeness']}){gmo_text}\n"
-                                                
-                                                embed.add_field(name="📦 Items Harvested", value=items_text or "No items", inline=False)
+                                                    emoji = get_item_display_emoji(item["name"])
+                                                    gmo = " GMO! ✨" if item["is_gmo"] else ""
+                                                    lines.append(f"{emoji} ({item['ripeness']}){gmo}")
+                                                items_display = "\n".join(lines) or "No items"
+                                                embed.add_field(name="📦 Items Harvested", value=items_display, inline=False)
                                                 embed.add_field(name="💰 Total Value", value=f"**${total_value:,.2f}**", inline=True)
                                                 embed.add_field(name="💵 New Balance", value=f"**${current_balance:,.2f}**", inline=True)
                                                 await lawn_channel.send(embed=embed)
@@ -10097,11 +10129,13 @@ async def secret_gardener_background_task():
                                                 description=f"{member.mention}, the Secret Gardener sparked!",
                                                 color=discord.Color.purple()
                                             )
-                                            items_text = ""
+                                            lines = []
                                             for item in harvest_result["gathered_items"][:20]:
-                                                gmo_text = " GMO! \u2728" if item["is_gmo"] else ""
-                                                items_text += f"\u2022 **{item['name']}** \u2013 ${item['base_value']:,.2f} ({item['ripeness']}){gmo_text}\n"
-                                            embed.add_field(name="\U0001f4e6 Items Harvested", value=items_text or "No items", inline=False)
+                                                emoji = get_item_display_emoji(item["name"])
+                                                gmo = " GMO! ✨" if item["is_gmo"] else ""
+                                                lines.append(f"{emoji} ({item['ripeness']}){gmo}")
+                                            items_display = "\n".join(lines) or "No items"
+                                            embed.add_field(name="\U0001f4e6 Items Harvested", value=items_display, inline=False)
                                             embed.add_field(name="\U0001f4b0 Total Value", value=f"**${total_value:,.2f}**", inline=True)
                                             embed.add_field(name="\U0001f4b5 New Balance", value=f"**${harvest_result['current_balance']:,.2f}**", inline=True)
                                             await lawn_channel.send(embed=embed)
@@ -11519,18 +11553,14 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
                     shares_outstanding = api_shares
             
             user_owned_shares = current_shares + amount
+            ceo_unlocked = False
             if shares_outstanding > 0 and (user_owned_shares / shares_outstanding) > 0.5:
-                if unlock_hidden_achievement(user_id, "ceo"):
-                    achievement_msg = f"\n\n🎉 **Hidden Achievement Unlocked: CEO!** 🎉"
-                else:
-                    achievement_msg = ""
-            else:
-                achievement_msg = ""
+                ceo_unlocked = unlock_hidden_achievement(user_id, "ceo")
             
             # Create success embed
             embed = discord.Embed(
                 title="✅ Purchase Successful!",
-                description=f"You bought **{amount:,} share(s)** of **{ticker_info['name']} ({ticker})** at **${current_price:.2f}** each.{achievement_msg}",
+                description=f"You bought **{amount:,} share(s)** of **{ticker_info['name']} ({ticker})** at **${current_price:.2f}** each.",
                 color=discord.Color.green()
             )
             embed.add_field(name="Cost", value=f"**${total_cost:.2f}**", inline=True)
@@ -11580,6 +11610,13 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
         
         embed.set_footer(text=f"Use /portfolio to view all your holdings")
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+        
+        # Send CEO achievement embed (ephemeral = hidden to user only); fallback to DM if needed
+        if action == "buy" and ceo_unlocked:
+            try:
+                await send_hidden_achievement_notification(interaction, "ceo")
+            except Exception:
+                await send_hidden_achievement_notification_dm(user_id, "ceo")
     except Exception as e:
         print(f"Error in stocks command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
