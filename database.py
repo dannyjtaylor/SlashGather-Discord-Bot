@@ -156,7 +156,10 @@ def _ensure_user_document(user_id: int) -> None:
             "marsh": False,
             "bog": False,
             "mire": False
-        }
+        },
+        "shop_inventory": {},
+        "daily_shop_purchases_count": 0,
+        "daily_shop_last_date_est": ""
     }
     users.update_one(
         {"_id": int(user_id)},
@@ -914,6 +917,95 @@ def get_bloom_multiplier(user_id: int) -> float:
     return 1.0 + (tree_rings * 0.005)
 
 
+# ---------------------------------------------------------------------------
+# Daily shop (Tree Rings currency)
+# ---------------------------------------------------------------------------
+
+def get_user_shop_inventory(user_id: int) -> Dict[str, int]:
+    """Get user's shop item counts (item_id -> count)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"shop_inventory": 1})
+    if not doc:
+        return {}
+    return dict(doc.get("shop_inventory", {}))
+
+
+def has_shop_item(user_id: int, item_id: str) -> bool:
+    """Return True if user owns at least one of the given shop item."""
+    inv = get_user_shop_inventory(user_id)
+    return inv.get(item_id, 0) >= 1
+
+
+def get_user_daily_shop_purchases(user_id: int) -> tuple:
+    """Return (purchases_count_today: int, last_date_est: str). Count resets when date changes."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one(
+        {"_id": int(user_id)},
+        {"daily_shop_purchases_count": 1, "daily_shop_last_date_est": 1}
+    )
+    if not doc:
+        return 0, ""
+    return (
+        int(doc.get("daily_shop_purchases_count", 0)),
+        str(doc.get("daily_shop_last_date_est", ""))
+    )
+
+
+def purchase_daily_shop_item(user_id: int, item_id: str, cost: int, date_est: str) -> bool:
+    """
+    Deduct cost tree rings, add item to shop_inventory, increment daily purchases, set date.
+    Caller must ensure user has enough tree rings and has not exceeded 3 purchases today.
+    Returns True on success.
+    """
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    # Atomic: deduct tree_rings and update inventory + daily stats
+    doc = users.find_one({"_id": int(user_id)}, {"tree_rings": 1, "shop_inventory": 1, "daily_shop_purchases_count": 1, "daily_shop_last_date_est": 1})
+    if not doc:
+        return False
+    tree_rings = int(doc.get("tree_rings", 0))
+    if tree_rings < cost:
+        return False
+    inv = dict(doc.get("shop_inventory", {}))
+    inv[item_id] = inv.get(item_id, 0) + 1
+    purchase_count = int(doc.get("daily_shop_purchases_count", 0))
+    last_date = str(doc.get("daily_shop_last_date_est", ""))
+    if last_date != date_est:
+        purchase_count = 0
+    purchase_count += 1
+    users.update_one(
+        {"_id": int(user_id)},
+        {
+            "$inc": {"tree_rings": -cost},
+            "$set": {
+                "shop_inventory": inv,
+                "daily_shop_purchases_count": purchase_count,
+                "daily_shop_last_date_est": date_est,
+            }
+        }
+    )
+    return True
+
+
+def get_roulette_elimination_cooldown_seconds(user_id: int) -> int:
+    """Return cooldown in seconds (300 if Gambler's Revolver, else 1800)."""
+    if has_shop_item(user_id, "gamblers_revolver"):
+        return 300  # 5 minutes
+    return 60 * 30  # 30 minutes
+
+
+def get_user_ids_with_shop_item(item_id: str) -> list:
+    """Return list of user _ids that have at least one of the given shop item."""
+    users = _get_users_collection()
+    cursor = users.find(
+        {f"shop_inventory.{item_id}": {"$gte": 1}},
+        {"_id": 1}
+    )
+    return [doc["_id"] for doc in cursor]
+
+
 def get_bloom_rank(user_id: int) -> str:
     """Get user's current Bloom Rank based on bloom_count."""
     users = _get_users_collection()
@@ -1375,8 +1467,23 @@ def wipe_user_all(user_id: int) -> None:
                 "marsh": False,
                 "bog": False,
                 "mire": False
-            }
+            },
+            # Reset daily shop
+            "shop_inventory": {},
+            "daily_shop_purchases_count": 0,
+            "daily_shop_last_date_est": ""
         }},
+        upsert=True,
+    )
+
+
+def add_shop_item_to_user(user_id: int, item_id: str, amount: int = 1) -> None:
+    """Add a daily shop item to a user's inventory (e.g. for admin giveaway). Does not deduct tree rings."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$inc": {f"shop_inventory.{item_id}": int(amount)}},
         upsert=True,
     )
 
@@ -1937,6 +2044,7 @@ def get_user_gather_full_data(user_id: int) -> Dict:
             "harvest_upgrades": 1,
             "unlocked_areas": 1,
             "gather_command_count": 1,
+            "shop_inventory": 1,
         },
     )
 
@@ -1959,6 +2067,7 @@ def get_user_gather_full_data(user_id: int) -> Dict:
             "harvest_upgrades": {"car": 0, "chain": 0, "fertilizer": 0, "cooldown": 0},
             "unlocked_areas": {},
             "gather_command_count": 0,
+            "shop_inventory": {},
         }
 
     upgrades = doc.get("basket_upgrades", {})
@@ -1994,6 +2103,7 @@ def get_user_gather_full_data(user_id: int) -> Dict:
         },
         "unlocked_areas": dict(doc.get("unlocked_areas", {})),
         "gather_command_count": int(doc.get("gather_command_count", 0)),
+        "shop_inventory": dict(doc.get("shop_inventory", {})),
     }
 
 
@@ -2023,6 +2133,7 @@ def get_user_harvest_full_data(user_id: int) -> Dict:
             "total_forage_count": 1,
             "unlocked_areas": 1,
             "harvest_command_count": 1,
+            "shop_inventory": 1,
         },
     )
 
@@ -2045,6 +2156,7 @@ def get_user_harvest_full_data(user_id: int) -> Dict:
             "total_forage_count": 0,
             "unlocked_areas": {},
             "harvest_command_count": 0,
+            "shop_inventory": {},
         }
 
     basket_ups = doc.get("basket_upgrades", {})
@@ -2080,6 +2192,7 @@ def get_user_harvest_full_data(user_id: int) -> Dict:
         "total_forage_count": int(doc.get("total_forage_count", 0)),
         "unlocked_areas": dict(doc.get("unlocked_areas", {})),
         "harvest_command_count": int(doc.get("harvest_command_count", 0)),
+        "shop_inventory": dict(doc.get("shop_inventory", {})),
     }
 
 

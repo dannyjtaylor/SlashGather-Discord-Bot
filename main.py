@@ -167,6 +167,13 @@ from database import (
     get_user_gather_full_data,
     get_user_harvest_full_data,
     perform_harvest_batch_update,
+    get_user_shop_inventory,
+    has_shop_item,
+    get_user_daily_shop_purchases,
+    purchase_daily_shop_item,
+    get_roulette_elimination_cooldown_seconds,
+    get_user_ids_with_shop_item,
+    add_shop_item_to_user,
 )
 
 try:
@@ -501,15 +508,15 @@ SHOES_UPGRADES = [
 
 GLOVES_UPGRADES = [
     {"name": "Paper Gloves", "chain_chance": 0.01},
-    {"name": "Oven Mitts", "chain_chance": 0.05},
-    {"name": "Latex Gloves", "chain_chance": 0.08},
-    {"name": "Surgical Gloves", "chain_chance": 0.10},
-    {"name": "Green Thumb Gloves", "chain_chance": 0.15},
-    {"name": "Astral Gloves", "chain_chance": 0.20},
-    {"name": "Spectral Gloves", "chain_chance": 0.25},
-    {"name": "Luminite Mitts", "chain_chance": 0.30},
-    {"name": "Plutonium Hands", "chain_chance": 0.35},
-    {"name": "Galaxial Gloves", "chain_chance": 0.40},
+    {"name": "Oven Mitts", "chain_chance": 0.02},
+    {"name": "Latex Gloves", "chain_chance": 0.04},
+    {"name": "Surgical Gloves", "chain_chance": 0.065},
+    {"name": "Green Thumb Gloves", "chain_chance": 0.10},
+    {"name": "Astral Gloves", "chain_chance": 0.14},
+    {"name": "Spectral Gloves", "chain_chance": 0.1875},
+    {"name": "Luminite Mitts", "chain_chance": 0.24},
+    {"name": "Plutonium Hands", "chain_chance": 0.30},
+    {"name": "Galaxial Gloves", "chain_chance": 0.35},
 ]
 
 SOIL_UPGRADES = [
@@ -550,9 +557,9 @@ HARVEST_CHAIN_UPGRADES = [
     {"name": "Bountiful Season", "chain_chance": 0.05},
     {"name": "Floraltastic Season", "chain_chance": 0.075},
     {"name": "Astralicious Season", "chain_chance": 0.10},
-    {"name": "Spectral Season", "chain_chance": 0.15},
-    {"name": "Galaxial Season", "chain_chance": 0.25},
-    {"name": "Universal Season", "chain_chance": 0.40},
+    {"name": "Spectral Season", "chain_chance": 0.14},
+    {"name": "Galaxial Season", "chain_chance": 0.20},
+    {"name": "Universal Season", "chain_chance": 0.30},
 ]
 
 HARVEST_CHAIN_PRICES = [1000, 5000, 15000, 50000, 100000, 200000, 1000000, 5000000, 10000000, 20000000]
@@ -839,14 +846,22 @@ TRACTOR_ENCHANTMENTS = {
 }
 
 
-def roll_attunement(tool_type: str) -> dict:
+def roll_attunement(tool_type: str, user_id: int = None) -> dict:
     """Roll a random attunement for the given tool type ('hoe' or 'tractor').
+    If user_id is provided and has Commoner's Respite, COMMON rarity is excluded.
     Returns a copy of the attunement dict."""
     enchant_pool = HOE_ENCHANTMENTS if tool_type == "hoe" else TRACTOR_ENCHANTMENTS
 
     # Pick rarity using weighted random
     rarity_names = [r["name"] for r in ENCHANTMENT_RARITIES]
     rarity_weights = [r["weight"] for r in ENCHANTMENT_RARITIES]
+    if user_id and has_shop_item(user_id, "commoners_respite"):
+        # Exclude COMMON: set its weight to 0 and renormalize
+        rarity_weights = [0.0 if name == "COMMON" else w for name, w in zip(rarity_names, rarity_weights)]
+        total = sum(rarity_weights)
+        if total <= 0:
+            total = 1.0
+        rarity_weights = [w / total for w in rarity_weights]
     chosen_rarity = random.choices(rarity_names, weights=rarity_weights, k=1)[0]
 
     # Pick random enchant from that rarity
@@ -918,7 +933,8 @@ def check_roulette_elimination_cooldown(user_id):
     roulette_elimination_time = get_user_last_roulette_elimination_time(user_id)
     if roulette_elimination_time > 0:
         current_time = time.time()
-        cooldown_end = roulette_elimination_time + ROULETTE_ELIMINATION_COOLDOWN
+        cooldown_sec = get_roulette_elimination_cooldown_seconds(user_id)
+        cooldown_end = roulette_elimination_time + cooldown_sec
         if current_time < cooldown_end:
             time_left = int(cooldown_end - current_time)
             return True, time_left
@@ -936,7 +952,8 @@ def can_harvest(user_id, full_data=None):
 
     current_time = time.time()
     if roulette_time > 0:
-        cooldown_end = roulette_time + ROULETTE_ELIMINATION_COOLDOWN
+        cooldown_sec = get_roulette_elimination_cooldown_seconds(user_id)
+        cooldown_end = roulette_time + cooldown_sec
         if current_time < cooldown_end:
             return False, int(cooldown_end - current_time), True
 
@@ -966,7 +983,7 @@ def can_harvest(user_id, full_data=None):
     if hourly_event:
         event_id = hourly_event.get("effects", {}).get("event_id", "")
         if event_id == "speed_harvest":
-            cooldown_reduction += 180
+            cooldown_reduction += 120  # 2 minutes
     
     if daily_event:
         event_id = daily_event.get("effects", {}).get("event_id", "")
@@ -1191,6 +1208,9 @@ GATHERING_AREAS = {
 }
 
 VALID_GATHERING_CHANNELS = set(GATHERING_AREAS.keys())
+
+# Channel name for auto-logging rare occurrences (e.g. One in a Million, Mikellion, netherite+ imbues)
+RARES_CHANNEL_NAME = "rares"
 
 # Planter rank name -> numeric level mapping for area requirement checks
 PLANTER_RANK_ORDER = {
@@ -2158,7 +2178,8 @@ def can_gather(user_id, user_data=None, active_events=None, full_data=None):
 
     if roulette_time > 0:
         current_time = time.time()
-        cooldown_end = roulette_time + ROULETTE_ELIMINATION_COOLDOWN
+        cooldown_sec = get_roulette_elimination_cooldown_seconds(user_id)
+        cooldown_end = roulette_time + cooldown_sec
         if current_time < cooldown_end:
             return False, int(cooldown_end - current_time), True
     
@@ -2191,7 +2212,7 @@ def can_gather(user_id, user_data=None, active_events=None, full_data=None):
     if hourly_event:
         event_id = hourly_event.get("effects", {}).get("event_id", "")
         if event_id == "speed_harvest":
-            cooldown_reduction += 15
+            cooldown_reduction += 8
     
     if daily_event:
         event_id = daily_event.get("effects", {}).get("event_id", "")
@@ -2355,6 +2376,10 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     base_gmo_chance = 0.05
     soil_gmo_boost = SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] if soil_tier > 0 else 0
     gmo_chance = base_gmo_chance + soil_gmo_boost
+    if full_data and full_data.get("shop_inventory", {}).get("mutagenic_serum", 0) >= 1:
+        gmo_chance += 0.07
+    elif not full_data and has_shop_item(user_id, "mutagenic_serum"):
+        gmo_chance += 0.07
     
     # Apply event GMO chance modifications
     if hourly_event:
@@ -2470,6 +2495,19 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     # Apply critical gather (2x all money) after all boosts
     if is_critical_gather:
         final_value *= 2  # 2x all money on critical
+
+    # Daily shop: Scarecrow (+10% gather money)
+    if full_data is not None and full_data.get("shop_inventory", {}).get("scarecrow", 0) >= 1:
+        final_value *= 1.10
+    elif full_data is None and has_shop_item(user_id, "scarecrow"):
+        final_value *= 1.10
+
+    # Daily shop: Bloomstone (flowers 3x)
+    if item.get("category") == "Flower":
+        if full_data is not None and full_data.get("shop_inventory", {}).get("bloomstone", 0) >= 1:
+            final_value *= 3.0
+        elif full_data is None and has_shop_item(user_id, "bloomstone"):
+            final_value *= 3.0
 
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
@@ -2656,8 +2694,8 @@ LEVEL_OF_RIPENESS_FRUITS = [
     {"name": "Perfectly Ripe", "multiplier": 2.5, "chance": 20},
     {"name": "Overripe", "multiplier": 1.6, "chance": 10},  
     {"name": "Spoiled", "multiplier": 0.9, "chance": 4.99999},
-    {"name": "One in a Million", "multiplier": 50, "chance": 1},
-    {"name": "Mikellion", "multiplier": 200, "chance": 0.000111},
+    {"name": "One in a Million", "multiplier": 50, "chance": 20},
+    {"name": "Mikellion", "multiplier": 200, "chance": 50},
 ]
 
 #level of ripeness - VEGETABLES
@@ -3690,6 +3728,529 @@ async def end_roulette_game(channel, game_id):
             break
 
 
+# --- GATHERSHIP (PVP Battleship-style game) ---
+GATHERSHIP_GRID_SIZE = 5
+SEA_EMOJI = "🌊"
+SHIP_EMOJI = "🚢"
+HIT_EMOJI = "🔥"
+MISS_EMOJI = "❌"
+CURSOR_EMOJI = "📍"
+
+active_gathership_games = {}
+user_active_gathership = {}  # user_id -> game_id
+channel_gathership = {}  # channel_id -> game_id
+
+
+class GathershipGame:
+    def __init__(self, game_id: str, host_id: int, host_name: str, opponent_id: int, opponent_name: str, bet: float, num_ships: int, channel_id: int):
+        self.game_id = game_id
+        self.host_id = host_id
+        self.host_name = host_name
+        self.opponent_id = opponent_id
+        self.opponent_name = opponent_name
+        self.bet = bet
+        self.num_ships = num_ships
+        self.channel_id = channel_id
+        self.phase = "lobby"  # lobby | setup | battle | ended
+        self.host_ships = set()  # (r, c)
+        self.opponent_ships = set()
+        self.host_shot_at = set()  # (r, c) that opponent has fired at on host's board
+        self.opponent_shot_at = set()  # (r, c) that host has fired at on opponent's board
+        self.host_cursor = (2, 2)
+        self.opponent_cursor = (2, 2)
+        self.fire_cursor = (2, 2)
+        self.current_turn_id = host_id  # host goes first
+        self.winner_id = None
+
+    def get_ships(self, is_host: bool):
+        return self.host_ships if is_host else self.opponent_ships
+
+    def get_shot_at(self, is_host: bool):
+        """Cells that have been fired at on this player's board (by the enemy)."""
+        return self.host_shot_at if is_host else self.opponent_shot_at
+
+    def get_cursor(self, is_host: bool):
+        return self.host_cursor if is_host else self.opponent_cursor
+
+    def set_cursor(self, is_host: bool, r: int, c: int):
+        r = max(0, min(GATHERSHIP_GRID_SIZE - 1, r))
+        c = max(0, min(GATHERSHIP_GRID_SIZE - 1, c))
+        if is_host:
+            self.host_cursor = (r, c)
+        else:
+            self.opponent_cursor = (r, c)
+
+    def add_ship(self, is_host: bool, r: int, c: int) -> bool:
+        ships = self.get_ships(is_host)
+        if (r, c) in ships or len(ships) >= self.num_ships:
+            return False
+        ships.add((r, c))
+        return True
+
+    def is_setup_done(self, is_host: bool) -> bool:
+        return len(self.get_ships(is_host)) >= self.num_ships
+
+    def record_shot(self, at_host_board: bool, r: int, c: int) -> bool:
+        """Record a shot. at_host_board=True means opponent fired at host. Returns True if hit a ship."""
+        if at_host_board:
+            self.host_shot_at.add((r, c))
+            return (r, c) in self.host_ships
+        else:
+            self.opponent_shot_at.add((r, c))
+            return (r, c) in self.opponent_ships
+
+    def all_ships_sunk(self, is_host: bool) -> bool:
+        ships = self.get_ships(is_host)
+        shot_at = self.get_shot_at(is_host)
+        return len(ships) > 0 and ships.issubset(shot_at)
+
+    def get_current_turn_name(self) -> str:
+        return self.host_name if self.current_turn_id == self.host_id else self.opponent_name
+
+
+def _gathership_grid_display(ships: set, cursor: tuple, show_ships: bool, shot_at: set = None) -> str:
+    """Build 5x5 grid string. show_ships=True for own board (setup), False for enemy (hit/miss only). shot_at = set of (r,c) fired at."""
+    lines = []
+    for r in range(GATHERSHIP_GRID_SIZE):
+        row = []
+        for c in range(GATHERSHIP_GRID_SIZE):
+            pos = (r, c)
+            if pos == cursor:
+                row.append(CURSOR_EMOJI)
+            elif show_ships:
+                row.append(SHIP_EMOJI if pos in ships else SEA_EMOJI)
+            else:
+                if shot_at and pos in shot_at:
+                    row.append(HIT_EMOJI if pos in ships else MISS_EMOJI)
+                else:
+                    row.append(SEA_EMOJI)
+        lines.append("".join(row))
+    return "\n".join(lines)
+
+
+async def _gathership_refund_and_cleanup(game_id: str, channel=None):
+    if game_id not in active_gathership_games:
+        return
+    game = active_gathership_games[game_id]
+    bet = normalize_money(game.bet)
+    for uid in (game.host_id, game.opponent_id):
+        try:
+            bal = get_user_balance(uid)
+            new_bal = normalize_money(bal + bet)
+            update_user_balance(uid, new_bal)
+        except Exception as e:
+            print(f"Gathership refund error for {uid}: {e}")
+        if uid in user_active_gathership:
+            del user_active_gathership[uid]
+    for ch_id, gid in list(channel_gathership.items()):
+        if gid == game_id:
+            del channel_gathership[ch_id]
+            break
+    del active_gathership_games[game_id]
+    if channel:
+        try:
+            await channel.send("❌ Gathership game cancelled. Bets have been refunded.")
+        except Exception:
+            pass
+
+
+async def end_gathership_game(channel, game_id: str, winner_id: int, loser_id: int):
+    if game_id not in active_gathership_games:
+        return
+    game = active_gathership_games[game_id]
+    total_pot = normalize_money(game.bet * 2)
+    winner_name = game.host_name if winner_id == game.host_id else game.opponent_name
+    loser_name = game.opponent_name if winner_id == game.host_id else game.host_name
+    current = get_user_balance(winner_id)
+    update_user_balance(winner_id, normalize_money(current + total_pot))
+    for uid in (game.host_id, game.opponent_id):
+        if uid in user_active_gathership:
+            del user_active_gathership[uid]
+    for ch_id, gid in list(channel_gathership.items()):
+        if gid == game_id:
+            del channel_gathership[ch_id]
+            break
+    del active_gathership_games[game_id]
+    embed = discord.Embed(
+        title="🏆 GATHERSHIP — GAME OVER 🏆",
+        description=f"**{winner_name}** sank all of **{loser_name}**'s ships and wins **${total_pot:.2f}**!",
+        color=discord.Color.gold()
+    )
+    embed.add_field(name="💰 Winner takes", value=f"${total_pot:.2f}", inline=True)
+    await channel.send(embed=embed)
+
+
+class GathershipLobbyView(discord.ui.View):
+    def __init__(self, game_id: str, host_id: int, opponent_id: int, timeout=300):
+        super().__init__(timeout=timeout)
+        self.game_id = game_id
+        self.host_id = host_id
+        self.opponent_id = opponent_id
+
+    @discord.ui.button(label="Join Game", style=discord.ButtonStyle.green, emoji="🚢")
+    async def join_game(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if self.game_id not in active_gathership_games:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
+                return
+            game = active_gathership_games[self.game_id]
+            if interaction.user.id != self.opponent_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ This challenge is not for you!", ephemeral=True)
+                return
+            if game.phase != "lobby":
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game already started!", ephemeral=True)
+                return
+            if interaction.user.id in user_active_gathership:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You're already in a Gathership game!", ephemeral=True)
+                return
+            bal = get_user_balance(interaction.user.id)
+            if not can_afford_rounded(normalize_money(bal), game.bet):
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You don't have enough balance to join!", ephemeral=True)
+                return
+            new_bal = normalize_money(bal - game.bet)
+            update_user_balance(interaction.user.id, new_bal)
+            user_active_gathership[interaction.user.id] = self.game_id
+            embed = interaction.message.embeds[0]
+            embed.description = f"**{game.host_name}** is challenging **{game.opponent_name}** to **GATHERSHIP**!\n\n✅ **{game.opponent_name}** has joined! Host can start the game."
+            embed.set_field_at(0, name="💰 Bet", value=f"${game.bet:.2f}", inline=True)
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+        except Exception as e:
+            print(f"Gathership join_game: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
+
+    @discord.ui.button(label="Start Game", style=discord.ButtonStyle.blurple, emoji="🚀")
+    async def start_game(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if interaction.user.id != self.host_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Only the host can start!", ephemeral=True)
+                return
+            if self.game_id not in active_gathership_games:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
+                return
+            game = active_gathership_games[self.game_id]
+            if game.phase != "lobby":
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game already started!", ephemeral=True)
+                return
+            if self.opponent_id not in user_active_gathership or user_active_gathership.get(self.opponent_id) != self.game_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Wait for your opponent to join first!", ephemeral=True)
+                return
+            game.phase = "setup"
+            await safe_interaction_response(interaction, interaction.response.edit_message, content="⚓ **Place your ships!**", view=GathershipOpenSetupView(self.game_id, timeout=300))
+            channel = bot.get_channel(game.channel_id)
+            if channel:
+                await channel.send("⚓ **Ship placement** — Click the button above to open your **ephemeral** grid and place your ships!")
+        except Exception as e:
+            print(f"Gathership start_game: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red, emoji="❌")
+    async def cancel_game(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if interaction.user.id != self.host_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Only the host can cancel!", ephemeral=True)
+                return
+            if self.game_id not in active_gathership_games:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
+                return
+            game = active_gathership_games[self.game_id]
+            if game.phase != "lobby":
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Cannot cancel after game has started!", ephemeral=True)
+                return
+            channel = bot.get_channel(game.channel_id)
+            await _gathership_refund_and_cleanup(self.game_id, channel)
+            await safe_interaction_response(interaction, interaction.response.edit_message, content="❌ Gathership challenge cancelled. Bets refunded.", embed=None, view=None)
+        except Exception as e:
+            print(f"Gathership cancel: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
+
+    async def on_timeout(self):
+        if self.game_id not in active_gathership_games:
+            return
+        game = active_gathership_games[self.game_id]
+        if game.phase != "lobby":
+            return
+        channel = bot.get_channel(game.channel_id)
+        await _gathership_refund_and_cleanup(self.game_id, channel)
+        try:
+            msg = self.message
+            if msg:
+                await msg.edit(content="⏰ Gathership challenge timed out. Bets have been refunded.", embed=None, view=None)
+        except Exception:
+            pass
+
+
+class GathershipOpenSetupView(discord.ui.View):
+    """Single button: open your ephemeral ship placement."""
+    def __init__(self, game_id: str, timeout=300):
+        super().__init__(timeout=timeout)
+        self.game_id = game_id
+
+    @discord.ui.button(label="Place Ships", style=discord.ButtonStyle.green, emoji="🚢")
+    async def open_setup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if self.game_id not in active_gathership_games:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
+                return
+            game = active_gathership_games[self.game_id]
+            if game.phase != "setup":
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Setup phase is over!", ephemeral=True)
+                return
+            if interaction.user.id not in (game.host_id, game.opponent_id):
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You're not in this game!", ephemeral=True)
+                return
+            is_host = interaction.user.id == game.host_id
+            ships = game.get_ships(is_host)
+            cursor = game.get_cursor(is_host)
+            grid = _gathership_grid_display(ships, cursor, show_ships=True)
+            embed = discord.Embed(
+                title="⚓ Your fleet (ephemeral)",
+                description=f"Place **{game.num_ships}** ship(s). Use arrows to move, then **Place ship**.\n\n{grid}",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Ships placed", value=f"{len(ships)}/{game.num_ships}", inline=True)
+            view = GathershipSetupView(self.game_id, is_host, timeout=300)
+            await safe_interaction_response(interaction, interaction.response.send_message, embed=embed, view=view, ephemeral=True)
+        except Exception as e:
+            print(f"Gathership open_setup: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
+
+    async def on_timeout(self):
+        if self.game_id not in active_gathership_games:
+            return
+        game = active_gathership_games[self.game_id]
+        if game.phase != "setup":
+            return
+        channel = bot.get_channel(game.channel_id)
+        await _gathership_refund_and_cleanup(self.game_id, channel)
+        try:
+            if self.message:
+                await self.message.edit(content="⏰ Ship placement timed out. Bets refunded.", view=None)
+        except Exception:
+            pass
+
+
+class GathershipSetupView(discord.ui.View):
+    def __init__(self, game_id: str, is_host: bool, timeout=300):
+        super().__init__(timeout=timeout)
+        self.game_id = game_id
+        self.is_host = is_host
+
+    def _build_embed(self, game: GathershipGame) -> discord.Embed:
+        ships = game.get_ships(self.is_host)
+        cursor = game.get_cursor(self.is_host)
+        grid = _gathership_grid_display(ships, cursor, show_ships=True)
+        title = "⚓ Your fleet (ephemeral)"
+        desc = f"Place **{game.num_ships}** ship(s). Use arrows to move, then **Place ship**.\n\n{grid}"
+        embed = discord.Embed(title=title, description=desc, color=discord.Color.blue())
+        embed.add_field(name="Ships placed", value=f"{len(ships)}/{game.num_ships}", inline=True)
+        return embed
+
+    @discord.ui.button(label="⬅️ Left", style=discord.ButtonStyle.secondary, row=0)
+    async def left(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._move(interaction, 0, -1)
+
+    @discord.ui.button(label="➡️ Right", style=discord.ButtonStyle.secondary, row=0)
+    async def right(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._move(interaction, 0, 1)
+
+    @discord.ui.button(label="⬆️ Up", style=discord.ButtonStyle.secondary, row=1)
+    async def up(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._move(interaction, -1, 0)
+
+    @discord.ui.button(label="⬇️ Down", style=discord.ButtonStyle.secondary, row=1)
+    async def down(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._move(interaction, 1, 0)
+
+    async def _move(self, interaction: discord.Interaction, dr: int, dc: int):
+        try:
+            if self.game_id not in active_gathership_games:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
+                return
+            game = active_gathership_games[self.game_id]
+            if interaction.user.id != (game.host_id if self.is_host else game.opponent_id):
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your grid!", ephemeral=True)
+                return
+            r, c = game.get_cursor(self.is_host)
+            game.set_cursor(self.is_host, r + dr, c + dc)
+            embed = self._build_embed(game)
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+        except Exception as e:
+            print(f"Gathership setup move: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
+
+    @discord.ui.button(label="Place ship", style=discord.ButtonStyle.green, row=2)
+    async def place_ship(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if self.game_id not in active_gathership_games:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
+                return
+            game = active_gathership_games[self.game_id]
+            if interaction.user.id != (game.host_id if self.is_host else game.opponent_id):
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your grid!", ephemeral=True)
+                return
+            r, c = game.get_cursor(self.is_host)
+            if not game.add_ship(self.is_host, r, c):
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Can't place here or you've placed all ships!", ephemeral=True)
+                return
+            embed = self._build_embed(game)
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+            if game.is_setup_done(True) and game.is_setup_done(False):
+                channel = bot.get_channel(game.channel_id)
+                if channel:
+                    game.phase = "battle"
+                    await channel.send("🔥 **All ships placed! Battle starting.**")
+                    await _gathership_send_turn_message(channel, self.game_id)
+        except Exception as e:
+            print(f"Gathership place_ship: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
+
+
+async def _gathership_send_turn_message(channel, game_id: str):
+    if game_id not in active_gathership_games:
+        return
+    game = active_gathership_games[game_id]
+    current_id = game.current_turn_id
+    current_name = game.get_current_turn_name()
+    view = GathershipTurnView(game_id, timeout=120)
+    await channel.send(f"🎯 **{current_name}**'s turn! Click **Take your shot** below (2 min).", view=view)
+
+
+class GathershipTurnView(discord.ui.View):
+    def __init__(self, game_id: str, timeout=120):
+        super().__init__(timeout=timeout)
+        self.game_id = game_id
+
+    @discord.ui.button(label="Take Shot", style=discord.ButtonStyle.danger, emoji="🔥")
+    async def take_shot(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if self.game_id not in active_gathership_games:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
+                return
+            game = active_gathership_games[self.game_id]
+            if interaction.user.id != game.current_turn_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ It's not your turn!", ephemeral=True)
+                return
+            # Attacker views ENEMY board: so we show enemy's board with hit/miss (shot_at on enemy's board)
+            at_host_board = game.current_turn_id == game.opponent_id  # opponent fires at host's board
+            enemy_ships = game.host_ships if at_host_board else game.opponent_ships
+            shot_at = game.host_shot_at if at_host_board else game.opponent_shot_at
+            cursor = game.fire_cursor
+            grid = _gathership_grid_display(enemy_ships, cursor, show_ships=False, shot_at=shot_at)
+            embed = discord.Embed(
+                title="🔥 Fire at enemy fleet (ephemeral)",
+                description=f"Move cursor then press **Fire!**\n\n{grid}",
+                color=discord.Color.dark_red()
+            )
+            view = GathershipFireView(self.game_id, timeout=120)
+            await safe_interaction_response(interaction, interaction.response.send_message, embed=embed, view=view, ephemeral=True)
+        except Exception as e:
+            print(f"Gathership take_shot: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
+
+    async def on_timeout(self):
+        if self.game_id not in active_gathership_games:
+            return
+        game = active_gathership_games[self.game_id]
+        channel = bot.get_channel(game.channel_id)
+        if not channel:
+            return
+        # Current player forfeits (loses)
+        loser_id = game.current_turn_id
+        winner_id = game.host_id if loser_id == game.opponent_id else game.opponent_id
+        await channel.send(f"⏰ **{game.get_current_turn_name()}** ran out of time and forfeits!")
+        await end_gathership_game(channel, self.game_id, winner_id, loser_id)
+
+
+class GathershipFireView(discord.ui.View):
+    def __init__(self, game_id: str, timeout=120):
+        super().__init__(timeout=timeout)
+        self.game_id = game_id
+
+    def _build_embed(self, game: GathershipGame) -> discord.Embed:
+        at_host_board = game.current_turn_id == game.opponent_id
+        enemy_ships = game.host_ships if at_host_board else game.opponent_ships
+        shot_at = game.host_shot_at if at_host_board else game.opponent_shot_at
+        grid = _gathership_grid_display(enemy_ships, game.fire_cursor, show_ships=False, shot_at=shot_at)
+        return discord.Embed(
+            title="🔥 Fire at enemy fleet (ephemeral)",
+            description=f"Move cursor then press **Fire!**\n\n{grid}",
+            color=discord.Color.dark_red()
+        )
+
+    @discord.ui.button(label="⬅️", style=discord.ButtonStyle.secondary, row=0)
+    async def left(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._move(interaction, 0, -1)
+
+    @discord.ui.button(label="➡️", style=discord.ButtonStyle.secondary, row=0)
+    async def right(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._move(interaction, 0, 1)
+
+    @discord.ui.button(label="⬆️", style=discord.ButtonStyle.secondary, row=1)
+    async def up(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._move(interaction, -1, 0)
+
+    @discord.ui.button(label="⬇️", style=discord.ButtonStyle.secondary, row=1)
+    async def down(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._move(interaction, 1, 0)
+
+    async def _move(self, interaction: discord.Interaction, dr: int, dc: int):
+        try:
+            if self.game_id not in active_gathership_games:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
+                return
+            game = active_gathership_games[self.game_id]
+            if interaction.user.id != game.current_turn_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ It's not your turn!", ephemeral=True)
+                return
+            r, c = game.fire_cursor
+            game.fire_cursor = (max(0, min(GATHERSHIP_GRID_SIZE - 1, r + dr)), max(0, min(GATHERSHIP_GRID_SIZE - 1, c + dc)))
+            embed = self._build_embed(game)
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+        except Exception as e:
+            print(f"Gathership fire move: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
+
+    @discord.ui.button(label="Fire!", style=discord.ButtonStyle.danger, emoji="🔥", row=2)
+    async def fire(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if self.game_id not in active_gathership_games:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
+                return
+            game = active_gathership_games[self.game_id]
+            if interaction.user.id != game.current_turn_id:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ It's not your turn!", ephemeral=True)
+                return
+            r, c = game.fire_cursor
+            at_host_board = game.current_turn_id == game.opponent_id
+            if at_host_board and (r, c) in game.host_shot_at:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You already shot here!", ephemeral=True)
+                return
+            if not at_host_board and (r, c) in game.opponent_shot_at:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You already shot here!", ephemeral=True)
+                return
+            hit = game.record_shot(at_host_board, r, c)
+            channel = bot.get_channel(game.channel_id)
+            if not channel:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Channel not found.", ephemeral=True)
+                return
+            hit_text = "🔥 **Hit!**" if hit else "❌ **Miss!**"
+            await interaction.response.defer(ephemeral=True)
+            await channel.send(f"**{game.get_current_turn_name()}** fired at ({r+1},{c+1}). {hit_text}")
+            loser_id = None
+            if at_host_board and game.all_ships_sunk(True):
+                loser_id = game.host_id
+            elif not at_host_board and game.all_ships_sunk(False):
+                loser_id = game.opponent_id
+            if loser_id is not None:
+                winner_id = game.host_id if loser_id == game.opponent_id else game.opponent_id
+                await end_gathership_game(channel, self.game_id, winner_id, loser_id)
+                return
+            game.current_turn_id = game.opponent_id if game.current_turn_id == game.host_id else game.host_id
+            await _gathership_send_turn_message(channel, self.game_id)
+        except Exception as e:
+            print(f"Gathership fire: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
+
 
 # command to add /coinflip, user bets on heads or tails, if they win they get double their bet, if they lose they lose their bet
 @bot.tree.command(name="coinflip", description="Bet on heads or tails!")
@@ -4018,7 +4579,7 @@ async def slots(interaction: discord.Interaction, bet: float):
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"Sorry, {interaction.user.name}, you're dead. You cannot play slots for {minutes_left} minute(s)", ephemeral=True)
             return
-        
+         
         # Validate bet amount is positive
         if bet <= 0:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ Invalid bet amount!", ephemeral=True)
@@ -4068,7 +4629,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.7.1 :3"
+            name="running /gather on V0.8.0 :3"
         )
     )
     try:
@@ -4113,16 +4674,20 @@ async def on_ready():
     print("Started daily event checking")
     bot.loop.create_task(event_cleanup_task())
     print("Started event cleanup task")
+    bot.loop.create_task(irrigation_auto_water_task())
+    print("Started irrigation auto-water task")
     
-    # Cache invites for invite tracking
+    # Cache invites for invite tracking (needs "Manage Server" permission)
     global _invite_cache
     _invite_cache = {}
     for guild in bot.guilds:
         try:
             invites = await guild.invites()
             _invite_cache[guild.id] = {inv.code: inv.uses for inv in invites}
+        except discord.Forbidden:
+            print(f"[Invites] No permission to read invites in {guild.name} — enable 'Manage Server' for invite tracking.")
         except Exception as e:
-            print(f"Error caching invites for guild {guild.name}: {e}")
+            print(f"[Invites] Error caching invites for {guild.name}: {e}")
 
 
 @bot.event
@@ -4130,37 +4695,50 @@ async def on_member_join(member):
     global _invite_cache
     guild = member.guild
     inviter = None
-    
-    # Determine who invited this member by comparing invite uses
+
     try:
         current_invites = await guild.invites()
-        cached = _invite_cache.get(guild.id, {})
-        
+    except discord.Forbidden:
+        print(f"[Invites] Missing permission (Manage Server) in {guild.name} — cannot track who invited whom.")
+        current_invites = []
+    except Exception as e:
+        print(f"[Invites] Error fetching invites for {guild.name}: {e}")
+        current_invites = []
+
+    cached = _invite_cache.get(guild.id, {})
+    if not cached and current_invites:
+        # First join after bot start or cache miss: store current state for next time
+        _invite_cache[guild.id] = {inv.code: inv.uses for inv in current_invites}
+    else:
+        # Find the invite whose uses increased by exactly 1 (the one used for this join)
         for invite in current_invites:
             old_uses = cached.get(invite.code, 0)
-            if invite.uses > old_uses and invite.inviter:
+            if invite.uses == old_uses + 1 and invite.inviter and invite.inviter.id != member.id:
                 inviter = invite.inviter
                 break
-        
-        # Update the cache
         _invite_cache[guild.id] = {inv.code: inv.uses for inv in current_invites}
-    except Exception as e:
-        print(f"Error tracking invites for guild {guild.name}: {e}")
-    
+
+    # Increment inviter's invite count (even if we can't send welcome message)
+    if inviter:
+        try:
+            await asyncio.to_thread(increment_invite_joins_count_only, inviter.id, member.id)
+        except Exception as e:
+            print(f"[Invites] Error incrementing invite count for {inviter.id}: {e}")
+
     # Send welcome message in #welcome channel
     welcome_channel = discord.utils.get(guild.text_channels, name="welcome")
     if welcome_channel:
-        if inviter and inviter.id != member.id:
-            await welcome_channel.send(
-                f"\U0001f333 Welcome {member.mention} to /gather, thank you {inviter.mention} for inviting them! \U0001f338"
-            )
-            # Increment the inviter's invite count
-            try:
-                increment_invite_joins_count_only(inviter.id)
-            except Exception as e:
-                print(f"Error incrementing invite count for {inviter.id}: {e}")
-        else:
-            await welcome_channel.send(f"\U0001f333 Welcome {member.mention} to /gather! \U0001f338")
+        try:
+            if inviter:
+                await welcome_channel.send(
+                    f"\U0001f333 Welcome {member.mention} to /gather, thank you {inviter.mention} for inviting them! \U0001f338"
+                )
+            else:
+                await welcome_channel.send(f"\U0001f333 Welcome {member.mention} to /gather! \U0001f338")
+        except discord.Forbidden:
+            print(f"[Invites] No permission to send in #welcome in {guild.name}")
+        except Exception as e:
+            print(f"[Invites] Error sending welcome message in {guild.name}: {e}")
     
     # Assign gatherer role
     try:
@@ -4186,6 +4764,65 @@ async def on_invite_delete(invite):
     guild_id = invite.guild.id
     if guild_id in _invite_cache and invite.code in _invite_cache[guild_id]:
         del _invite_cache[guild_id][invite.code]
+
+
+# ----- Auto-log rare occurrences to #rares -----
+def _plant_rare_label(ripeness: str, is_gmo: bool) -> str | None:
+    """Return display label for a plant rare (One in a Million / Mikellion), or None if not rare."""
+    r = (ripeness or "").strip()
+    if r == "One in a Million":
+        return "GMO ONE IN A MILLION" if is_gmo else "ONE IN A MILLION"
+    if r == "Mikellion":
+        return "GMO MIKELLION" if is_gmo else "MIKELLION"
+    return None
+
+
+async def _post_to_rares_channel(guild: discord.Guild, content: str) -> None:
+    """Send a message to the #rares channel if it exists. Swallows errors."""
+    if not guild:
+        return
+    try:
+        rares_ch = discord.utils.get(guild.text_channels, name=RARES_CHANNEL_NAME)
+        if rares_ch:
+            await rares_ch.send(content)
+    except Exception as e:
+        print(f"Error posting to #rares: {e}")
+
+
+async def _post_rares_plant(guild: discord.Guild, user: discord.Member, source: str,
+                            item_name: str, category: str, value: float,
+                            ripeness: str, is_gmo: bool, area_tag: str) -> None:
+    """Post a plant rare (One in a Million / Mikellion) to #rares."""
+    label = _plant_rare_label(ripeness, is_gmo)
+    if not label:
+        return
+    # Sparkle emoji for GMO rares, plant emoji otherwise
+    lead_emoji = "✨" if label.startswith("GMO ") else "🌱"
+    # e.g. "🌱 @User caught a ONE IN A MILLION *Strawberry 🍓* in a GATHER worth $2,216,775.69! | **[FOREST]**"
+    msg = (
+        f"{lead_emoji} {user.mention} caught a **{label}** *{item_name}* "
+        f"in a **{source}** worth **${value:,.2f}**! | **{area_tag}**"
+    )
+    await _post_to_rares_channel(guild, msg)
+
+
+IMBUE_RARES_RARITIES = {"NETHERITE", "LUMINITE", "CELESTIAL", "SECRET"}
+
+
+async def _post_rares_imbue(guild: discord.Guild, user: discord.Member,
+                            enchant: dict, tool_type: str) -> None:
+    """Post a rolled netherite+ imbue to #rares."""
+    if not guild or not enchant:
+        return
+    rarity = (enchant.get("rarity") or "").upper()
+    if rarity not in IMBUE_RARES_RARITIES:
+        return
+    rarity_emoji = RARITY_EMOJI.get(rarity, "")
+    tool_text = "**hoe imbue**" if tool_type == "hoe" else "**tractor imbue**"
+    name = enchant.get("name", "Unknown")
+    # Leading rarity emoji, rarity in caps, imbue name bold+italic, tool lowercase bold, sparkle at end
+    msg = f"{rarity_emoji} {user.mention} rolled a **{rarity}** imbue: **_{name}_** {tool_text}! ✨"
+    await _post_to_rares_channel(guild, msg)
 
 
 def _gather_critical_path(user_id: int, channel_name: str, area_mult: float,
@@ -4336,6 +4973,8 @@ async def gather(interaction: discord.Interaction):
 
         area = GATHERING_AREAS[channel_name]
         area_mult = area.get("multiplier", 1.0)
+        if has_shop_item(user_id, "atlas"):
+            area_mult *= 2.0
         user_planter_level = get_user_planter_level(interaction.user)
 
         # === ONE thread call: data fetch + area check + cooldown + gather + chain roll ===
@@ -4438,6 +5077,15 @@ async def gather(interaction: discord.Interaction):
         if chain_triggered:
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"🔗🔗 **CHAIN!** Your cooldown has been reset! Gather again! 🔗🔗")
+
+        # Auto-log to #rares for One in a Million / Mikellion (GMO or not)
+        if _plant_rare_label(gather_result.get("ripeness", ""), gather_result.get("is_gmo", False)):
+            area_tag = "[" + channel_name.upper() + "]"
+            asyncio.create_task(_post_rares_plant(
+                interaction.guild, interaction.user, "GATHER",
+                gather_result["name"], gather_result.get("category", "Item"),
+                gather_result["value"], gather_result["ripeness"], gather_result.get("is_gmo", False),
+                area_tag))
 
         # === Background: role assignment + achievements (user already has the response) ===
         asyncio.create_task(_gather_post_response(interaction, user_id, full_data, gather_result))
@@ -4616,6 +5264,9 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         user_upgrades = full_data.get("basket_upgrades", {})
         harvest_upgrades = full_data.get("harvest_upgrades", {})
         tractor_enchant = full_data.get("tractor_enchantment")
+        # Ensure tractor attunement is a dict (fallback if serialization/document quirk drops it)
+        if tractor_enchant is None or not isinstance(tractor_enchant, dict):
+            tractor_enchant = get_user_tractor_attunement(user_id)
         bloom_multiplier = 1.0 + (full_data.get("tree_rings", 0) * 0.005)
         water_multiplier = 1.0 + (full_data.get("water_count", 0) * 0.01)
         plants_before_harvest = full_data.get("gather_stats_total_items", 0)
@@ -4643,18 +5294,33 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     chain_tier = harvest_upgrades.get("chain", 0)
     fertilizer_tier = harvest_upgrades.get("fertilizer", 0)
 
+    # Orchard plants: base (10) + car upgrade extra. Imbue plants: from tractor Nature's Favor (additional_plants).
+    # Always add both so imbue bonus is never overwritten by orchard count.
     base_items = 10
     extra_items = HARVEST_CAR_UPGRADES[car_tier - 1]["extra_items"] if car_tier > 0 else 0
+    orchard_plant_count = base_items + extra_items
+
     enchant_extra_plants = 0
     enchant_money_bonus = 0.0
-    if tractor_enchant:
+    if tractor_enchant and isinstance(tractor_enchant, dict):
         enchant_extra_plants = tractor_enchant.get("additional_plants", 0)
+        # Nature's Favor: derive from levels if additional_plants missing/zero (legacy or serialization)
+        if enchant_extra_plants == 0:
+            levels = tractor_enchant.get("levels") or {}
+            enchant_extra_plants = int(levels.get("natures_favor", 0) or 0)
+        else:
+            enchant_extra_plants = int(enchant_extra_plants)
         enchant_money_bonus = tractor_enchant.get("money_bonus", 0)
-    total_items_to_harvest = base_items + extra_items + enchant_extra_plants
+
+    total_items_to_harvest = orchard_plant_count + enchant_extra_plants
     basket_multiplier = BASKET_UPGRADES[basket_tier - 1]["multiplier"] if basket_tier > 0 else 1.0
     base_gmo_chance = 0.05
     soil_gmo_boost = SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] if soil_tier > 0 else 0
     gmo_chance = base_gmo_chance + soil_gmo_boost
+    if full_data and full_data.get("shop_inventory", {}).get("mutagenic_serum", 0) >= 1:
+        gmo_chance += 0.07
+    elif not full_data and has_shop_item(user_id, "mutagenic_serum"):
+        gmo_chance += 0.07
     fertilizer_multiplier = 1.0
     if fertilizer_tier > 0:
         fertilizer_multiplier = 1.0 + HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["multiplier"]
@@ -4764,6 +5430,12 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         subtotal = base_value_before_boosts + extra_bloom + extra_water + extra_achievement + extra_daily + extra_enchant
         final_value = subtotal * rank_perma_buff_mult
 
+        # Daily shop: Bloomstone (flowers 3x)
+        if item.get("category") == "Flower":
+            shop_inv_harvest = full_data.get("shop_inventory", {}) if full_data else get_user_shop_inventory(user_id)
+            if shop_inv_harvest.get("bloomstone", 0) >= 1:
+                final_value *= 3.0
+
         current_balance += final_value
         total_value += final_value
         total_base_value += base_value_before_boosts
@@ -4776,6 +5448,11 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
             "base_value": base_value_before_boosts,
             "ripeness": ripeness["name"], "is_gmo": is_gmo,
         })
+
+    # ----- Daily shop: Fuzzy Dice (+5% harvest money) -----
+    shop_inv = full_data.get("shop_inventory", {}) if full_data else get_user_shop_inventory(user_id)
+    if shop_inv.get("fuzzy_dice", 0) >= 1:
+        total_value *= 1.05
 
     # ----- single batch write: items + ripeness + balance + counts + tree rings + cooldown -----
     num_items = total_items_to_harvest
@@ -4808,6 +5485,8 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         "month_name": month_name,
         "seasonal_label": seasonal_label,
         "total_seasonal_bonus": total_seasonal_bonus,
+        "base_plants": base_items,
+        "car_extra_plants": extra_items,
     }
 
 async def perform_harvest_for_user(user_id: int, allow_chain: bool = True,
@@ -4957,6 +5636,8 @@ async def harvest(interaction: discord.Interaction):
 
         area = GATHERING_AREAS[channel_name]
         area_mult = area.get("multiplier", 1.0)
+        if has_shop_item(user_id, "atlas"):
+            area_mult *= 2.0
         user_planter_level = get_user_planter_level(interaction.user)
 
         # === ONE thread call: data fetch + area check + cooldown + harvest + chain roll ===
@@ -4993,12 +5674,12 @@ async def harvest(interaction: discord.Interaction):
         # --- build embed (pure computation, no DB) ---
         embed = discord.Embed(title="You Harvested!", color=discord.Color.green())
 
+        # All plants in one field (~35–50 chars per line; 20–30 items stay under Discord’s 1024 limit)
         items_text = ""
-        for item in gathered_items[:20]:
+        for item in gathered_items:
             gmo_text = " GMO! ✨" if item["is_gmo"] else ""
             items_text += f"• **{item['name']}** - ${item['base_value']:.2f} ({item['ripeness']}){gmo_text}\n"
-
-        embed.add_field(name="📦 Items Gathered", value=items_text or "No items", inline=False)
+        embed.add_field(name="📦 Items Gathered", value=items_text.strip() or "No items", inline=False)
         embed.add_field(name="💰 Total Value", value=f"**${total_value:.2f}**", inline=True)
         embed.add_field(name="💵 New Balance", value=f"**${current_balance:.2f}**", inline=True)
 
@@ -5049,6 +5730,16 @@ async def harvest(interaction: discord.Interaction):
         if chain_triggered:
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"🔗🔗 **CHAIN!** Your harvest cooldown has been reset! Harvest again! 🔗🔗")
+
+        # Auto-log to #rares for any One in a Million / Mikellion (GMO or not)
+        area_tag = "[" + channel_name.upper() + "]"
+        for item in gathered_items:
+            if _plant_rare_label(item.get("ripeness", ""), item.get("is_gmo", False)):
+                cat = next((i["category"] for i in GATHERABLE_ITEMS if i["name"] == item["name"]), "Item")
+                asyncio.create_task(_post_rares_plant(
+                    interaction.guild, interaction.user, "HARVEST",
+                    item["name"], cat, item["value"], item["ripeness"], item.get("is_gmo", False),
+                    area_tag))
 
         # === Background: role assignment + achievements (user already has the response) ===
         asyncio.create_task(_harvest_post_response(interaction, user_id, full_data, result))
@@ -5345,6 +6036,101 @@ INVITE_REWARDS = {
 }
 
 
+# ─── Daily Shop (Tree Rings currency) ───
+DAILY_SHOP_ITEMS = {
+    "fuzzy_dice": {
+        "name": "Fuzzy Dice",
+        "description": "A good trinket to have for your tractor!",
+        "cost": 5,
+        "effect": "5% permanent boost to money from /harvest",
+    },
+    "mutagenic_serum": {
+        "name": "Mutagenic Serum",
+        "description": "Organic Schmorganic!",
+        "cost": 50,
+        "effect": "+7% GMO chance permanently",
+    },
+    "scarecrow": {
+        "name": "Scarecrow",
+        "description": "Scare those pesky crows away!",
+        "cost": 15,
+        "effect": "+10% money gain from /gather",
+    },
+    "cryptobro_shadow": {
+        "name": "Cryptobro's Shadow",
+        "description": "You GOTTA buy this coin, man.",
+        "cost": 75,
+        "effect": "+50% money gain from /sell",
+    },
+    "bloomstone": {
+        "name": "Bloomstone",
+        "description": "An ancient gem, shining with light.",
+        "cost": 500,
+        "effect": "All flowers triple in worth",
+    },
+    "irrigation_system": {
+        "name": "Irrigation System",
+        "description": "Auto /waters for you. (Double water if you have that invite reward.)",
+        "cost": 2250,
+        "effect": "Auto /water each day",
+    },
+    "gamblers_revolver": {
+        "name": "Gambler's Revolver",
+        "description": "Luck is a skill.",
+        "cost": 2000,
+        "effect": "Russian Roulette death penalty: 5 min instead of 30 min",
+    },
+    "commoners_respite": {
+        "name": "Commoner's Respite",
+        "description": "Say goodbye to those common imbues!",
+        "cost": 3000,
+        "effect": "You cannot roll a common imbue when doing /imbue",
+    },
+    "atlas": {
+        "name": "Atlas",
+        "description": "Lets you see the world around you!",
+        "cost": 1000,
+        "effect": "Doubles the money gain from each area",
+    },
+}
+DAILY_SHOP_ITEM_IDS = list(DAILY_SHOP_ITEMS.keys())
+MAX_DAILY_SHOP_PURCHASES = 3
+
+
+def get_daily_shop_offerings(date_est: str) -> list:
+    """Return 3 random item ids for the given EST date (YYYY-MM-DD). Deterministic per date."""
+    rng = random.Random(date_est)
+    return rng.sample(list(DAILY_SHOP_ITEMS.keys()), 3)
+
+
+def _get_date_est() -> str:
+    """Current date in EST as YYYY-MM-DD."""
+    EST_OFFSET = datetime.timedelta(hours=-5)
+    now_utc = datetime.datetime.utcnow()
+    now_est = now_utc + EST_OFFSET
+    return now_est.strftime("%Y-%m-%d")
+
+
+def _seconds_until_midnight_est() -> float:
+    """Seconds from now until next midnight EST."""
+    EST_OFFSET = datetime.timedelta(hours=-5)
+    now_utc = datetime.datetime.utcnow()
+    now_est = now_utc + EST_OFFSET
+    next_midnight = (now_est + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    target_utc = next_midnight - EST_OFFSET
+    return (target_utc - now_utc).total_seconds()
+
+
+def _format_refresh_countdown() -> str:
+    """Human-readable countdown to next midnight EST (e.g. '19h 54m')."""
+    secs = max(0, int(_seconds_until_midnight_est()))
+    h, remainder = divmod(secs, 3600)
+    m, _ = divmod(remainder, 60)
+    if h > 0:
+        return f"{h}h {m}m"
+    return f"{m}m"
+
+
 @bot.tree.command(name="inviteawards", description="Check or claim your invite rewards!")
 @app_commands.describe(action="Check your invite progress or claim rewards")
 @app_commands.choices(action=[
@@ -5462,6 +6248,135 @@ async def inviteawards(interaction: discord.Interaction, action: app_commands.Ch
             await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
     except Exception as e:
         print(f"Error in inviteawards command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+class DailyShopView(discord.ui.View):
+    """View with Buy buttons for each of today's 3 items, plus Inventory."""
+
+    def __init__(self, item_ids: list, timeout: float = 180):
+        super().__init__(timeout=timeout)
+        for item_id in item_ids:
+            info = DAILY_SHOP_ITEMS.get(item_id, {})
+            label = f"Buy {info.get('name', item_id)}"
+            if len(label) > 80:
+                label = label[:77] + "..."
+            self.add_item(DailyShopBuyButton(item_id=item_id, label=label))
+        self.add_item(DailyShopInventoryButton())
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
+class DailyShopBuyButton(discord.ui.Button):
+    def __init__(self, item_id: str, label: str):
+        super().__init__(style=discord.ButtonStyle.primary, label=label, custom_id=f"dailyshop_buy_{item_id}")
+
+    async def callback(self, interaction: discord.Interaction):
+        item_id = self.custom_id.replace("dailyshop_buy_", "")
+        if item_id not in DAILY_SHOP_ITEMS:
+            await safe_interaction_response(interaction, interaction.response.send_message,
+                "❌ That item is no longer available.", ephemeral=True)
+            return
+        user_id = interaction.user.id
+        date_est = _get_date_est()
+        offerings = get_daily_shop_offerings(date_est)
+        if item_id not in offerings:
+            await safe_interaction_response(interaction, interaction.response.send_message,
+                f"❌ **{DAILY_SHOP_ITEMS[item_id]['name']}** is not in today's shop.", ephemeral=True)
+            return
+        purchase_count, last_date = get_user_daily_shop_purchases(user_id)
+        if last_date != date_est:
+            purchase_count = 0
+        if purchase_count >= MAX_DAILY_SHOP_PURCHASES:
+            await safe_interaction_response(interaction, interaction.response.send_message,
+                f"❌ You've already bought **{MAX_DAILY_SHOP_PURCHASES}** items today. Come back at midnight EST!", ephemeral=True)
+            return
+        info = DAILY_SHOP_ITEMS[item_id]
+        cost = info["cost"]
+        tree_rings = get_user_tree_rings(user_id)
+        if tree_rings < cost:
+            await safe_interaction_response(interaction, interaction.response.send_message,
+                f"❌ You need **{cost}** 🌳 Tree Rings for **{info['name']}**, but you have **{tree_rings}**.", ephemeral=True)
+            return
+        success = purchase_daily_shop_item(user_id, item_id, cost, date_est)
+        if not success:
+            await safe_interaction_response(interaction, interaction.response.send_message,
+                "❌ Purchase failed. Try again.", ephemeral=True)
+            return
+        remaining = MAX_DAILY_SHOP_PURCHASES - purchase_count - 1
+        msg = f"✅ You bought **{info['name']}** for **{cost}** 🌳 Tree Rings. *{info['effect']}*"
+        if remaining > 0:
+            msg += f"\nYou can buy **{remaining}** more item(s) today."
+        await safe_interaction_response(interaction, interaction.response.send_message, msg, ephemeral=True)
+
+
+class DailyShopInventoryButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(style=discord.ButtonStyle.secondary, label="Inventory", custom_id="dailyshop_inventory")
+
+    async def callback(self, interaction: discord.Interaction):
+        user_id = interaction.user.id
+        inv = get_user_shop_inventory(user_id)
+        embed = discord.Embed(
+            title="🛒 Your Shop Inventory",
+            description="Items you've purchased from the Daily Shop.",
+            color=discord.Color.gold()
+        )
+        if not inv:
+            embed.add_field(name="Items", value="*No items yet. Use the buttons above to buy!*", inline=False)
+        else:
+            lines = [f"**{DAILY_SHOP_ITEMS.get(i, {}).get('name', i)}** × {c}" for i, c in sorted(inv.items(), key=lambda x: (-x[1], x[0]))]
+            embed.add_field(name="Items", value="\n".join(lines), inline=False)
+        await safe_interaction_response(interaction, interaction.response.send_message, embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="dailyshop", description="Open the Daily Shop or view your inventory")
+@app_commands.describe(action="Open the shop or only view your inventory")
+@app_commands.choices(action=[
+    app_commands.Choice(name="Shop", value="shop"),
+    app_commands.Choice(name="Inventory", value="inventory"),
+])
+async def dailyshop(interaction: discord.Interaction, action: app_commands.Choice[str] = None):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        user_id = interaction.user.id
+        date_est = _get_date_est()
+        if action is not None and action.value == "inventory":
+            inv = get_user_shop_inventory(user_id)
+            embed = discord.Embed(
+                title="🛒 Daily Shop – Your Inventory",
+                description=f"{interaction.user.mention}'s purchased items (Tree Ring shop)",
+                color=discord.Color.gold()
+            )
+            if not inv:
+                embed.add_field(name="Items", value="*No items yet. Use /dailyshop to open the shop and buy!*", inline=False)
+            else:
+                lines = [f"**{DAILY_SHOP_ITEMS.get(i, {}).get('name', i)}** × {c}" for i, c in sorted(inv.items(), key=lambda x: (-x[1], x[0]))]
+                embed.add_field(name="Items", value="\n".join(lines), inline=False)
+            embed.set_footer(text="Shop refreshes daily at midnight EST")
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+            return
+        offerings = get_daily_shop_offerings(date_est)
+        embed = discord.Embed(
+            title="🛒 Daily Shop",
+            description="Welcome to the Daily Shop! Purchase special items with **🌳 Tree Rings**. Stock refreshes daily at midnight EST. You can buy up to **3** items per day.",
+            color=discord.Color.green()
+        )
+        for item_id in offerings:
+            info = DAILY_SHOP_ITEMS[item_id]
+            embed.add_field(
+                name=f"🌳 {info['name']}",
+                value=f"{info['description']}\n*{info['effect']}*\nPrice: **{info['cost']}** 🌳 Tree Rings",
+                inline=False
+            )
+        embed.set_footer(text=f"Shop refreshes in {_format_refresh_countdown()}")
+        view = DailyShopView(item_ids=offerings)
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view, ephemeral=True)
+    except Exception as e:
+        print(f"Error in dailyshop command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
@@ -6172,6 +7087,11 @@ class ImbueView(discord.ui.View):
         # Send public announcement
         await self._send_public_announcement(self.rolled_enchant)
 
+        # Auto-log to #rares when user keeps a netherite+ imbue (Replace = keeping this new one)
+        guild = getattr(interaction, "guild", None)
+        if guild and self.rolled_enchant.get("rarity") in IMBUE_RARES_RARITIES:
+            asyncio.create_task(_post_rares_imbue(guild, interaction.user, self.rolled_enchant, self.tool_type))
+
         # Check for hidden achievement: High Reroller (NETHERITE, LUMINITE, CELESTIAL, or SECRET)
         high_rarities = {"NETHERITE", "LUMINITE", "CELESTIAL", "SECRET"}
         if self.rolled_enchant.get("rarity") in high_rarities:
@@ -6207,6 +7127,13 @@ class ImbueView(discord.ui.View):
             color=discord.Color.light_grey(),
         )
         await safe_interaction_response(interaction, interaction.response.edit_message, embed=keep_embed, view=self)
+
+        # Auto-log to #rares when user keeps a netherite+ imbue (Keep Current)
+        if self.current_enchant and self.current_enchant.get("rarity") in IMBUE_RARES_RARITIES:
+            guild = getattr(interaction, "guild", None)
+            if guild:
+                asyncio.create_task(_post_rares_imbue(guild, interaction.user, self.current_enchant, self.tool_type))
+
         self.stop()
 
     @discord.ui.button(label="Recast", style=discord.ButtonStyle.primary, emoji="\U0001f504")
@@ -6225,8 +7152,8 @@ class ImbueView(discord.ui.View):
             return
 
         try:
-            # Roll new attunement
-            self.rolled_enchant = roll_attunement(self.tool_type)
+            # Roll new attunement (Commoner's Respite excludes COMMON if user has it)
+            self.rolled_enchant = roll_attunement(self.tool_type, self.user_id)
 
             # Update embed
             embed = self._build_embed()
@@ -6286,8 +7213,8 @@ async def imbue(interaction: discord.Interaction, tool: app_commands.Choice[str]
                 else:
                     current_enchant = get_user_tractor_attunement(user_id)
 
-                # Roll a new attunement
-                rolled_enchant = roll_attunement(tool_type)
+                # Roll a new attunement (Commoner's Respite excludes COMMON if user has it)
+                rolled_enchant = roll_attunement(tool_type, user_id)
 
                 # Create the view and embed
                 view = ImbueView(
@@ -7249,7 +8176,7 @@ async def wipe(interaction: discord.Interaction, type: str):
                 description=f"Reset everything for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank and **PINE I** Bloom rank.\n\n**Market has been reset** - all shares returned, making all stocks available at max capacity.",
                 color=discord.Color.red()
             )
-            embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Stock holdings (shares)\n• Crypto holdings (portfolio)\n• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)\n• Bloom rank (set to PINE I)\n• All achievements and achievement stats\n• All cooldowns", inline=False)
+            embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Stock holdings (shares)\n• Crypto holdings (portfolio)\n• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)\n• Bloom rank (set to PINE I)\n• All achievements and achievement stats\n• All cooldowns\n• Daily shop inventory and purchase count", inline=False)
         
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
         print(f"Admin {interaction.user.name} wiped {type} data for {wiped_count} users")
@@ -7498,21 +8425,34 @@ async def _giveaway_imbue_name_autocomplete(
     return [app_commands.Choice(name=n, value=n) for n in matches[:25]]
 
 
-@bot.tree.command(name="giveaway", description="[ADMIN] Give a user money, imbues, water streak, or tree rings")
+@bot.tree.command(name="giveaway", description="[ADMIN] Give a user money, imbues, water streak, tree rings, or daily shop items")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     user="The user to give the reward to",
     type="The type of reward to give",
-    amount="Amount – money ($), water streak (days), or tree rings (count)",
+    amount="Amount – money ($), water streak (days), tree rings (count), or shop item quantity",
     tool_type="Hoe or Tractor (required for imbue type)",
     rarity="Imbue rarity tier (required for imbue type)",
     imbue_name="Specific imbue name (required for imbue type) – autocompletes based on tool & rarity",
+    shop_item="Daily shop item to give (required for shop_item type)",
 )
 @app_commands.choices(type=[
     app_commands.Choice(name="Money", value="money"),
     app_commands.Choice(name="Imbue", value="imbue"),
     app_commands.Choice(name="Water Streak", value="water_streak"),
     app_commands.Choice(name="Tree Rings", value="tree_rings"),
+    app_commands.Choice(name="Shop Item", value="shop_item"),
+])
+@app_commands.choices(shop_item=[
+    app_commands.Choice(name="Fuzzy Dice", value="fuzzy_dice"),
+    app_commands.Choice(name="Mutagenic Serum", value="mutagenic_serum"),
+    app_commands.Choice(name="Scarecrow", value="scarecrow"),
+    app_commands.Choice(name="Cryptobro's Shadow", value="cryptobro_shadow"),
+    app_commands.Choice(name="Bloomstone", value="bloomstone"),
+    app_commands.Choice(name="Irrigation System", value="irrigation_system"),
+    app_commands.Choice(name="Gambler's Revolver", value="gamblers_revolver"),
+    app_commands.Choice(name="Commoner's Respite", value="commoners_respite"),
+    app_commands.Choice(name="Atlas", value="atlas"),
 ])
 @app_commands.choices(tool_type=[
     app_commands.Choice(name="Hoe (Gather)", value="hoe"),
@@ -7538,6 +8478,7 @@ async def giveaway(
     tool_type: str = None,
     rarity: str = None,
     imbue_name: str = None,
+    shop_item: str = None,
 ):
     try:
         if not await safe_defer(interaction, ephemeral=True):
@@ -7683,9 +8624,29 @@ async def giveaway(
             embed.set_footer(text=f"Given by {interaction.user.name}")
             print(f"Admin {interaction.user.name} used /giveaway tree_rings to give {user.name} {rings} rings")
 
+        # ── SHOP ITEM (Daily Shop) ──
+        elif type_lower == "shop_item":
+            if not shop_item or shop_item not in DAILY_SHOP_ITEMS:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ **Error**: Please select a valid `shop_item` from the Daily Shop list.", ephemeral=True)
+                return
+            qty = 1
+            if amount is not None and amount > 0:
+                qty = int(amount)
+            add_shop_item_to_user(user_id, shop_item, qty)
+            info = DAILY_SHOP_ITEMS[shop_item]
+            embed = discord.Embed(
+                title="🎉 Giveaway – Daily Shop Item",
+                description=f"**{qty}× {info['name']}** has been given to {user.mention}!",
+                color=discord.Color.gold()
+            )
+            embed.add_field(name="Effect", value=info["effect"], inline=False)
+            embed.set_footer(text=f"Given by {interaction.user.name}")
+            print(f"Admin {interaction.user.name} used /giveaway shop_item to give {user.name} {qty}× {info['name']}")
+
         else:
             await safe_interaction_response(interaction, interaction.followup.send,
-                "❌ **Error**: Invalid type. Choose from: `money`, `imbue`, `water_streak`, `tree_rings`.",
+                "❌ **Error**: Invalid type. Choose from: `money`, `imbue`, `water_streak`, `tree_rings`, `shop_item`.",
                 ephemeral=True)
             return
 
@@ -9381,6 +10342,87 @@ async def send_event_end_embed(guild: discord.Guild, event: dict):
         print(f"Error sending event end embed in {guild.name}: {e}")
 
 
+def _apply_auto_water_for_user(user_id: int, now_est: datetime.datetime) -> bool:
+    """Apply one water for a user (irrigation). Returns True if water was applied."""
+    EST_OFFSET = datetime.timedelta(hours=-5)
+    last_water_time = get_user_last_water_time(user_id)
+    current_date = now_est.date()
+    current_hour = now_est.hour
+    has_double_water = get_invite_cooldown_reductions(user_id).get("water_double", False)
+    if last_water_time > 0:
+        last_water_utc = datetime.datetime.utcfromtimestamp(last_water_time)
+        last_water_est = last_water_utc + EST_OFFSET
+        last_water_date = last_water_est.date()
+        last_water_hour = last_water_est.hour
+        already_watered = False
+        if last_water_date == current_date:
+            if has_double_water:
+                in_pm = current_hour >= 12
+                last_in_pm = last_water_hour >= 12
+                if in_pm and last_in_pm:
+                    already_watered = True
+                elif not in_pm and not last_in_pm:
+                    already_watered = True
+            else:
+                already_watered = True
+        if already_watered:
+            return False
+    consecutive_days = get_user_consecutive_water_days(user_id)
+    is_first_water_today = True
+    if last_water_time > 0:
+        last_water_utc = datetime.datetime.utcfromtimestamp(last_water_time)
+        last_water_est = last_water_utc + EST_OFFSET
+        last_water_date = last_water_est.date()
+        if last_water_date == current_date:
+            is_first_water_today = False
+        else:
+            yesterday = (now_est - datetime.timedelta(days=1)).date()
+            if last_water_date != yesterday and last_water_date != current_date:
+                consecutive_days = 0
+    if is_first_water_today:
+        consecutive_days += 1
+        set_user_consecutive_water_days(user_id, consecutive_days)
+    now_ts = time.time()
+    update_user_last_water_time(user_id, now_ts)
+    increment_user_water_count(user_id)
+    money_reward = consecutive_days * 7500.0
+    money_reward = normalize_money(money_reward)
+    current_balance = get_user_balance(user_id)
+    new_balance = normalize_money(current_balance + money_reward)
+    update_user_balance(user_id, new_balance)
+    if consecutive_days == 5 and is_first_water_today:
+        increment_tree_rings(user_id, 10)
+    return True
+
+
+async def irrigation_auto_water_task():
+    """At 12 PM and 12 AM EST, auto-water users who have the Irrigation System."""
+    await bot.wait_until_ready()
+    EST_OFFSET = datetime.timedelta(hours=-5)
+    await asyncio.sleep(60)
+    last_run_date_hour = None
+    while not bot.is_closed():
+        try:
+            now_utc = datetime.datetime.utcnow()
+            now_est = now_utc + EST_OFFSET
+            if now_est.hour in (0, 12) and now_est.minute < 2:
+                key = (now_est.date(), now_est.hour)
+                if key != last_run_date_hour:
+                    last_run_date_hour = key
+                    user_ids = await asyncio.to_thread(get_user_ids_with_shop_item, "irrigation_system")
+                    for uid in user_ids:
+                        try:
+                            applied = await asyncio.to_thread(_apply_auto_water_for_user, uid, now_est)
+                            if applied:
+                                print(f"Irrigation: auto-watered user {uid}")
+                        except Exception as e:
+                            print(f"Irrigation: error watering user {uid}: {e}")
+            await asyncio.sleep(60)
+        except Exception as e:
+            print(f"Error in irrigation_auto_water_task: {e}")
+            await asyncio.sleep(60)
+
+
 async def hourly_event_check():
     """Background task to trigger hourly events at configurable intervals with 50% chance."""
     await bot.wait_until_ready()
@@ -10162,6 +11204,8 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         coin_base_price = coin_info["base_price"] if coin_info else 855.0
         coin_price = prices.get(coin, coin_base_price)
         base_sale_value = amount * coin_price
+        if has_shop_item(user_id, "cryptobro_shadow"):
+            base_sale_value *= 1.50
         
         # Apply boosts to sale value (additive from base, then rank multiplies subtotal)
         bloom_multiplier = get_bloom_multiplier(user_id)
@@ -10722,6 +11766,78 @@ async def russian(
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
+@bot.tree.command(name="gathership", description="Challenge someone to GATHERSHIP!")
+@app_commands.describe(
+    user="The user you challenge to Gathership",
+    bet="Amount to bet",
+    ships="Number of ships to place (1–5)"
+)
+async def gathership(interaction: discord.Interaction, user: discord.Member, bet: float, ships: int):
+    try:
+        if not await safe_defer(interaction):
+            return
+        host_id = interaction.user.id
+        host_name = interaction.user.name
+        opponent_id = user.id
+        opponent_name = user.name
+        channel_id = interaction.channel.id
+        channel_name = (interaction.channel.name or "").lower()
+        if channel_name not in ("gathership-1", "gathership-2"):
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ Gathership can only be played in **#gathership-1** or **#gathership-2**!", ephemeral=True)
+            return
+
+        if opponent_id == host_id:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ You can't challenge yourself!", ephemeral=True)
+            return
+        if user.bot:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ You can't challenge a bot!", ephemeral=True)
+            return
+        if bet <= 0:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Bet must be greater than $0.00!", ephemeral=True)
+            return
+        if not validate_money_precision(bet):
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Bet must be in dollars and cents (max 2 decimal places)!", ephemeral=True)
+            return
+        if ships < 1 or ships > 5:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Ships must be between 1 and 5!", ephemeral=True)
+            return
+
+        bet = normalize_money(bet)
+        host_balance = get_user_balance(host_id)
+        if not can_afford_rounded(normalize_money(host_balance), bet):
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ You don't have enough balance for that bet!", ephemeral=True)
+            return
+
+        if channel_id in channel_gathership and channel_gathership[channel_id] in active_gathership_games:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ There's already a Gathership game in this channel!", ephemeral=True)
+            return
+        if host_id in user_active_gathership or opponent_id in user_active_gathership:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ You or your opponent is already in a Gathership game!", ephemeral=True)
+            return
+
+        game_id = str(uuid.uuid4())[:8]
+        game = GathershipGame(game_id, host_id, host_name, opponent_id, opponent_name, bet, ships, channel_id)
+        active_gathership_games[game_id] = game
+        user_active_gathership[host_id] = game_id
+        channel_gathership[channel_id] = game_id
+
+        new_balance = normalize_money(host_balance - bet)
+        update_user_balance(host_id, new_balance)
+
+        embed = discord.Embed(
+            title="⚓ GATHERSHIP ⚓",
+            description=f"**{host_name}** is challenging **{opponent_name}** to **GATHERSHIP**!\n\n{opponent_name}: click **Join Game** to accept. Host can **Start Game** when ready.",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="💰 Bet", value=f"${bet:.2f} each", inline=True)
+        embed.add_field(name="🚢 Ships", value=str(ships), inline=True)
+        embed.add_field(name="⏰ Timeout", value="5 min to join / start", inline=True)
+        view = GathershipLobbyView(game_id, host_id, opponent_id, timeout=300)
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
+    except Exception as e:
+        print(f"Error in gathership command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 
