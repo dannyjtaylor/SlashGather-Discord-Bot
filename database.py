@@ -955,10 +955,12 @@ def get_user_daily_shop_purchases(user_id: int) -> tuple:
 
 def purchase_daily_shop_item(user_id: int, item_id: str, cost: int, date_est: str) -> bool:
     """
-    Deduct cost tree rings, add item to shop_inventory, increment daily purchases, set date.
+    Deduct cost tree rings, add item to shop_inventory (max 1 per item), increment daily purchases, set date.
     Caller must ensure user has enough tree rings and has not exceeded 3 purchases today.
-    Returns True on success.
+    Returns True on success. Returns False if user already owns this item (one per item only).
     """
+    if has_shop_item(user_id, item_id):
+        return False  # Can only own one of each daily shop item
     users = _get_users_collection()
     _ensure_user_document(user_id)
     # Atomic: deduct tree_rings and update inventory + daily stats
@@ -969,7 +971,7 @@ def purchase_daily_shop_item(user_id: int, item_id: str, cost: int, date_est: st
     if tree_rings < cost:
         return False
     inv = dict(doc.get("shop_inventory", {}))
-    inv[item_id] = inv.get(item_id, 0) + 1
+    inv[item_id] = 1  # Only one of each item ever
     purchase_count = int(doc.get("daily_shop_purchases_count", 0))
     last_date = str(doc.get("daily_shop_last_date_est", ""))
     if last_date != date_est:
@@ -1478,12 +1480,16 @@ def wipe_user_all(user_id: int) -> None:
 
 
 def add_shop_item_to_user(user_id: int, item_id: str, amount: int = 1) -> None:
-    """Add a daily shop item to a user's inventory (e.g. for admin giveaway). Does not deduct tree rings."""
+    """Add a daily shop item to a user's inventory (e.g. for admin giveaway). Does not deduct tree rings. Caps at 1 per item."""
     users = _get_users_collection()
     _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"shop_inventory": 1})
+    inv = dict(doc.get("shop_inventory", {})) if doc else {}
+    current = inv.get(item_id, 0)
+    inv[item_id] = min(current + int(amount), 1)
     users.update_one(
         {"_id": int(user_id)},
-        {"$inc": {f"shop_inventory.{item_id}": int(amount)}},
+        {"$set": {"shop_inventory": inv}},
         upsert=True,
     )
 

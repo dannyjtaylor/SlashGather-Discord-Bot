@@ -1163,7 +1163,7 @@ GATHERING_AREAS = {
     },
     "grove": {
         "display_name": "#grove",
-        "emoji": "🌳",
+        "emoji": "<:TreeRing:1474244868288282817>",
         "multiplier": 1.2,
         "required_planter_rank": "PLANTER III",
         "required_planter_level": 3,
@@ -3875,8 +3875,6 @@ async def end_gathership_game(channel, game_id: str, winner_id: int, loser_id: i
         return
     game = active_gathership_games[game_id]
     total_pot = normalize_money(game.bet * 2)
-    winner_name = game.host_name if winner_id == game.host_id else game.opponent_name
-    loser_name = game.opponent_name if winner_id == game.host_id else game.host_name
     current = get_user_balance(winner_id)
     update_user_balance(winner_id, normalize_money(current + total_pot))
     for uid in (game.host_id, game.opponent_id):
@@ -3887,9 +3885,11 @@ async def end_gathership_game(channel, game_id: str, winner_id: int, loser_id: i
             del channel_gathership[ch_id]
             break
     del active_gathership_games[game_id]
+    winner_mention = f"<@{winner_id}>"
+    loser_mention = f"<@{loser_id}>"
     embed = discord.Embed(
         title="🏆 GATHERSHIP — GAME OVER 🏆",
-        description=f"**{winner_name}** sank all of **{loser_name}**'s ships and wins **${total_pot:.2f}**!",
+        description=f"{winner_mention} sank all of {loser_mention}'s ships and wins **${total_pot:.2f}**!",
         color=discord.Color.gold()
     )
     # embed.add_field(name="💰 Winner takes", value=f"${total_pot:.2f}", inline=True)
@@ -3927,7 +3927,9 @@ class GathershipLobbyView(discord.ui.View):
             update_user_balance(interaction.user.id, new_bal)
             user_active_gathership[interaction.user.id] = self.game_id
             embed = interaction.message.embeds[0]
-            embed.description = f"**{game.host_name}** is challenging **{game.opponent_name}** to **GATHERSHIP**!\n\n✅ **{game.opponent_name}** has joined! Host can start the game."
+            host_mention = f"<@{game.host_id}>"
+            opponent_mention = f"<@{game.opponent_id}>"
+            embed.description = f"{host_mention} is challenging {opponent_mention} to **GATHERSHIP**!\n\n✅ {opponent_mention} has joined! Host can start the game."
             embed.set_field_at(0, name="💰 Bet", value=f"${game.bet:.2f}", inline=True)
             await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
         except Exception as e:
@@ -3951,10 +3953,12 @@ class GathershipLobbyView(discord.ui.View):
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Wait for your opponent to join first!", ephemeral=True)
                 return
             game.phase = "setup"
-            await safe_interaction_response(interaction, interaction.response.edit_message, content="⚓ **Place your ships!**", view=GathershipOpenSetupView(self.game_id, timeout=300))
+            host_mention = f"<@{game.host_id}>"
+            opponent_mention = f"<@{game.opponent_id}>"
+            await safe_interaction_response(interaction, interaction.response.edit_message, content=f"{host_mention} {opponent_mention} ⚓ **Place your ships!**", view=GathershipOpenSetupView(self.game_id, timeout=300))
             channel = bot.get_channel(game.channel_id)
             if channel:
-                await channel.send("⚓ **Ship Placement** — Click the button above to open your grid and place your ships!")
+                await channel.send(f"{host_mention} {opponent_mention} ⚓ **Ship Placement** — Click the button above to open your grid and place your ships!")
         except Exception as e:
             print(f"Gathership start_game: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
@@ -4019,8 +4023,8 @@ class GathershipOpenSetupView(discord.ui.View):
             cursor = game.get_cursor(is_host)
             grid = _gathership_grid_display(ships, cursor, show_ships=True)
             embed = discord.Embed(
-                title="⚓ Your fleet (ephemeral)",
-                description=f"Place **{game.num_ships}** ship(s). Use arrows to move, then **Place ship**.\n\n{grid}",
+                title="⚓ Your fleet",
+                description=f"Place **{game.num_ships}** ship(s). Use arrows to move, then click **Place Ship**!\n\n{grid}",
                 color=discord.Color.blue()
             )
             embed.add_field(name="Ships placed", value=f"{len(ships)}/{game.num_ships}", inline=True)
@@ -4055,25 +4059,25 @@ class GathershipSetupView(discord.ui.View):
         ships = game.get_ships(self.is_host)
         cursor = game.get_cursor(self.is_host)
         grid = _gathership_grid_display(ships, cursor, show_ships=True)
-        title = "⚓ Your fleet (ephemeral)"
-        desc = f"Place **{game.num_ships}** ship(s). Use arrows to move, then **Place ship**.\n\n{grid}"
+        title = "⚓ Your fleet"
+        desc = f"Place **{game.num_ships}** ship(s). Use arrows to move, then click **Place Ship**!\n\n{grid}"
         embed = discord.Embed(title=title, description=desc, color=discord.Color.blue())
         embed.add_field(name="Ships placed", value=f"{len(ships)}/{game.num_ships}", inline=True)
         return embed
 
-    @discord.ui.button(label="⬅️ Left", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="⬅️", style=discord.ButtonStyle.secondary, row=0)
     async def left(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._move(interaction, 0, -1)
 
-    @discord.ui.button(label="➡️ Right", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="➡️", style=discord.ButtonStyle.secondary, row=0)
     async def right(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._move(interaction, 0, 1)
 
-    @discord.ui.button(label="⬆️ Up", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="⬆️", style=discord.ButtonStyle.secondary, row=1)
     async def up(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._move(interaction, -1, 0)
 
-    @discord.ui.button(label="⬇️ Down", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="⬇️", style=discord.ButtonStyle.secondary, row=1)
     async def down(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._move(interaction, 1, 0)
 
@@ -4094,7 +4098,7 @@ class GathershipSetupView(discord.ui.View):
             print(f"Gathership setup move: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
 
-    @discord.ui.button(label="Place ship", style=discord.ButtonStyle.green, row=2)
+    @discord.ui.button(label="Place Ship", style=discord.ButtonStyle.green, row=2)
     async def place_ship(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if self.game_id not in active_gathership_games:
@@ -4127,6 +4131,16 @@ async def _gathership_send_turn_message(channel, game_id: str):
     game = active_gathership_games[game_id]
     current_name = game.get_current_turn_name()
     view = GathershipTurnView(game_id, game.turn_sequence, timeout=120)
+    # Send the Take Shot button only to the current player via DM (so only they see the turn UI)
+    member = channel.guild.get_member(game.current_turn_id) if channel.guild else None
+    if member:
+        try:
+            await member.send(f"It's your turn! Click **Take Shot** below (2 min).", view=view)
+            await channel.send(f"🎯 **{current_name}**'s turn! (They have 2 min to take their shot.)")
+            return
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+    # Fallback: post in channel with button if DMs disabled or member not found
     await channel.send(f"🎯 **{current_name}**'s turn! Click **Take Shot** below (2 min).", view=view)
 
 
@@ -4153,7 +4167,7 @@ class GathershipTurnView(discord.ui.View):
             cursor = game.fire_cursor
             grid = _gathership_grid_display(enemy_ships, cursor, show_ships=False, shot_at=shot_at)
             embed = discord.Embed(
-                title="🔥 Fire at Enemy Fleet (ephemeral)",
+                title="🔥 Fire at Enemy Fleet",
                 description=f"Move cursor then press **Fire!**\n\n{grid}",
                  color=discord.Color.dark_red()
             )
@@ -4190,7 +4204,7 @@ class GathershipFireView(discord.ui.View):
         shot_at = game.host_shot_at if at_host_board else game.opponent_shot_at
         grid = _gathership_grid_display(enemy_ships, game.fire_cursor, show_ships=False, shot_at=shot_at)
         return discord.Embed(
-            title="🔥 Fire at enemy fleet (ephemeral)",
+            title="🔥 Fire at enemy fleet",
             description=f"Move cursor then press **Fire!**\n\n{grid}",
             color=discord.Color.dark_red()
         )
@@ -4240,11 +4254,9 @@ class GathershipFireView(discord.ui.View):
                 return
             r, c = game.fire_cursor
             at_host_board = game.current_turn_id == game.opponent_id
-            if at_host_board and (r, c) in game.host_shot_at:
-                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You already shot here!", ephemeral=True)
-                return
-            if not at_host_board and (r, c) in game.opponent_shot_at:
-                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You already shot here!", ephemeral=True)
+            already_shot = (at_host_board and (r, c) in game.host_shot_at) or (not at_host_board and (r, c) in game.opponent_shot_at)
+            if already_shot:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You already shot here! Pick a different square.", ephemeral=True)
                 return
             hit = game.record_shot(at_host_board, r, c)
             channel = bot.get_channel(game.channel_id)
@@ -4648,7 +4660,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.8.1 :3"
+            name="running /gather on V0.8.2 :3"
         )
     )
     try:
@@ -4839,8 +4851,9 @@ async def _post_rares_imbue(guild: discord.Guild, user: discord.Member,
     rarity_emoji = RARITY_EMOJI.get(rarity, "")
     tool_text = "**hoe imbue**" if tool_type == "hoe" else "**tractor imbue**"
     name = enchant.get("name", "Unknown")
-    # Leading rarity emoji, rarity in caps, imbue name bold+italic, tool lowercase bold, sparkle at end
-    msg = f"{rarity_emoji} {user.mention} rolled a **{rarity}** imbue: **_{name}_** {tool_text}! ✨"
+    # Leading rarity emoji, rarity in caps, tool type next, imbue name bold+italic, sparkle at end
+    # e.g. ":IMBUE_CE: @User rolled a CELESTIAL hoe imbue: CULTISCYTHE OF THE LIGHTBRINGER! ✨"
+    msg = f"{rarity_emoji} {user.mention} rolled a **{rarity}** {tool_text}: **_{name}_**! ✨"
     await _post_to_rares_channel(guild, msg)
 
 
@@ -4919,7 +4932,7 @@ async def _gather_post_response(interaction: discord.Interaction, user_id: int,
         # Tree Ring notice
         if gather_result.get("tree_ring_awarded"):
             await safe_interaction_response(interaction, interaction.followup.send,
-                f"🌳 {interaction.user.mention} You've been awarded **1 Tree Ring**!",
+                f"<:TreeRing:1474244868288282817> {interaction.user.mention} You've been awarded **1 Tree Ring**!",
                 ephemeral=True)
 
         # Role assignment (async Discord API)
@@ -5047,6 +5060,8 @@ async def gather(interaction: discord.Interaction):
             embed.add_field(name="\u2728 Attunement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
             embed.add_field(name="\U0001f4a5 Critical Multiplier",
                 value=f"${pre_crit_value:.2f} \u2192 **${gather_result['value']:.2f}**", inline=False)
+            month_name = gather_result.get("month_name", "—")
+            embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
             embed.add_field(name="\U0001f4b0 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
             embed.add_field(name="\U0001f4b5 New Balance", value=f"**${gather_result['new_balance']:.2f}**", inline=True)
         else:
@@ -5061,7 +5076,7 @@ async def gather(interaction: discord.Interaction):
             bloom_count = full_data.get("bloom_count", 0)
             if bloom_count > 0 and gather_result.get('extra_money_from_bloom', 0) > 0:
                 multiplier_percent = (gather_result['bloom_multiplier'] - 1.0) * 100
-                embed.add_field(name="🌳 Tree Ring Boost",
+                embed.add_field(name="<:TreeRing:1474244868288282817> Tree Ring Boost",
                     value=f"+{multiplier_percent:.1f}% - **+${gather_result['extra_money_from_bloom']:.2f}**", inline=False)
 
             bloom_rank = _bloom_count_to_rank(bloom_count)
@@ -5086,6 +5101,8 @@ async def gather(interaction: discord.Interaction):
                 hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]")
                 embed.add_field(name="\u2728 Attunement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
 
+            month_name = gather_result.get("month_name", "—")
+            embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
             embed.add_field(name="\U0001f4b0 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
             embed.add_field(name="\U0001f4b5 New Balance", value=f"**${gather_result['new_balance']:.2f}**", inline=True)
 
@@ -5126,7 +5143,7 @@ async def water(interaction: discord.Interaction):
         
         # Convert to EST (UTC-5)
         EST_OFFSET = datetime.timedelta(hours=-5)
-        now_utc = datetime.datetime.utcnow()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
         now_est = now_utc + EST_OFFSET
         current_date = now_est.date()
         current_hour = now_est.hour
@@ -5578,7 +5595,7 @@ async def _harvest_post_response(interaction: discord.Interaction, user_id: int,
         tree_rings_to_award = result.get("tree_rings_to_award", 0)
         if tree_rings_to_award > 0:
             await safe_interaction_response(interaction, interaction.followup.send,
-                f"🌳 {interaction.user.mention} You've been awarded **{tree_rings_to_award} Tree Ring{'s' if tree_rings_to_award > 1 else ''}**!",
+                f"<:TreeRing:1474244868288282817> {interaction.user.mention} You've been awarded **{tree_rings_to_award} Tree Ring{'s' if tree_rings_to_award > 1 else ''}**!",
                 ephemeral=True)
 
         # Role assignment (async Discord API)
@@ -5692,6 +5709,9 @@ async def harvest(interaction: discord.Interaction):
 
         # --- build embed (pure computation, no DB) ---
         embed = discord.Embed(title="You Harvested!", color=discord.Color.green())
+        month_name = result.get("month_name", "")
+        if month_name:
+            embed.add_field(name="Month", value=month_name, inline=True)
 
         # (obsolete) (~35–50 chars per line; 20–30 items stay under Discord’s 1024 limit)
         # One line per item: emoji (ripeness) GMO? — no plant name text to stay under 1024
@@ -5719,7 +5739,7 @@ async def harvest(interaction: discord.Interaction):
         extra_money_from_bloom = total_base_value * (bloom_multiplier - 1.0)
         if bloom_count > 0 and extra_money_from_bloom > 0:
             multiplier_percent = (bloom_multiplier - 1.0) * 100
-            embed.add_field(name="🌳 Tree Ring Boost",
+            embed.add_field(name="<:TreeRing:1474244868288282817> Tree Ring Boost",
                 value=f"+{multiplier_percent:.1f}% - **+${extra_money_from_bloom:.2f}**", inline=False)
 
         achievement_multiplier = get_achievement_multiplier(user_id, full_data=full_data)
@@ -5781,7 +5801,8 @@ async def harvest(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="achievements", description="View your achievements and progress!")
-async def achievements(interaction: discord.Interaction):
+@app_commands.describe(hidden="Show hidden achievements (discovered show description; undiscovered show ???????)")
+async def achievements(interaction: discord.Interaction, hidden: bool = False):
     try:
         if not await safe_defer(interaction, ephemeral=True):
             return
@@ -5789,6 +5810,23 @@ async def achievements(interaction: discord.Interaction):
         user_id = interaction.user.id
         total_items = get_user_total_items(user_id)
         hidden_achievements_count = get_user_hidden_achievements_count(user_id)
+        
+        # If hidden=True, show only hidden achievements list
+        if hidden:
+            embed = discord.Embed(
+                title=f"🔒 {interaction.user.name}'s Hidden Achievements",
+                color=discord.Color.dark_gray()
+            )
+            for key, data in HIDDEN_ACHIEVEMENTS.items():
+                name = data["name"]
+                if has_hidden_achievement(user_id, key):
+                    desc = data["description"]
+                    embed.add_field(name=name, value=desc, inline=False)
+                else:
+                    embed.add_field(name=name, value="???????", inline=False)
+            embed.set_footer(text=f"Discovered: {hidden_achievements_count}/{TOTAL_HIDDEN_ACHIEVEMENTS}")
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+            return
         
         # Create embed
         embed = discord.Embed(
@@ -5923,13 +5961,13 @@ async def bloom(interaction: discord.Interaction):
         
         # Create confirmation embed
         embed = discord.Embed(
-            title="🌳 You Bloomed!",
+            title="<:TreeRing:1474244868288282817> You Bloomed!",
             description=f"{interaction.user.mention} has advanced to **{new_rank}**!",
             color=discord.Color.gold()
         )
         
         embed.add_field(name="🌲 Bloom Rank", value=f"**{old_rank}** → **{new_rank}**", inline=False)
-        embed.add_field(name="🌳 Tree Rings", value=f"**{tree_rings}** Tree Rings", inline=False)
+        embed.add_field(name="<:TreeRing:1474244868288282817> Tree Rings", value=f"**{tree_rings}** Tree Rings", inline=False)
         
         if tree_rings > 0:
             multiplier = get_bloom_multiplier(user_id)
@@ -6074,71 +6112,78 @@ DAILY_SHOP_ITEMS = {
         "name": "Fuzzy Dice",
         "description": "A good trinket to have for your tractor!",
         "cost": 5,
-        "effect": "5% permanent boost to money from /harvest",
+        "effect": "5% permanent boost to money from /harvest!",
     },
     "mutagenic_serum": {
         "name": "Mutagenic Serum",
         "description": "Organic Schmorganic!",
         "cost": 50,
-        "effect": "+7% GMO chance permanently",
+        "effect": "Permanent +7% GMO chance!",
     },
     "scarecrow": {
         "name": "Scarecrow",
         "description": "Scare those pesky crows away!",
         "cost": 15,
-        "effect": "+10% money gain from /gather",
+        "effect": "+10% money gain from /gather!",
     },
     "cryptobro_shadow": {
         "name": "Cryptobro's Shadow",
         "description": "You GOTTA buy this coin, man.",
         "cost": 75,
-        "effect": "+50% money gain from /sell",
+        "effect": "+50% money gain from /sell!",
     },
     "bloomstone": {
         "name": "Bloomstone",
         "description": "An ancient gem, shining with light.",
         "cost": 500,
-        "effect": "All flowers triple in worth",
+        "effect": "All flowers triple in worth!",
     },
     "irrigation_system": {
         "name": "Irrigation System",
-        "description": "Auto /waters for you. (Double water if you have that invite reward.)",
+        "description": "It's got electrolytes!",
         "cost": 2250,
-        "effect": "Auto /water each day",
+        "effect": "Auto-/waters for you!",
     },
     "gamblers_revolver": {
         "name": "Gambler's Revolver",
-        "description": "Luck is a skill.",
+        "description": "A flashy pistol, engraved with \"KH\".",
         "cost": 2000,
-        "effect": "Russian Roulette death penalty: 5 min instead of 30 min",
+        "effect": "*Russian Roulette death penalty reduces to 5 minutes!*",
     },
     "commoners_respite": {
         "name": "Commoner's Respite",
         "description": "Say goodbye to those common imbues!",
         "cost": 3000,
-        "effect": "You cannot roll a common imbue when doing /imbue",
+        "effect": "You cannot roll a common imbue when doing /imbue!",
     },
     "atlas": {
         "name": "Atlas",
-        "description": "Lets you see the world around you!",
+        "description": "Not to be confused with the browser.",
         "cost": 1000,
-        "effect": "Doubles the money gain from each area",
+        "effect": "Doubles the money gain from each area!",
     },
 }
 DAILY_SHOP_ITEM_IDS = list(DAILY_SHOP_ITEMS.keys())
 MAX_DAILY_SHOP_PURCHASES = 3
 
 
-def get_daily_shop_offerings(date_est: str) -> list:
-    """Return 3 random item ids for the given EST date (YYYY-MM-DD). Deterministic per date."""
+def get_daily_shop_offerings(date_est: str, user_id: int = None) -> list:
+    """Return up to 3 random item ids for the given EST date (YYYY-MM-DD). Deterministic per date.
+    If user_id is provided, only returns items the user does not already own (one per item ever)."""
     rng = random.Random(date_est)
-    return rng.sample(list(DAILY_SHOP_ITEMS.keys()), 3)
+    all_ids = list(DAILY_SHOP_ITEMS.keys())
+    if user_id is not None:
+        all_ids = [i for i in all_ids if not has_shop_item(user_id, i)]
+    k = min(3, len(all_ids))
+    if k == 0:
+        return []
+    return rng.sample(all_ids, k)
 
 
 def _get_date_est() -> str:
     """Current date in EST as YYYY-MM-DD."""
     EST_OFFSET = datetime.timedelta(hours=-5)
-    now_utc = datetime.datetime.utcnow()
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
     now_est = now_utc + EST_OFFSET
     return now_est.strftime("%Y-%m-%d")
 
@@ -6146,7 +6191,7 @@ def _get_date_est() -> str:
 def _seconds_until_midnight_est() -> float:
     """Seconds from now until next midnight EST."""
     EST_OFFSET = datetime.timedelta(hours=-5)
-    now_utc = datetime.datetime.utcnow()
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
     now_est = now_utc + EST_OFFSET
     next_midnight = (now_est + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     target_utc = next_midnight - EST_OFFSET
@@ -6161,6 +6206,25 @@ def _format_refresh_countdown() -> str:
     if h > 0:
         return f"{h}h {m}m"
     return f"{m}m"
+
+
+def _build_daily_shop_embed_and_view(offerings: list, date_est: str):
+    """Build the Daily Shop embed and view for the given list of item ids (already filtered for user)."""
+    embed = discord.Embed(
+        title="🛒 Daily Shop",
+        description="Welcome to the Daily Shop! Purchase special items with **<:TreeRing:1474244868288282817> Tree Rings**. Stock refreshes daily at midnight EST!",
+        color=discord.Color.green()
+    )
+    for item_id in offerings:
+        info = DAILY_SHOP_ITEMS[item_id]
+        embed.add_field(
+            name=f"<:TreeRing:1474244868288282817> {info['name']}",
+            value=f"{info['description']}\n*{info['effect']}*\nPrice: **{info['cost']}** <:TreeRing:1474244868288282817> Tree Rings",
+            inline=False
+        )
+    embed.set_footer(text=f"Shop refreshes in {_format_refresh_countdown()}")
+    view = DailyShopView(item_ids=offerings)
+    return embed, view
 
 
 @bot.tree.command(name="inviteawards", description="Check or claim your invite rewards!")
@@ -6313,7 +6377,11 @@ class DailyShopBuyButton(discord.ui.Button):
             return
         user_id = interaction.user.id
         date_est = _get_date_est()
-        offerings = get_daily_shop_offerings(date_est)
+        if has_shop_item(user_id, item_id):
+            await safe_interaction_response(interaction, interaction.response.send_message,
+                f"❌ You already own **{DAILY_SHOP_ITEMS[item_id]['name']}**.", ephemeral=True)
+            return
+        offerings = get_daily_shop_offerings(date_est, user_id)
         if item_id not in offerings:
             await safe_interaction_response(interaction, interaction.response.send_message,
                 f"❌ **{DAILY_SHOP_ITEMS[item_id]['name']}** is not in today's shop.", ephemeral=True)
@@ -6330,18 +6398,34 @@ class DailyShopBuyButton(discord.ui.Button):
         tree_rings = get_user_tree_rings(user_id)
         if tree_rings < cost:
             await safe_interaction_response(interaction, interaction.response.send_message,
-                f"❌ You need **{cost}** 🌳 Tree Rings for **{info['name']}**, but you have **{tree_rings}**.", ephemeral=True)
+                f"❌ You need **{cost}** <:TreeRing:1474244868288282817> Tree Rings for **{info['name']}**, but you have **{tree_rings}**.", ephemeral=True)
             return
         success = purchase_daily_shop_item(user_id, item_id, cost, date_est)
         if not success:
             await safe_interaction_response(interaction, interaction.response.send_message,
-                "❌ Purchase failed. Try again.", ephemeral=True)
+                "❌ Purchase failed (you may already own this item). Try again.", ephemeral=True)
             return
-        remaining = MAX_DAILY_SHOP_PURCHASES - purchase_count - 1
-        msg = f"✅ You bought **{info['name']}** for **{cost}** 🌳 Tree Rings. *{info['effect']}*"
-        if remaining > 0:
-            msg += f"\nYou can buy **{remaining}** more item(s) today."
-        await safe_interaction_response(interaction, interaction.response.send_message, msg, ephemeral=True)
+        await safe_interaction_response(interaction, interaction.response.defer, ephemeral=True)
+        new_offerings = get_daily_shop_offerings(date_est, user_id)
+        if new_offerings:
+            new_embed, new_view = _build_daily_shop_embed_and_view(new_offerings, date_est)
+            try:
+                await interaction.message.edit(embed=new_embed, view=new_view)
+            except Exception:
+                pass
+        else:
+            done_embed = discord.Embed(
+                title="🛒 Daily Shop",
+                description="You've bought everything available for you today! You own all items currently on offer.",
+                color=discord.Color.gold()
+            )
+            done_embed.set_footer(text=f"Shop refreshes in {_format_refresh_countdown()}")
+            try:
+                await interaction.message.edit(embed=done_embed, view=None)
+            except Exception:
+                pass
+        msg = f"✅ You bought **{info['name']}** for **{cost}** <:TreeRing:1474244868288282817> Tree Rings!"
+        await safe_interaction_response(interaction, interaction.followup.send, msg, ephemeral=True)
 
 
 class DailyShopInventoryButton(discord.ui.Button):
@@ -6391,21 +6475,17 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
             embed.set_footer(text="Shop refreshes daily at midnight EST")
             await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
             return
-        offerings = get_daily_shop_offerings(date_est)
-        embed = discord.Embed(
-            title="🛒 Daily Shop",
-            description="Welcome to the Daily Shop! Purchase special items with **🌳 Tree Rings**. Stock refreshes daily at midnight EST. You can buy up to **3** items per day.",
-            color=discord.Color.green()
-        )
-        for item_id in offerings:
-            info = DAILY_SHOP_ITEMS[item_id]
-            embed.add_field(
-                name=f"🌳 {info['name']}",
-                value=f"{info['description']}\n*{info['effect']}*\nPrice: **{info['cost']}** 🌳 Tree Rings",
-                inline=False
+        offerings = get_daily_shop_offerings(date_est, user_id)
+        if not offerings:
+            embed = discord.Embed(
+                title="🛒 Daily Shop",
+                description="You already own **all** Daily Shop items! There's nothing new for you today. Check back after the next refresh.",
+                color=discord.Color.gold()
             )
-        embed.set_footer(text=f"Shop refreshes in {_format_refresh_countdown()}")
-        view = DailyShopView(item_ids=offerings)
+            embed.set_footer(text=f"Shop refreshes in {_format_refresh_countdown()}")
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+            return
+        embed, view = _build_daily_shop_embed_and_view(offerings, date_est)
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view, ephemeral=True)
     except Exception as e:
         print(f"Error in dailyshop command: {e}")
@@ -6485,7 +6565,7 @@ async def userstats(interaction: discord.Interaction):
         tree_rings = get_user_tree_rings(user_id)
         bloom_multiplier = get_bloom_multiplier(user_id)
         embed.add_field(name="🌲 Bloom Rank", value=f"**{bloom_rank}**", inline=True)
-        embed.add_field(name="🌳 Tree Rings", value=f"**{tree_rings}** ({bloom_multiplier:.2f}x)", inline=True)
+        embed.add_field(name="<:TreeRing:1474244868288282817> Tree Rings", value=f"**{tree_rings}** ({bloom_multiplier:.2f}x)", inline=True)
         
         # Add Rank Perma Buff (only if not PINE I) - 1.2x per rank-up
         rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
@@ -6518,10 +6598,13 @@ async def userstats(interaction: discord.Interaction):
         else:
             embed.add_field(name="✨ Harvest Attunement", value="**None**", inline=True)
         
+        bloom_cost = 500_000_000
+        can_bloom = (cycle_plants >= 15000) and (user_balance >= bloom_cost)
+        bloom_line = f":cherry_blossom: Can Bloom? - {'Yes' if can_bloom else 'No'}"
         if items_needed == 0:
-            embed.add_field(name="🏆 Rank Status", value=f"**{next_rank}** - You've reached **PLANTER X**!", inline=False)
+            embed.add_field(name="🏆 Rank Status", value=f"**{next_rank}** - You've reached **PLANTER X**!\n\n{bloom_line}", inline=False)
         else:
-            embed.add_field(name="📈 Next Rank", value=f"**{items_needed}** more plants until **{next_rank}**", inline=False)
+            embed.add_field(name="📈 Next Rank", value=f"**{items_needed}** more plants until **{next_rank}**\n\n{bloom_line}", inline=False)
         
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
     except Exception as e:
@@ -7159,12 +7242,6 @@ class ImbueView(discord.ui.View):
             color=discord.Color.light_grey(),
         )
         await safe_interaction_response(interaction, interaction.response.edit_message, embed=keep_embed, view=self)
-
-        # Auto-log to #rares when user keeps a netherite+ imbue (Keep Current)
-        if self.current_enchant and self.current_enchant.get("rarity") in IMBUE_RARES_RARITIES:
-            guild = getattr(interaction, "guild", None)
-            if guild:
-                asyncio.create_task(_post_rares_imbue(guild, interaction.user, self.current_enchant, self.tool_type))
 
         self.stop()
 
@@ -8662,19 +8739,17 @@ async def giveaway(
                 await safe_interaction_response(interaction, interaction.followup.send,
                     "❌ **Error**: Please select a valid `shop_item` from the Daily Shop list.", ephemeral=True)
                 return
-            qty = 1
-            if amount is not None and amount > 0:
-                qty = int(amount)
+            qty = 1  # Daily shop items are one-per-user; giveaway gives 1 (add_shop_item_to_user caps at 1)
             add_shop_item_to_user(user_id, shop_item, qty)
             info = DAILY_SHOP_ITEMS[shop_item]
             embed = discord.Embed(
                 title="🎉 Giveaway – Daily Shop Item",
-                description=f"**{qty}× {info['name']}** has been given to {user.mention}!",
+                description=f"**{info['name']}** has been given to {user.mention}!",
                 color=discord.Color.gold()
             )
             embed.add_field(name="Effect", value=info["effect"], inline=False)
             embed.set_footer(text=f"Given by {interaction.user.name}")
-            print(f"Admin {interaction.user.name} used /giveaway shop_item to give {user.name} {qty}× {info['name']}")
+            print(f"Admin {interaction.user.name} used /giveaway shop_item to give {user.name} {info['name']}")
 
         else:
             await safe_interaction_response(interaction, interaction.followup.send,
@@ -8815,7 +8890,7 @@ class LeaderboardView(discord.ui.View):
             if self.leaderboard_type == "plants":
                 # Top 3 get different tree emojis, bottom 7 get plant emoji
                 if rank == 1:
-                    emoji = "🌳"
+                    emoji = "<:TreeRing:1474244868288282817>"
                 elif rank == 2:
                     emoji = "🎄"
                 elif rank == 3:
@@ -8941,7 +9016,7 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
         if leaderboard_type == "plants":
             # Top 3 get different tree emojis, bottom 7 get plant emoji
             if rank == 1:
-                emoji = "🌳"
+                emoji = "<:TreeRing:1474244868288282817>"
             elif rank == 2:
                 emoji = "🎄"
             elif rank == 3:
@@ -9607,6 +9682,7 @@ async def send_market_news(guild: discord.Guild):
         # Pick a random company
         ticker = random.choice(STOCK_TICKERS)
         company_name = ticker["name"]
+        company_display = f"{ticker.get('emoji', '')} {company_name}"
         symbol = ticker["symbol"]
         
         # Pick positive or negative news (50/50 chance)
@@ -9673,8 +9749,8 @@ async def send_market_news(guild: discord.Guild):
             # Stock not initialized, skip price update
             price_change_display = f"{'+' if is_positive else '-'}{price_change_percent * 100:.0f}%"
         
-        # Format the news message with company name
-        news_message = news_template.format(company=company_name)
+        # Format the news message with company name (with emoji)
+        news_message = news_template.format(company=company_display)
         
         # Create embed
         embed = discord.Embed(
@@ -9682,7 +9758,7 @@ async def send_market_news(guild: discord.Guild):
             description=news_message,
             color=color
         )
-        embed.add_field(name="Company", value=f"**{company_name} ({symbol})**", inline=True)
+        embed.add_field(name="Company", value=f"**{company_display} ({symbol})**", inline=True)
         embed.add_field(name="Price Impact", value=f"**{price_change_display}**", inline=True)
         embed.timestamp = discord.utils.utcnow()
         
@@ -10437,7 +10513,7 @@ async def irrigation_auto_water_task():
     last_run_date_hour = None
     while not bot.is_closed():
         try:
-            now_utc = datetime.datetime.utcnow()
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
             now_est = now_utc + EST_OFFSET
             if now_est.hour in (0, 12) and now_est.minute < 2:
                 key = (now_est.date(), now_est.hour)
@@ -11174,7 +11250,7 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             if bloom_count > 0 and extra_from_bloom > 0:
                 multiplier_percent = (bloom_multiplier - 1.0) * 100
                 embed.add_field(
-                    name="🌳 Tree Ring Boost",
+                    name="<:TreeRing:1474244868288282817> Tree Ring Boost",
                     value=f"+{multiplier_percent:.1f}% - **+${extra_from_bloom:.2f}**",
                     inline=False
                 )
@@ -11283,7 +11359,7 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         if bloom_count > 0 and extra_from_bloom > 0:
             multiplier_percent = (bloom_multiplier - 1.0) * 100
             embed.add_field(
-                name="🌳 Tree Ring Boost",
+                name="<:TreeRing:1474244868288282817> Tree Ring Boost",
                 value=f"+{multiplier_percent:.1f}% - **+${extra_from_bloom:.2f}**",
                 inline=False
             )
@@ -11515,14 +11591,14 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
             available_shares = calculate_available_shares(guild_id, ticker)
             if available_shares == 0:
                 await safe_interaction_response(interaction, interaction.followup.send,
-                    f"❌ No shares available! All shares of {ticker_info['name']} ({ticker}) have been purchased.",
+                    f"❌ No shares available! All shares of {ticker_info['emoji']} **{ticker_info['name']}** ({ticker}) have been purchased.",
                     ephemeral=True)
                 return
             
             if available_shares < amount:
                 await safe_interaction_response(interaction, interaction.followup.send,
                     f"❌ Not enough shares available!\n\n"
-                    f"Only **{available_shares:,} share(s)** of {ticker_info['name']} ({ticker}) are available, "
+                    f"Only **{available_shares:,} share(s)** of {ticker_info['emoji']} **{ticker_info['name']}** ({ticker}) are available, "
                     f"but you tried to buy **{amount:,} share(s)**.",
                     ephemeral=True)
                 return
@@ -11534,7 +11610,7 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
             user_balance = get_user_balance(user_id)
             if user_balance < total_cost:
                 await safe_interaction_response(interaction, interaction.followup.send,
-                    f"❌ You don't have enough balance to buy {amount} share(s) of {ticker_info['name']} ({ticker})!\n\n"
+                    f"❌ You don't have enough balance to buy {amount} share(s) of {ticker_info['emoji']} **{ticker_info['name']}** ({ticker})!\n\n"
                     f"You need **${total_cost:.2f}** but only have **${user_balance:.2f}**.",
                     ephemeral=True)
                 return
@@ -11560,7 +11636,7 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
             # Create success embed
             embed = discord.Embed(
                 title="✅ Purchase Successful!",
-                description=f"You bought **{amount:,} share(s)** of **{ticker_info['name']} ({ticker})** at **${current_price:.2f}** each.",
+                description=f"You bought **{amount:,} share(s)** of {ticker_info['emoji']} **{ticker_info['name']}** ({ticker}) at **${current_price:.2f}** each.",
                 color=discord.Color.green()
             )
             embed.add_field(name="Cost", value=f"**${total_cost:.2f}**", inline=True)
@@ -11578,7 +11654,7 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
             if current_shares < amount:
                 await safe_interaction_response(interaction, interaction.followup.send,
                     f"❌ You don't have enough shares to sell!\n\n"
-                    f"You only have **{current_shares:,} share(s)** of {ticker_info['name']} ({ticker}), "
+                    f"You only have **{current_shares:,} share(s)** of {ticker_info['emoji']} **{ticker_info['name']}** ({ticker}), "
                     f"but tried to sell **{amount:,} share(s)**.",
                     ephemeral=True)
                 return
@@ -11595,7 +11671,7 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
             # Create success embed
             embed = discord.Embed(
                 title="✅ Sale Successful!",
-                description=f"You sold **{amount:,} share(s)** of **{ticker_info['name']} ({ticker})** at **${current_price:.2f}** each.",
+                description=f"You sold **{amount:,} share(s)** of {ticker_info['emoji']} **{ticker_info['name']}** ({ticker}) at **${current_price:.2f}** each.",
                 color=discord.Color.green()
             )
             embed.add_field(name="Revenue", value=f"**${total_value:.2f}**", inline=True)
@@ -11864,14 +11940,14 @@ async def gathership(interaction: discord.Interaction, user: discord.Member, bet
 
         embed = discord.Embed(
             title="⚓ GATHERSHIP ⚓",
-            description=f"**{host_name}** is challenging **{opponent_name}** to **GATHERSHIP**!\n\n{opponent_name}: click **Join Game** to accept. Host can **Start Game** when ready.",
+            description=f"{interaction.user.mention} is challenging {user.mention} to **GATHERSHIP**!\n\n{user.mention}, click **Join Game** to accept. Host can **Start Game** when ready.",
             color=discord.Color.blue()
         )
         embed.add_field(name="💰 Bet", value=f"${bet:.2f} each", inline=True)
         embed.add_field(name="🚢 Ships", value=str(ships), inline=True)
         embed.add_field(name="⏰ Timeout", value="5 min to join / start", inline=True)
         view = GathershipLobbyView(game_id, host_id, opponent_id, timeout=300)
-        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
+        await safe_interaction_response(interaction, interaction.followup.send, content=user.mention, embed=embed, view=view)
     except Exception as e:
         print(f"Error in gathership command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
