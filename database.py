@@ -447,6 +447,31 @@ def get_user_bloom_cycle_plants(user_id: int) -> int:
     return int(doc.get("bloom_cycle_plants", 0))
 
 
+def deduct_user_bloom_cycle_plants(user_id: int, amount: int) -> bool:
+    """Deduct plants from user's bloom cycle. Returns True if they had enough and deduction succeeded."""
+    if amount <= 0:
+        return True
+    users = _get_users_collection()
+    result = users.update_one(
+        {"_id": int(user_id), "bloom_cycle_plants": {"$gte": amount}},
+        {"$inc": {"bloom_cycle_plants": -amount}},
+    )
+    return result.modified_count == 1
+
+
+def add_user_bloom_cycle_plants(user_id: int, amount: int) -> None:
+    """Add plants to user's bloom cycle (e.g. winnings)."""
+    if amount <= 0:
+        return
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$inc": {"bloom_cycle_plants": amount}},
+        upsert=True,
+    )
+
+
 def get_all_users_total_items() -> list[tuple[int, int]]:
     """Get all users with their total items gathered, sorted by total_items descending."""
     users = _get_users_collection()

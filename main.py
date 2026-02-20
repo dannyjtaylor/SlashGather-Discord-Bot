@@ -112,6 +112,8 @@ from database import (
     get_user_bloom_count,
     perform_bloom,
     get_user_bloom_cycle_plants,
+    deduct_user_bloom_cycle_plants,
+    add_user_bloom_cycle_plants,
     get_user_last_water_time,
     update_user_last_water_time,
     get_user_consecutive_water_days,
@@ -615,7 +617,7 @@ ENCHANTMENT_RARITIES = [
     {"name": "NETHERITE",  "weight": 1.0},        # 1%
     {"name": "LUMINITE",   "weight": 0.5},        # 0.5%
     {"name": "CELESTIAL",  "weight": 0.1234},     # 0.1234%
-    {"name": "SECRET",     "weight": 0.01666},    # 0.01666%
+    {"name": "SECRET",     "weight": 90.0},    # 0.01666%
 ]
 
 RARITY_COLORS = {
@@ -642,6 +644,9 @@ RARITY_EMOJI = {
     "CELESTIAL":   "<:IMBUE_CE:1472431208859439295>",
     "SECRET":      "<:IMBUE_SEC:1473395529554591848>"
 }
+# GIF emojis used to mask SECRET imbue stats until claimed.
+IMBUE_SEC_GIF_1 = "<a:IMBUE_SEC_1:1474405245563175175>"
+IMBUE_SEC_GIF_2 = "<a:IMBUE_SEC_2:1474405298385981502>"
 
 def _to_roman(num):
     """Convert integer to Roman numeral string (supports negatives)."""
@@ -850,27 +855,37 @@ TRACTOR_ENCHANTMENTS = {
 }
 
 
-def roll_attunement(tool_type: str, user_id: int = None) -> dict:
+def roll_attunement(tool_type: str, user_id: int = None, exclude_enchant: dict = None) -> dict:
     """Roll a random attunement for the given tool type ('hoe' or 'tractor').
     If user_id is provided and has Commoner's Respite, COMMON rarity is excluded.
+    If exclude_enchant is provided (e.g. current attunement), will not return the same enchant by name.
     Returns a copy of the attunement dict."""
     enchant_pool = HOE_ENCHANTMENTS if tool_type == "hoe" else TRACTOR_ENCHANTMENTS
+    exclude_name = (exclude_enchant or {}).get("name")
 
-    # Pick rarity using weighted random
-    rarity_names = [r["name"] for r in ENCHANTMENT_RARITIES]
-    rarity_weights = [r["weight"] for r in ENCHANTMENT_RARITIES]
-    if user_id and has_shop_item(user_id, "commoners_respite"):
-        # Exclude COMMON: set its weight to 0 and renormalize
-        rarity_weights = [0.0 if name == "COMMON" else w for name, w in zip(rarity_names, rarity_weights)]
-        total = sum(rarity_weights)
-        if total <= 0:
-            total = 1.0
-        rarity_weights = [w / total for w in rarity_weights]
-    chosen_rarity = random.choices(rarity_names, weights=rarity_weights, k=1)[0]
+    for _ in range(100):  # max attempts to avoid infinite loop
+        # Pick rarity using weighted random
+        rarity_names = [r["name"] for r in ENCHANTMENT_RARITIES]
+        rarity_weights = [r["weight"] for r in ENCHANTMENT_RARITIES]
+        if user_id and has_shop_item(user_id, "commoners_respite"):
+            # Exclude COMMON: set its weight to 0 and renormalize
+            rarity_weights = [0.0 if name == "COMMON" else w for name, w in zip(rarity_names, rarity_weights)]
+            total = sum(rarity_weights)
+            if total <= 0:
+                total = 1.0
+            rarity_weights = [w / total for w in rarity_weights]
+        chosen_rarity = random.choices(rarity_names, weights=rarity_weights, k=1)[0]
 
-    # Pick random enchant from that rarity
+        # Pick random enchant from that rarity
+        enchant = random.choice(enchant_pool[chosen_rarity])
+        if exclude_name and enchant.get("name") == exclude_name:
+            continue  # re-roll same enchant
+        # Return a copy so we don't mutate the template
+        return dict(enchant)
+
+    # Fallback: return first enchant of a random rarity (should not happen in practice)
+    chosen_rarity = random.choice(rarity_names)
     enchant = random.choice(enchant_pool[chosen_rarity])
-    # Return a copy so we don't mutate the template
     return dict(enchant)
 
 
@@ -3814,6 +3829,362 @@ async def end_roulette_game(channel, game_id):
             break
 
 
+# --- GATHEMON (Turn-based Pokémon battle for plants) ---
+# Move: power (int or None), raise_atk_self, raise_def_self, lower_atk_enemy, lower_def_enemy (0-2 each). Coil = atk+def self.
+def _move(name: str, power: int | None = None, raise_atk_self: int = 0, raise_def_self: int = 0, lower_atk_enemy: int = 0, lower_def_enemy: int = 0):
+    m = {"name": name, "raise_atk_self": raise_atk_self, "raise_def_self": raise_def_self, "lower_atk_enemy": lower_atk_enemy, "lower_def_enemy": lower_def_enemy}
+    if power is not None:
+        m["power"] = power
+    return m
+
+GATHEMON_FIRST = [
+    {"name": "Sewaddle", "hp": 16, "atk": 3, "def": 2, "moves": [_move("Tackle", 3), _move("Razor Leaf", 4), _move("String Shot", lower_def_enemy=1), _move("Growth", raise_atk_self=1)]},
+    {"name": "Bulbasaur", "hp": 18, "atk": 3, "def": 3, "moves": [_move("Tackle", 3), _move("Vine Whip", 4), _move("Growl", lower_atk_enemy=1), _move("Defense Curl", raise_def_self=1)]},
+    {"name": "Snivy", "hp": 17, "atk": 3, "def": 2, "moves": [_move("Tackle", 3), _move("Leaf Blade", 4), _move("Leer", lower_def_enemy=1), _move("Growth", raise_atk_self=1)]},
+    {"name": "Eevee", "hp": 17, "atk": 3, "def": 3, "moves": [_move("Tackle", 3), _move("Quick Attack", 4), _move("Tail Whip", lower_def_enemy=1), _move("Baby-Doll Eyes", lower_atk_enemy=1)]},
+]
+GATHEMON_SECOND = [
+    {"name": "Ivysaur", "hp": 24, "atk": 5, "def": 4, "moves": [_move("Razor Leaf", 6), _move("Seed Bomb", 7), _move("Growl", lower_atk_enemy=1), _move("Iron Defense", raise_def_self=2)]},
+    {"name": "Swadloon", "hp": 26, "atk": 4, "def": 6, "moves": [_move("Razor Leaf", 6), _move("Bug Bite", 6), _move("Iron Defense", raise_def_self=2), _move("String Shot", lower_def_enemy=1)]},
+    {"name": "Servine", "hp": 23, "atk": 5, "def": 4, "moves": [_move("Leaf Blade", 6), _move("Slam", 7), _move("Growth", raise_atk_self=2), _move("Leer", lower_def_enemy=1)]},
+]
+GATHEMON_THIRD = [
+    {"name": "Leavanny", "hp": 34, "atk": 8, "def": 6, "moves": [_move("Leaf Blade", 9), _move("X-Scissor", 8), _move("Swords Dance", raise_atk_self=2), _move("Screech", lower_def_enemy=2)]},
+    {"name": "Venusaur", "hp": 36, "atk": 7, "def": 8, "moves": [_move("Petal Blizzard", 9), _move("Seed Bomb", 8), _move("Growl", lower_atk_enemy=2), _move("Iron Defense", raise_def_self=2)]},
+    {"name": "Serperior", "hp": 35, "atk": 8, "def": 7, "moves": [_move("Leaf Blade", 9), _move("Slam", 8), _move("Coil", raise_atk_self=1, raise_def_self=1), _move("Leer", lower_def_enemy=2)]},
+    {"name": "Leafeon", "hp": 34, "atk": 9, "def": 7, "moves": [_move("Leaf Blade", 10), _move("Quick Attack", 8), _move("Swords Dance", raise_atk_self=2), _move("Tail Whip", lower_def_enemy=2)]},
+]
+
+def _gathemon_tier_for_plants(plants: int) -> int:
+    """Return 1 (first), 2 (second), or 3 (third) evolution tier for bet amount 1-10."""
+    if plants <= 3:
+        return 1
+    if plants <= 7:
+        return 2
+    return 3
+
+def _gathemon_random_pokemon(plants: int) -> dict:
+    """Return a random Pokémon dict (copy with mutable state) for the given plant bet tier."""
+    tier = _gathemon_tier_for_plants(plants)
+    if tier == 1:
+        pool = GATHEMON_FIRST
+    elif tier == 2:
+        pool = GATHEMON_SECOND
+    else:
+        pool = GATHEMON_THIRD
+    base = random.choice(pool)
+    return {
+        "name": base["name"],
+        "hp": base["hp"],
+        "max_hp": base["hp"],
+        "atk": base["atk"],
+        "def": base["def"],
+        "moves": base["moves"],
+        "modifiers": [],  # {"stat": "atk"|"def", "amount": int, "turns_left": int}
+    }
+
+def _gathemon_effective_stat(base: int, modifiers: list, stat: str) -> int:
+    total = sum(m["amount"] for m in modifiers if m["stat"] == stat)
+    return max(1, base + total)  # stat floor 1 for display/calc
+
+def _gathemon_damage(power: int, atk_eff: int, def_eff: int) -> int:
+    d = power + atk_eff - def_eff
+    return max(1, d)
+
+def _gathemon_tick_modifiers(modifiers: list) -> list:
+    """Decrement turns_left and remove expired. Returns new list."""
+    out = []
+    for m in modifiers:
+        m["turns_left"] -= 1
+        if m["turns_left"] > 0:
+            out.append(m)
+    return out
+
+def _gathemon_apply_move(move: dict, attacker: dict, defender: dict) -> tuple[int, str]:
+    """Apply move: stat changes, then damage if power. Returns (damage_dealt, log_line)."""
+    log_parts = []
+    # Stat changes (attacker's self buffs, defender's debuffs)
+    for stat_key, amount, target in [
+        ("atk", move.get("raise_atk_self", 0), attacker),
+        ("def", move.get("raise_def_self", 0), attacker),
+        ("atk", -move.get("lower_atk_enemy", 0), defender),
+        ("def", -move.get("lower_def_enemy", 0), defender),
+    ]:
+        if amount == 0:
+            continue
+        current = sum(m["amount"] for m in target["modifiers"] if m["stat"] == stat_key)
+        new_total = current + amount
+        new_total = max(-2, min(2, new_total))
+        add = new_total - current
+        if add != 0:
+            target["modifiers"].append({"stat": stat_key, "amount": add, "turns_left": 3})
+            log_parts.append(f"{target['name']} {stat_key}: {'+' if add > 0 else ''}{add} (3 turns)")
+    # Damage
+    damage = 0
+    if move.get("power") is not None:
+        atk_eff = _gathemon_effective_stat(attacker["atk"], attacker["modifiers"], "atk")
+        def_eff = _gathemon_effective_stat(defender["def"], defender["modifiers"], "def")
+        damage = _gathemon_damage(move["power"], atk_eff, def_eff)
+        defender["hp"] = max(0, defender["hp"] - damage)
+        log_parts.append(f"{move['name']} hit for {damage} damage.")
+    return damage, " ".join(log_parts) if log_parts else move["name"] + "."
+
+
+active_gathemon_challenges = {}  # challenge_id -> { challenger_id, opponent_id, bet }
+active_gathemon_battles = {}     # game_id -> GathemonBattle
+user_active_gathemon = {}        # user_id -> game_id
+
+
+class GathemonBattle:
+    def __init__(self, game_id: str, player1_id: int, player1_name: str, player2_id: int, player2_name: str, bet: int, channel_id: int):
+        self.game_id = game_id
+        self.player1_id = player1_id
+        self.player1_name = player1_name
+        self.player2_id = player2_id
+        self.player2_name = player2_name
+        self.bet = bet
+        self.channel_id = channel_id
+        self.pokemon1 = _gathemon_random_pokemon(bet)
+        self.pokemon2 = _gathemon_random_pokemon(bet)
+        self.current_turn_id = player1_id  # player1 goes first
+        self.message = None  # single in-channel battle message
+        self.last_log = "Battle started!"
+
+    def get_pokemon(self, is_player1: bool):
+        return self.pokemon1 if is_player1 else self.pokemon2
+
+    def get_opponent_pokemon(self, is_player1: bool):
+        return self.pokemon2 if is_player1 else self.pokemon1
+
+    def is_player1_turn(self):
+        return self.current_turn_id == self.player1_id
+
+    def tick_both_modifiers(self):
+        self.pokemon1["modifiers"] = _gathemon_tick_modifiers(self.pokemon1["modifiers"])
+        self.pokemon2["modifiers"] = _gathemon_tick_modifiers(self.pokemon2["modifiers"])
+
+
+def _gathemon_battle_embed(battle: GathemonBattle, for_player1: bool) -> discord.Embed:
+    """Build the battle embed for one player (own Pokémon + enemy HP/name, buffs)."""
+    mine = battle.get_pokemon(for_player1)
+    other = battle.get_opponent_pokemon(for_player1)
+    atk_eff = _gathemon_effective_stat(mine["atk"], mine["modifiers"], "atk")
+    def_eff = _gathemon_effective_stat(mine["def"], mine["modifiers"], "def")
+    title = f"🌿 {mine['name']} vs {other['name']} 🌿"
+    desc = f"**Your {mine['name']}**\nHP: **{mine['hp']}/{mine['max_hp']}** | ATK: **{atk_eff}** | DEF: **{def_eff}**"
+    if mine["modifiers"]:
+        buf = ", ".join(f"{m['stat']} {m['amount']:+d} ({m['turns_left']}t)" for m in mine["modifiers"])
+        desc += f"\n*Buffs/Debuffs: {buf}*"
+    desc += f"\n\n**Enemy {other['name']}** — HP: **{other['hp']}/{other['max_hp']}**"
+    if other["modifiers"]:
+        buf = ", ".join(f"{m['stat']} {m['amount']:+d} ({m['turns_left']}t)" for m in other["modifiers"])
+        desc += f"\n*Buffs/Debuffs: {buf}*"
+    desc += f"\n\n{battle.last_log}"
+    turn_id = battle.current_turn_id
+    is_my_turn = (turn_id == battle.player1_id) == for_player1
+    if is_my_turn:
+        desc += "\n\n**▶ Your turn!** Choose a move."
+    else:
+        desc += "\n\n*Waiting for opponent...*"
+    embed = discord.Embed(title=title, description=desc, color=discord.Color.green())
+    embed.add_field(name="🌱 Bet", value=f"{battle.bet} plants", inline=True)
+    return embed
+
+
+def _gathemon_battle_embed_public(battle: GathemonBattle) -> discord.Embed:
+    """Build the single in-channel battle embed (both Pokémon, whose turn)."""
+    p1 = battle.pokemon1
+    p2 = battle.pokemon2
+    atk1 = _gathemon_effective_stat(p1["atk"], p1["modifiers"], "atk")
+    def1 = _gathemon_effective_stat(p1["def"], p1["modifiers"], "def")
+    atk2 = _gathemon_effective_stat(p2["atk"], p2["modifiers"], "atk")
+    def2 = _gathemon_effective_stat(p2["def"], p2["modifiers"], "def")
+    title = f"🌿 {p1['name']} vs {p2['name']} 🌿"
+    desc = f"**<@{battle.player1_id}> — {p1['name']}**\nHP: **{p1['hp']}/{p1['max_hp']}** | ATK: **{atk1}** | DEF: **{def1}**"
+    if p1["modifiers"]:
+        buf = ", ".join(f"{m['stat']} {m['amount']:+d} ({m['turns_left']}t)" for m in p1["modifiers"])
+        desc += f"\n*{buf}*"
+    desc += f"\n\n**<@{battle.player2_id}> — {p2['name']}**\nHP: **{p2['hp']}/{p2['max_hp']}** | ATK: **{atk2}** | DEF: **{def2}**"
+    if p2["modifiers"]:
+        buf = ", ".join(f"{m['stat']} {m['amount']:+d} ({m['turns_left']}t)" for m in p2["modifiers"])
+        desc += f"\n*{buf}*"
+    desc += f"\n\n{battle.last_log}"
+    if battle.current_turn_id == battle.player1_id:
+        desc += f"\n\n**▶ It's <@{battle.player1_id}>'s turn!** Choose a move below."
+    else:
+        desc += f"\n\n**▶ It's <@{battle.player2_id}>'s turn!** Choose a move below."
+    embed = discord.Embed(title=title, description=desc, color=discord.Color.green())
+    embed.add_field(name="🌱 Bet", value=f"{battle.bet} plants each", inline=True)
+    return embed
+
+
+class GathemonLobbyView(discord.ui.View):
+    def __init__(self, challenge_id: str, challenger_id: int, opponent_id: int, bet: int, timeout=300):
+        super().__init__(timeout=timeout)
+        self.challenge_id = challenge_id
+        self.challenger_id = challenger_id
+        self.opponent_id = opponent_id
+        self.bet = bet
+
+    async def on_timeout(self):
+        if self.challenge_id in active_gathemon_challenges:
+            del active_gathemon_challenges[self.challenge_id]
+        try:
+            await self.message.edit(content="⏰ Challenge timed out.", view=None)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.green, emoji="✅")
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.opponent_id:
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ This challenge is not for you!", ephemeral=False)
+            return
+        if self.challenge_id not in active_gathemon_challenges:
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ Challenge no longer exists!", ephemeral=False)
+            return
+        chall = active_gathemon_challenges[self.challenge_id]
+        if self.challenger_id in user_active_gathemon or self.opponent_id in user_active_gathemon:
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ You or the challenger is already in a GatheMon battle!", ephemeral=False)
+            return
+        bet = self.bet
+        if get_user_bloom_cycle_plants(self.challenger_id) < bet or get_user_bloom_cycle_plants(self.opponent_id) < bet:
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ One of you doesn't have enough plants for this bet!", ephemeral=False)
+            return
+        if not deduct_user_bloom_cycle_plants(self.challenger_id, bet):
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ Challenger doesn't have enough plants!", ephemeral=False)
+            return
+        if not deduct_user_bloom_cycle_plants(self.opponent_id, bet):
+            add_user_bloom_cycle_plants(self.challenger_id, bet)
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ You don't have enough plants!", ephemeral=False)
+            return
+        await interaction.response.defer(ephemeral=False)
+        del active_gathemon_challenges[self.challenge_id]
+        game_id = str(uuid.uuid4())[:8]
+        channel_id = interaction.channel_id
+        member = interaction.guild.get_member(self.challenger_id) if interaction.guild else None
+        challenger_name = member.name if member else (interaction.client.get_user(self.challenger_id).name if interaction.client.get_user(self.challenger_id) else "Challenger")
+        battle = GathemonBattle(game_id, self.challenger_id, challenger_name, self.opponent_id, interaction.user.name, bet, channel_id)
+        active_gathemon_battles[game_id] = battle
+        user_active_gathemon[self.challenger_id] = game_id
+        user_active_gathemon[self.opponent_id] = game_id
+
+        view = GathemonBattleView(game_id, timeout=300)
+        embed = _gathemon_battle_embed_public(battle)
+        battle.message = await interaction.channel.send(embed=embed, view=view)
+        try:
+            await interaction.message.edit(content="🌿 **Battle started!**", view=None)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.red, emoji="❌")
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.opponent_id:
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ This challenge is not for you!", ephemeral=False)
+            return
+        if self.challenge_id in active_gathemon_challenges:
+            del active_gathemon_challenges[self.challenge_id]
+        await safe_interaction_response(interaction, interaction.response.edit_message, content="❌ Challenge declined.", view=None)
+
+
+class GathemonBattleView(discord.ui.View):
+    def __init__(self, game_id: str, timeout=300):
+        super().__init__(timeout=timeout)
+        self.game_id = game_id
+        self._add_move_buttons()
+
+    def _add_move_buttons(self):
+        if self.game_id not in active_gathemon_battles:
+            return
+        battle = active_gathemon_battles[self.game_id]
+        is_p1 = battle.is_player1_turn()
+        pokemon = battle.get_pokemon(is_p1)
+        for i, move in enumerate(pokemon["moves"]):
+            label = move["name"]
+            if move.get("power") is not None:
+                label += f" ({move['power']})"
+            self.add_item(GathemonMoveButton(self.game_id, i, label))
+
+    async def on_timeout(self):
+        if self.game_id not in active_gathemon_battles:
+            return
+        battle = active_gathemon_battles[self.game_id]
+        for uid in (battle.player1_id, battle.player2_id):
+            if uid in user_active_gathemon:
+                del user_active_gathemon[uid]
+        add_user_bloom_cycle_plants(battle.player1_id, battle.bet)
+        add_user_bloom_cycle_plants(battle.player2_id, battle.bet)
+        del active_gathemon_battles[self.game_id]
+        try:
+            if battle.message:
+                await battle.message.edit(content="⏰ Battle timed out. Plants refunded.", embed=None, view=None)
+        except Exception:
+            pass
+
+
+class GathemonMoveButton(discord.ui.Button):
+    def __init__(self, game_id: str, move_index: int, label: str):
+        super().__init__(style=discord.ButtonStyle.primary, label=label[:80], custom_id=f"gathemon_{game_id}_{move_index}")
+        self.game_id = game_id
+        self.move_index = move_index
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer(ephemeral=False)
+        except Exception:
+            pass
+        if self.game_id not in active_gathemon_battles:
+            try:
+                await interaction.followup.send("❌ Battle no longer exists!", ephemeral=False)
+            except Exception:
+                pass
+            return
+        battle = active_gathemon_battles[self.game_id]
+        is_p1 = (interaction.user.id == battle.player1_id)
+        if interaction.user.id not in (battle.player1_id, battle.player2_id):
+            try:
+                await interaction.followup.send("❌ You're not in this battle!", ephemeral=False)
+            except Exception:
+                pass
+            return
+        if (battle.current_turn_id == battle.player1_id) != is_p1:
+            try:
+                await interaction.followup.send("❌ It's not your turn!", ephemeral=False)
+            except Exception:
+                pass
+            return
+        attacker = battle.get_pokemon(is_p1)
+        defender = battle.get_opponent_pokemon(is_p1)
+        if attacker["hp"] <= 0 or defender["hp"] <= 0:
+            try:
+                await interaction.followup.send("❌ Battle already ended!", ephemeral=False)
+            except Exception:
+                pass
+            return
+        move = attacker["moves"][self.move_index]
+        damage, log_line = _gathemon_apply_move(move, attacker, defender)
+        battle.last_log = log_line
+        battle.tick_both_modifiers()
+        winner_id = None
+        if defender["hp"] <= 0:
+            winner_id = battle.player1_id if is_p1 else battle.player2_id
+            add_user_bloom_cycle_plants(winner_id, battle.bet * 2)
+            for uid in (battle.player1_id, battle.player2_id):
+                if uid in user_active_gathemon:
+                    del user_active_gathemon[uid]
+            del active_gathemon_battles[self.game_id]
+            battle.last_log = f"{battle.last_log}\n\n🏆 <@{winner_id}> wins {battle.bet * 2} plants!"
+            view = None
+        else:
+            battle.current_turn_id = battle.player2_id if battle.current_turn_id == battle.player1_id else battle.player1_id
+            view = GathemonBattleView(self.game_id, timeout=300)
+        embed = _gathemon_battle_embed_public(battle)
+        try:
+            if battle.message:
+                await battle.message.edit(embed=embed, view=view)
+        except Exception as e:
+            print(f"Gathemon edit messages: {e}")
+
+
 # --- GATHERSHIP (PVP Battleship-style game) ---
 GATHERSHIP_GRID_SIZE = 5
 SEA_EMOJI = "🌊"
@@ -4452,264 +4823,346 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
-# Slots game implementation
+# Slots game implementation — 5x5 grid, bet bias, all-line wins
+# Symbol odds tuned so matching 5 is much more likely (fewer symbols, even spread)
+SLOT_EMOJI_ODDS = [
+    ("💎", 5),   # rarest
+    ("7️⃣", 11),
+    ("⭐", 18),
+    ("💰", 22),
+    ("🍋", 22),
+    ("🍒", 22),
+]
+SLOT_EMOJIS = [e for e, _ in SLOT_EMOJI_ODDS]
+
+
+def _slot_emoji_from_roll(roll):
+    """Return which emoji corresponds to roll in [0, 100). Uses SLOT_EMOJI_ODDS cumulative."""
+    cumul = 0
+    for emoji, pct in SLOT_EMOJI_ODDS:
+        cumul += pct
+        if roll < cumul:
+            return emoji
+    return SLOT_EMOJI_ODDS[-1][0]
+
+
 def generate_slot_emoji():
-    """Generate a random slot emoji based on probability distribution."""
-    rand = random.random() * 100  # 0-100
-    
-    if rand < 1.0:  # 1% chance
-        return "💎"  # JACKPOT (diamond)
-    elif rand < 8.5:  # 7.5% chance (1% + 7.5% = 8.5%)
-        return "📊"  # BAR (bar chart emoji)
-    elif rand < 18.5:  # 10% chance (8.5% + 10% = 18.5%)
-        return "7️⃣"  # SEVEN
-    elif rand < 33.5:  # 15% chance (18.5% + 15% = 33.5%)
-        return "⭐"  # STAR
-    elif rand < 58.5:  # 25% chance (33.5% + 25% = 58.5%)
-        return "💰"  # MONEY BAG
-    else:  # Remaining ~41.5% split evenly among cherry, lemon, orange
-        return random.choice(["🍒", "🍋", "🍊"])  # 33% each of remaining
+    """Generate a random slot emoji from the configured odds (more even = easier to match lines)."""
+    return _slot_emoji_from_roll(random.random() * 100)
 
 
-def generate_slot_grid():
-    """Generate a 3x3 grid of slot emojis."""
-    return [
-        [generate_slot_emoji() for _ in range(3)] for _ in range(3)
-    ]
 
 
-def format_slot_grid(grid, locked_columns=None):
-    """Format the slot grid as a string, highlighting the middle row."""
+# V-shape win lines (like real slots): top V = (0,0)->(2,2)->(0,4), bottom V = (4,0)->(2,2)->(4,4)
+V_TOP_CELLS = [(0, 0), (1, 1), (2, 2), (1, 3), (0, 4)]
+V_BOTTOM_CELLS = [(4, 0), (3, 1), (2, 2), (3, 3), (4, 4)]
+
+
+def _fill_line_5x5(grid, line_type, line_idx, emoji):
+    """Fill one line of a 5x5 grid with the same emoji. line_type: 'row','col','diag_main','diag_anti','v_top','v_bottom'."""
+    if line_type == "row":
+        for c in range(5):
+            grid[line_idx][c] = emoji
+    elif line_type == "col":
+        for r in range(5):
+            grid[r][line_idx] = emoji
+    elif line_type == "diag_main":  # (0,0) to (4,4)
+        for i in range(5):
+            grid[i][i] = emoji
+    elif line_type == "diag_anti":  # (0,4) to (4,0)
+        for i in range(5):
+            grid[i][4 - i] = emoji
+    elif line_type == "v_top":
+        for r, c in V_TOP_CELLS:
+            grid[r][c] = emoji
+    else:  # v_bottom
+        for r, c in V_BOTTOM_CELLS:
+            grid[r][c] = emoji
+
+
+def generate_slot_grid(bet: float = 0, balance: float = 1, middle_only: bool = False):
+    """Generate a 5x5 grid. Higher bet/balance ratio increases win chance (biased RNG)."""
+    grid = [[generate_slot_emoji() for _ in range(5)] for _ in range(5)]
+    if balance <= 0 or bet <= 0:
+        return grid
+    ratio = min(1.0, bet / balance)
+    # Real 5x5 slots: higher bet = more "weight" toward a win. 1% bet → ~32% forced-win chance so wins feel frequent.
+    WIN_BIAS_MULTIPLIER = 32  # 1% bet → 32% forced win; 0.1% bet → 3.2%
+    win_bias = ratio * WIN_BIAS_MULTIPLIER
+    if random.random() >= win_bias:
+        return grid
+    emoji = random.choice(SLOT_EMOJIS)
+    if middle_only:
+        _fill_line_5x5(grid, "row", 2, emoji)
+        return grid
+    line_types = ["row", "col", "diag_main", "diag_anti", "v_top", "v_bottom"]
+    line_type = random.choice(line_types)
+    line_idx = random.randint(0, 4) if line_type in ("row", "col") else 0
+    _fill_line_5x5(grid, line_type, line_idx, emoji)
+    return grid
+
+
+def format_slot_grid(grid, locked_columns=None, highlight_middle_row=False):
+    """Format the 5x5 grid with top/bottom lines, row separators, and left/right borders (rectangular frame)."""
     if locked_columns is None:
         locked_columns = set()
-    
-    # Format as a clean grid with consistent cell width
-    # Each cell is 5 characters wide (including borders)
-    # Top border
-    top_row = "┌─────┬─────┬─────┐\n"
-    
-    # First row - center emojis with consistent spacing
-    row1 = f"│ {grid[0][0]}  │ {grid[0][1]}  │ {grid[0][2]}  │\n"
-    row1_sep = "├─────┼─────┼─────┤\n"
-    
-    # Middle row (the winning row) - highlighted
-    row2 = f"│ {grid[1][0]}  │ {grid[1][1]}  │ {grid[1][2]}  │ ⬅️\n"
-    row2_sep = "├─────┼─────┼─────┤\n"
-    
-    # Bottom row
-    row3 = f"│ {grid[2][0]}  │ {grid[2][1]}  │ {grid[2][2]}  │\n"
-    bottom_row = "└─────┴─────┴─────┘"
-    
-    # Use code block for monospace font - this helps with alignment
-    return f"```\n{top_row}{row1}{row1_sep}{row2}{row2_sep}{row3}{bottom_row}\n```"
+    row_sep = "│─────────────│"
+    lines = [row_sep]
+    for r in range(5):
+        row_str = " ".join(grid[r][c] for c in range(5))
+        if highlight_middle_row and r == 2:
+            row_str += " ⬅️"
+        lines.append(f"│{row_str}│")
+        if r < 4:
+            lines.append(row_sep)
+    lines.append(row_sep)
+    return "\n".join(lines)
 
 
-def check_win(grid):
-    """Check if the middle row has matching emojis."""
-    middle_row = grid[1]  # Middle row (index 1)
-    return len(set(middle_row)) == 1  # All emojis are the same
+def _line_same_5x5(grid, line_type, line_idx):
+    """Return True if the given line has all same emoji."""
+    if line_type == "row":
+        row = grid[line_idx]
+        return len(set(row)) == 1
+    if line_type == "col":
+        col = [grid[r][line_idx] for r in range(5)]
+        return len(set(col)) == 1
+    if line_type == "diag_main":
+        vals = [grid[i][i] for i in range(5)]
+        return len(set(vals)) == 1
+    if line_type == "diag_anti":
+        vals = [grid[i][4 - i] for i in range(5)]
+        return len(set(vals)) == 1
+    if line_type == "v_top":
+        vals = [grid[r][c] for r, c in V_TOP_CELLS]
+        return len(set(vals)) == 1
+    if line_type == "v_bottom":
+        vals = [grid[r][c] for r, c in V_BOTTOM_CELLS]
+        return len(set(vals)) == 1
+    return False
+
+
+def check_win_5x5(grid, middle_only: bool):
+    """
+    Check wins on 5x5 grid. middle_only: only middle row (index 2).
+    Otherwise: all 5 rows, 5 cols, both diagonals (X), and both V shapes. Returns (won: bool, line_count: int).
+    """
+    if middle_only:
+        if _line_same_5x5(grid, "row", 2):
+            return True, 1
+        return False, 0
+    count = 0
+    for r in range(5):
+        if _line_same_5x5(grid, "row", r):
+            count += 1
+    for c in range(5):
+        if _line_same_5x5(grid, "col", c):
+            count += 1
+    if _line_same_5x5(grid, "diag_main", 0):
+        count += 1
+    if _line_same_5x5(grid, "diag_anti", 0):
+        count += 1
+    if _line_same_5x5(grid, "v_top", 0):
+        count += 1
+    if _line_same_5x5(grid, "v_bottom", 0):
+        count += 1
+    return count > 0, count
 
 
 class SlotsView(discord.ui.View):
-    def __init__(self, user_id: int, bet: float, timeout: float = 300):
+    def __init__(self, user_id: int, timeout: float = 300):
         super().__init__(timeout=timeout)
         self.user_id = user_id
-        self.bet = bet
+        self.bet_type = None  # "0.1%" or "1%"
+        self.bet = 0.0
         self.grid = generate_slot_grid()
         self.spinning = False
         self.spun = False
-        self.locked_columns = set()  # Track which columns have stopped
-        self.final_grid = None  # Store final result
-        
+        self.locked_columns = set()
+        self.final_grid = None
+
+    def _middle_only(self):
+        return self.bet_type == "0.1%"
+
+    def _update_spin_button(self):
+        # Third button is SPIN (Bet 0.1%, Bet 1%, SPIN)
+        if len(self.children) >= 3:
+            self.children[2].disabled = self.spinning or self.bet_type is None
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Only allow the user who started the game to interact."""
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ This is not your slots game!", ephemeral=True)
             return False
         return True
-    
+
     def update_embed(self, is_spinning=False, status_text=""):
-        """Create or update the embed with current slot state."""
         title = "🎰 SLOTS - SPINNING... 🎰" if is_spinning else "🎰 SLOTS 🎰"
+        balance = get_user_balance(self.user_id)
+        balance = normalize_money(balance)
+        desc_parts = [f"Balance: **${balance:.2f}**"]
+        if self.bet_type:
+            pct = 0.001 if self.bet_type == "0.1%" else 0.01
+            bet_amt = normalize_money(balance * pct)
+            desc_parts.append(f"Bet: **{self.bet_type}** (${bet_amt:.2f})")
+            if self.bet_type == "0.1%":
+                desc_parts.append("Win: middle row only.")
+            else:
+                desc_parts.append("Win: any row, column, diagonal (X), or V.")
+        desc_parts.append("")
+        desc_parts.append(format_slot_grid(self.grid, self.locked_columns, highlight_middle_row=self._middle_only()))
         embed = discord.Embed(
             title=title,
-            description=f"Bet: **${self.bet:.2f}**\n\n{format_slot_grid(self.grid, self.locked_columns)}",
-            color=discord.Color.gold() if not is_spinning else discord.Color.orange()
+            description="\n".join(desc_parts),
+            color=discord.Color.gold() if not is_spinning else discord.Color.orange(),
         )
-        
-        if not self.spun:
-            embed.set_footer(text="Click SPIN to play!")
+        if not self.spun and not is_spinning:
+            embed.set_footer(text="Pick 0.1% or 1%, then click SPIN! You can respin anytime.")
         elif is_spinning:
-            footer_text = status_text if status_text else "🎰 Spinning... 🎰"
-            embed.set_footer(text=footer_text)
+            embed.set_footer(text=status_text or "🎰 Spinning... 🎰")
         else:
-            embed.set_footer(text="Spin complete!")
-        
+            embed.set_footer(text="Click SPIN to play again!")
         return embed
-    
+
     async def animate_spin(self, interaction: discord.Interaction):
-        """Animate the slots spinning with columns stopping one at a time."""
-        # Disable the button during spin
         for item in self.children:
             item.disabled = True
-        
-        # Generate final result first
-        self.final_grid = generate_slot_grid()
-        
-        # Update embed to show spinning state
+        balance = get_user_balance(self.user_id)
+        balance = normalize_money(balance)
+        pct = 0.001 if self.bet_type == "0.1%" else 0.01
+        self.bet = normalize_money(balance * pct)
+        if self.bet <= 0 or not can_afford_rounded(balance, self.bet):
+            embed = self.update_embed()
+            embed.set_footer(text="❌ Not enough balance to spin.")
+            self.spinning = False
+            self._update_spin_button()
+            for c in self.children:
+                c.disabled = False
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+        new_balance = normalize_money(balance - self.bet)
+        update_user_balance(self.user_id, new_balance)
+        middle_only = self._middle_only()
+        self.final_grid = generate_slot_grid(bet=self.bet, balance=balance, middle_only=middle_only)
         embed = self.update_embed(is_spinning=True, status_text="🎰 All columns spinning... 🎰")
-        
-        # Respond to the button interaction by editing the message
         await interaction.response.edit_message(embed=embed, view=self)
-        
-        # Phase 1: All columns spinning (fast)
-        for frame in range(8):
-            # Randomize all columns
-            for row in range(3):
-                for col in range(3):
-                    self.grid[row][col] = generate_slot_emoji()
-            
-            embed = self.update_embed(is_spinning=True, status_text="🎰 All columns spinning... 🎰")
+        spin_frames = 4
+        frame_interval = 0.07
+        spin_start = time.monotonic()
+        for frame in range(spin_frames):
+            for r in range(5):
+                for c in range(5):
+                    self.grid[r][c] = generate_slot_emoji()
+            embed = self.update_embed(is_spinning=True, status_text="🎰 Spinning... 🎰")
             await interaction.message.edit(embed=embed, view=self)
-        
-        # Lock column 1 - set it to final values
-        for row in range(3):
-            self.grid[row][0] = self.final_grid[row][0]
-        self.locked_columns.add(0)
-        
-        embed = self.update_embed(is_spinning=True, status_text="✅ Column 1 stopped! 🎰 Columns 2 & 3 spinning...")
-        await interaction.message.edit(embed=embed, view=self)
-        
-        # Phase 2: Columns 2 and 3 spinning
-        for frame in range(6):
-            # Randomize only columns 2 and 3
-            for row in range(3):
-                self.grid[row][1] = generate_slot_emoji()
-                self.grid[row][2] = generate_slot_emoji()
-            
-            embed = self.update_embed(is_spinning=True, status_text="✅ Column 1 stopped! 🎰 Columns 2 & 3 spinning...")
-            await interaction.message.edit(embed=embed, view=self)
-        
-        # Lock column 2
-        for row in range(3):
-            self.grid[row][1] = self.final_grid[row][1]
-        self.locked_columns.add(1)
-        
-        embed = self.update_embed(is_spinning=True, status_text="✅ Columns 1 & 2 stopped! 🎰 Column 3 spinning...")
-        await interaction.message.edit(embed=embed, view=self)
-        
-        # Phase 3: Only column 3 spinning (slower, building suspense)
-        for frame in range(5):
-            # Randomize only column 3
-            for row in range(3):
-                self.grid[row][2] = generate_slot_emoji()
-            
-            embed = self.update_embed(is_spinning=True, status_text="✅ Columns 1 & 2 stopped! 🎰 Column 3 spinning...")
-            await interaction.message.edit(embed=embed, view=self)
-        
-        # Lock column 3 - final result
-        for row in range(3):
-            self.grid[row][2] = self.final_grid[row][2]
-        self.locked_columns.add(2)
-        
-        # Check for win
-        won = check_win(self.grid)
+            if frame < spin_frames - 1:
+                next_at = spin_start + (frame + 1) * frame_interval
+                wait = next_at - time.monotonic()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+        self.grid = [row[:] for row in self.final_grid]
+        self.locked_columns = set(range(5))
+        won, line_count = check_win_5x5(self.grid, middle_only)
         self.spinning = False
         self.spun = True
-        
-        # Show final result
-        embed = discord.Embed(
-            title="🎰 SLOTS - FINAL RESULT 🎰",
-            description=f"Bet: **${self.bet:.2f}**\n\n\n\n{format_slot_grid(self.grid, self.locked_columns)}",
-            color=discord.Color.green() if won else discord.Color.red()
-        )
-        
+        payout_mult = 3
+        winnings = self.bet * payout_mult * line_count if won else 0
         if won:
-            middle_emoji = self.grid[1][0]
-            winnings = self.bet * 3  # Triple the bet
-            current_balance = get_user_balance(self.user_id)
-            current_balance = normalize_money(current_balance)
-            new_balance = normalize_money(current_balance + winnings)
-            update_user_balance(self.user_id, new_balance)
-            
-            embed.add_field(
+            cap_mult = 15
+            if line_count > cap_mult:
+                winnings = self.bet * payout_mult * cap_mult
+            curr = get_user_balance(self.user_id)
+            curr = normalize_money(curr)
+            new_bal = normalize_money(curr + winnings)
+            update_user_balance(self.user_id, new_bal)
+        curr_balance = get_user_balance(self.user_id)
+        curr_balance = normalize_money(curr_balance)
+        title = "🎰 SLOTS - RESULT 🎰"
+        result_embed = discord.Embed(
+            title=title,
+            description=f"Bet: **${self.bet:.2f}** ({self.bet_type})\n\n{format_slot_grid(self.grid, self.locked_columns, highlight_middle_row=middle_only)}",
+            color=discord.Color.green() if won else discord.Color.red(),
+        )
+        if won:
+            result_embed.add_field(
                 name="🎉 YOU WON! 🎉",
-                value=f"All three **{middle_emoji}** in the middle row!\nYou won **${winnings:.2f}**!\nYour new balance is **${new_balance:.2f}**.",
-                inline=False
+                value=f"**{line_count}** line(s)! You won **${winnings:.2f}**!\nBalance: **${curr_balance:.2f}**.",
+                inline=False,
             )
         else:
-            current_balance = get_user_balance(self.user_id)
-            current_balance = normalize_money(current_balance)
-            
-            embed.add_field(
+            result_embed.add_field(
                 name="❌ You Lost",
-                value=f"No match in the middle row. You lost **${self.bet:.2f}**.\nYour balance is **${current_balance:.2f}**.",
-                inline=False
+                value=f"You lost **${self.bet:.2f}**.\nBalance: **${curr_balance:.2f}**.",
+                inline=False,
             )
-        
-        await interaction.message.edit(embed=embed, view=self)
-        self.stop()
-    
-    @discord.ui.button(label="🎰 SPIN 🎰", style=discord.ButtonStyle.success, emoji="🎲", row=0)
-    async def spin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Spin the slots!"""
+        result_embed.set_footer(text="Click SPIN to play again!")
+        self.spun = False
+        self.locked_columns = set()
+        self.grid = generate_slot_grid()
+        self._update_spin_button()
+        for c in self.children:
+            if getattr(c, "custom_id", "") != "slots_spin":
+                c.disabled = False
+        await interaction.message.edit(embed=result_embed, view=self)
+
+    @discord.ui.button(label="Bet 0.1%", style=discord.ButtonStyle.secondary, custom_id="slots_01pct", row=0)
+    async def bet_01pct(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            if self.spinning or self.spun:
-                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You already spun!", ephemeral=True)
+            if self.spinning:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Spin in progress!", ephemeral=True)
                 return
-            
+            self.bet_type = "0.1%"
+            self._update_spin_button()
+            embed = self.update_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        except Exception as e:
+            print(f"Error in bet_01pct: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred.", ephemeral=True)
+
+    @discord.ui.button(label="Bet 1%", style=discord.ButtonStyle.secondary, custom_id="slots_1pct", row=0)
+    async def bet_1pct(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if self.spinning:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Spin in progress!", ephemeral=True)
+                return
+            self.bet_type = "1%"
+            self._update_spin_button()
+            embed = self.update_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        except Exception as e:
+            print(f"Error in bet_1pct: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred.", ephemeral=True)
+
+    @discord.ui.button(label="🎰 SPIN 🎰", style=discord.ButtonStyle.success, emoji="🎲", custom_id="slots_spin", row=0)
+    async def spin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if self.spinning:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Spin in progress!", ephemeral=True)
+                return
+            if self.bet_type is None:
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Pick Bet 0.1% or Bet 1% first!", ephemeral=True)
+                return
             self.spinning = True
-            # Start animation in a task so we don't block
             await self.animate_spin(interaction)
         except Exception as e:
             print(f"Error in spin_button: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
-@bot.tree.command(name="slots", description="Play slots! Match 3 in the middle row to win!")
-@app_commands.describe(bet="The amount to bet")
-async def slots(interaction: discord.Interaction, bet: float):
+@bot.tree.command(name="slots", description="Play slots! 5x5 grid — bet 0.1% (middle row) or 1% (all lines).")
+async def slots(interaction: discord.Interaction):
     try:
         if not await safe_defer(interaction, ephemeral=False):
             return
         user_id = interaction.user.id
-        
-        # Check if user is on Russian Roulette elimination cooldown (dead)
         is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
         if is_roulette_cooldown:
             minutes_left = roulette_time_left // 60
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"Sorry, {interaction.user.name}, you're dead. You cannot play slots for {minutes_left} minute(s)", ephemeral=True)
             return
-         
-        # Validate bet amount is positive
-        if bet <= 0:
-            await safe_interaction_response(interaction, interaction.followup.send, "❌ Invalid bet amount!", ephemeral=True)
-            return
-        
-        # Validate bet has at most 2 decimal places (no fractional cents)
-        if not validate_money_precision(bet):
-            await safe_interaction_response(interaction, interaction.followup.send, "❌ Invalid bet amount!", ephemeral=True)
-            return
-        
-        # Normalize bet to exactly 2 decimal places
-        bet = normalize_money(bet)
-        
-        current_balance = get_user_balance(user_id)
-        current_balance = normalize_money(current_balance)
-        
-        if not can_afford_rounded(current_balance, bet):
-            await safe_interaction_response(interaction, interaction.followup.send, f"You do not have enough balance to bet **${bet:.2f}**, {interaction.user.name}.", ephemeral=False)
-            return
-        
-        # Deduct bet first
-        new_balance_after_bet = normalize_money(current_balance - bet)
-        update_user_balance(user_id, new_balance_after_bet)
-        
-        # Create slots view
-        view = SlotsView(user_id, bet)
+        view = SlotsView(user_id)
+        view._update_spin_button()
         embed = view.update_embed()
-        
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
     except Exception as e:
         print(f"Error in slots command: {e}")
@@ -4731,7 +5184,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.9.0 :3"
+            name="running /gather on V0.9.1 :3"
         )
     )
     try:
@@ -7731,8 +8184,25 @@ class ImbueView(discord.ui.View):
             color=discord.Color(rarity_color),
         )
 
-        # New Attunement Rolled
-        rolled_block = format_enchant_block(self.rolled_enchant, self.tool_type)
+        # New Attunement Rolled (mask SECRET imbue stats with mysterious GIF block until claimed)
+        if self.rolled_enchant.get("rarity") == "SECRET":
+            tool_word = "HOE" if self.tool_type == "hoe" else "TRACTOR"
+            g1, g2 = IMBUE_SEC_GIF_1, IMBUE_SEC_GIF_2
+            # Gather (hoe) shows ABUNDANCE-style cryptic line; Harvest (tractor) shows NATURE'S FAVOR binary line
+            if self.tool_type == "hoe":
+                effect_line = f"\" (or ABUN{g2}{g2}NCE {g1})\""
+            else:
+                effect_line = f"NATURE'S {g2}AVOR 110011011010"
+            rolled_block = (
+                f"{g1} {g1} {g1} {g1} {g1} {g1} {g1} {g1} {g1} {g1} {g1} {g1} {g1} {g1}\n"
+                f"*\"?????? {tool_word} ?????? PENULTI{g1} ?????\"*\n"
+                f"RESO{g2}ANCE {g2}\n"
+                f"imbue.prosperity = {g2}\n"
+                "`ERROR on line 4129: renewalNotFound`\n"
+                f"{effect_line}"
+            )
+        else:
+            rolled_block = format_enchant_block(self.rolled_enchant, self.tool_type)
         embed.add_field(name="New Attunement Rolled", value=rolled_block, inline=False)
 
         # Current Attunement
@@ -7817,7 +8287,7 @@ class ImbueView(discord.ui.View):
 
         self.stop()
 
-    @discord.ui.button(label="Keep Current Attunement", style=discord.ButtonStyle.secondary, emoji="\U0001f6e1\ufe0f")
+    @discord.ui.button(label="Keep Current", style=discord.ButtonStyle.secondary, emoji="\U0001f6e1\ufe0f")
     async def keep_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await safe_interaction_response(interaction, interaction.response.send_message,
@@ -7853,8 +8323,8 @@ class ImbueView(discord.ui.View):
             return
 
         try:
-            # Roll new attunement (Commoner's Respite excludes COMMON if user has it)
-            self.rolled_enchant = roll_attunement(self.tool_type, self.user_id)
+            # Roll new attunement (exclude current so you can't roll the same one)
+            self.rolled_enchant = roll_attunement(self.tool_type, self.user_id, self.current_enchant)
 
             # Update embed
             embed = self._build_embed()
@@ -7914,8 +8384,8 @@ async def imbue(interaction: discord.Interaction, tool: app_commands.Choice[str]
                 else:
                     current_enchant = get_user_tractor_attunement(user_id)
 
-                # Roll a new attunement (Commoner's Respite excludes COMMON if user has it)
-                rolled_enchant = roll_attunement(tool_type, user_id)
+                # Roll a new attunement (exclude current so you can't roll the same one)
+                rolled_enchant = roll_attunement(tool_type, user_id, current_enchant)
 
                 # Create the view and embed
                 view = ImbueView(
@@ -12469,6 +12939,62 @@ async def russian(
     except Exception as e:
         print(f"Error in russian command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+@bot.tree.command(name="gathemon", description="Challenge a user to a turn-based Pokémon battle for plants!")
+@app_commands.describe(
+    user="The user you challenge to a GatheMon battle",
+    plants="Number of plants to wager (1–10). Both players must have this many."
+)
+async def gathemon(interaction: discord.Interaction, user: discord.Member, plants: int):
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        channel_name = (interaction.channel.name or "").lower()
+        if channel_name not in ("gathemon-1", "gathemon-2"):
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ GatheMon can only be played in **#gathemon-1** or **#gathemon-2**!", ephemeral=False)
+            return
+        challenger_id = interaction.user.id
+        opponent_id = user.id
+        if opponent_id == challenger_id:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ You can't challenge yourself!", ephemeral=False)
+            return
+        if user.bot:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ You can't challenge a bot!", ephemeral=False)
+            return
+        if plants < 1 or plants > 10:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Plants must be between 1 and 10!", ephemeral=False)
+            return
+        if active_gathemon_challenges or active_gathemon_battles:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ A GatheMon game is already in progress. Wait for it to finish!", ephemeral=False)
+            return
+        if challenger_id in user_active_gathemon or opponent_id in user_active_gathemon:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ You or your opponent is already in a GatheMon battle!", ephemeral=False)
+            return
+        if get_user_bloom_cycle_plants(challenger_id) < plants:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ You don't have enough plants for this wager!", ephemeral=False)
+            return
+        challenge_id = str(uuid.uuid4())[:8]
+        active_gathemon_challenges[challenge_id] = {
+            "challenger_id": challenger_id,
+            "opponent_id": opponent_id,
+            "bet": plants,
+        }
+        view = GathemonLobbyView(challenge_id, challenger_id, opponent_id, plants, timeout=300)
+        embed = discord.Embed(
+            title="🌿 GatheMon — Pokémon Battle",
+            description=f"{interaction.user.mention} challenges {user.mention} to a **GatheMon** battle for **{plants}** plants!\n\n{user.mention}, click **Accept** to start the battle!",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="🌱 Wager", value=f"{plants} plants each", inline=True)
+        embed.add_field(name="⏰ Timeout", value="5 min to accept", inline=True)
+        msg = await interaction.followup.send(embed=embed, view=view, ephemeral=False)
+        view.message = msg
+    except Exception as e:
+        print(f"Error in gathemon command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=False)
 
 
 @bot.tree.command(name="gathership", description="Challenge someone to GATHERSHIP!")
