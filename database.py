@@ -1937,21 +1937,29 @@ def set_user_tractor_attunement(user_id: int, attunement: Optional[Dict]) -> Non
     )
 
 
+# BLOOMING rank auto-unlock: CEDAR+ = grove, BIRCH+ = marsh, MAPLE+ = bog, OAK+ = mire (bloom_count 3,6,9,12)
+def _merge_bloom_auto_unlock(areas: Dict, bloom_count: int) -> Dict[str, bool]:
+    """Merge raw unlocked_areas with BLOOMING rank auto-unlocks."""
+    return {
+        "grove": bool(areas.get("grove", False)) or bloom_count >= 3,
+        "marsh": bool(areas.get("marsh", False)) or bloom_count >= 6,
+        "bog": bool(areas.get("bog", False)) or bloom_count >= 9,
+        "mire": bool(areas.get("mire", False)) or bloom_count >= 12,
+    }
+
+
 # Area unlock functions
 def get_user_unlocked_areas(user_id: int) -> Dict[str, bool]:
-    """Get user's unlocked areas. Returns dict with area names as keys and unlock status as values."""
+    """Get user's unlocked areas. Returns dict with area names as keys and unlock status as values.
+    CEDAR+ auto-unlocks grove, BIRCH+ marsh, MAPLE+ bog, OAK+ mire."""
     users = _get_users_collection()
     _ensure_user_document(user_id)
-    doc = users.find_one({"_id": int(user_id)}, {"unlocked_areas": 1})
+    doc = users.find_one({"_id": int(user_id)}, {"unlocked_areas": 1, "bloom_count": 1})
     if not doc:
         return {"grove": False, "marsh": False, "bog": False, "mire": False}
     areas = doc.get("unlocked_areas", {})
-    return {
-        "grove": bool(areas.get("grove", False)),
-        "marsh": bool(areas.get("marsh", False)),
-        "bog": bool(areas.get("bog", False)),
-        "mire": bool(areas.get("mire", False))
-    }
+    bloom_count = int(doc.get("bloom_count", 0))
+    return _merge_bloom_auto_unlock(areas, bloom_count)
 
 
 def unlock_user_area(user_id: int, area_name: str) -> None:
@@ -2107,7 +2115,7 @@ def get_user_gather_full_data(user_id: int) -> Dict:
             "fertilizer": h_upgrades.get("fertilizer", 0),
             "cooldown": h_upgrades.get("cooldown", 0),
         },
-        "unlocked_areas": dict(doc.get("unlocked_areas", {})),
+        "unlocked_areas": _merge_bloom_auto_unlock(doc.get("unlocked_areas", {}), int(doc.get("bloom_count", 0))),
         "gather_command_count": int(doc.get("gather_command_count", 0)),
         "shop_inventory": dict(doc.get("shop_inventory", {})),
     }
@@ -2196,7 +2204,7 @@ def get_user_harvest_full_data(user_id: int) -> Dict:
         "invite_claimed_rewards": list(invite_stats.get("claimed_rewards", [])),
         "gather_stats_total_items": int(doc.get("gather_stats", {}).get("total_items", 0)),
         "total_forage_count": int(doc.get("total_forage_count", 0)),
-        "unlocked_areas": dict(doc.get("unlocked_areas", {})),
+        "unlocked_areas": _merge_bloom_auto_unlock(doc.get("unlocked_areas", {}), int(doc.get("bloom_count", 0))),
         "harvest_command_count": int(doc.get("harvest_command_count", 0)),
         "shop_inventory": dict(doc.get("shop_inventory", {})),
     }
@@ -2265,3 +2273,123 @@ def perform_harvest_batch_update(
     )
 
     return tree_rings_to_award
+
+
+# ---------------------------------------------------------------------------
+# Steal: revert victim / apply to stealer (for gather and harvest)
+# ---------------------------------------------------------------------------
+
+def steal_revert_gather(
+    victim_id: int,
+    value: float,
+    item_name: str,
+    ripeness_name: str,
+    category: str,
+) -> None:
+    """Revert a gather from the victim (subtract balance, 1 plant, stats, bloom_cycle)."""
+    users = _get_users_collection()
+    doc = users.find_one(
+        {"_id": int(victim_id)},
+        {"bloom_cycle_plants": 1},
+    )
+    current_bloom = int(doc.get("bloom_cycle_plants", 0)) if doc else 0
+    new_bloom = max(0, current_bloom - 1)
+
+    inc_ops = {
+        "balance": -float(value),
+        f"items.{item_name}": -1,
+        f"ripeness_stats.{ripeness_name}": -1,
+        "gather_stats.total_items": -1,
+        f"gather_stats.categories.{category}": -1,
+        f"gather_stats.items.{item_name}": -1,
+        "total_forage_count": -1,
+    }
+    users.update_one(
+        {"_id": int(victim_id)},
+        {"$inc": inc_ops, "$set": {"bloom_cycle_plants": new_bloom}},
+        upsert=True,
+    )
+
+
+def steal_apply_gather(
+    stealer_id: int,
+    value: float,
+    item_name: str,
+    ripeness_name: str,
+    category: str,
+) -> bool:
+    """Apply a stolen gather to the stealer. Returns True if tree ring was awarded."""
+    return perform_gather_update(
+        stealer_id,
+        balance_increment=value,
+        item_name=item_name,
+        ripeness_name=ripeness_name,
+        category=category,
+        apply_cooldown=False,
+        increment_command_count=False,
+    )
+
+
+def steal_revert_harvest(
+    victim_id: int,
+    items_inc: Dict[str, int],
+    ripeness_inc: Dict[str, int],
+    balance_increment: float,
+    num_items: int,
+) -> None:
+    """Revert a harvest from the victim (subtract balance, items, stats, bloom_cycle)."""
+    users = _get_users_collection()
+    doc = users.find_one(
+        {"_id": int(victim_id)},
+        {"bloom_cycle_plants": 1},
+    )
+    current_bloom = int(doc.get("bloom_cycle_plants", 0)) if doc else 0
+    new_bloom = max(0, current_bloom - num_items)
+
+    inc_ops: Dict[str, float | int] = {
+        "balance": -float(balance_increment),
+        "gather_stats.total_items": -num_items,
+        "total_forage_count": -num_items,
+    }
+    for item_name, count in items_inc.items():
+        inc_ops[f"items.{item_name}"] = -count
+    for ripeness_name, count in ripeness_inc.items():
+        inc_ops[f"ripeness_stats.{ripeness_name}"] = -count
+
+    users.update_one(
+        {"_id": int(victim_id)},
+        {"$inc": inc_ops, "$set": {"bloom_cycle_plants": new_bloom}},
+        upsert=True,
+    )
+
+
+def steal_apply_harvest(
+    stealer_id: int,
+    items_inc: Dict[str, int],
+    ripeness_inc: Dict[str, int],
+    balance_increment: float,
+    num_items: int,
+) -> int:
+    """Apply a stolen harvest to the stealer. Returns number of tree rings awarded."""
+    users = _get_users_collection()
+    _ensure_user_document(stealer_id)
+    doc = users.find_one(
+        {"_id": int(stealer_id)},
+        {"gather_stats.total_items": 1, "bloom_cycle_plants": 1},
+    )
+    pre_total = 0
+    pre_bloom = 0
+    if doc:
+        pre_total = int(doc.get("gather_stats", {}).get("total_items", 0))
+        pre_bloom = int(doc.get("bloom_cycle_plants", 0))
+    return perform_harvest_batch_update(
+        stealer_id,
+        items_inc=items_inc,
+        ripeness_inc=ripeness_inc,
+        balance_increment=balance_increment,
+        num_items=num_items,
+        pre_total_items=pre_total,
+        pre_bloom_cycle=pre_bloom,
+        set_cooldown=False,
+        increment_command_count=False,
+    )

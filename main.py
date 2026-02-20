@@ -174,6 +174,10 @@ from database import (
     get_roulette_elimination_cooldown_seconds,
     get_user_ids_with_shop_item,
     add_shop_item_to_user,
+    steal_revert_gather,
+    steal_apply_gather,
+    steal_revert_harvest,
+    steal_apply_harvest,
 )
 
 try:
@@ -1208,6 +1212,73 @@ GATHERING_AREAS = {
 }
 
 VALID_GATHERING_CHANNELS = set(GATHERING_AREAS.keys())
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PvE Wild Animal Event System
+# ═══════════════════════════════════════════════════════════════════════════════
+
+PVE_TRIGGER_CHANCE_GATHER = 0.001   # 0.1% per /gather
+PVE_TRIGGER_CHANCE_HARVEST = 0.0025  # 0.25% per /harvest
+
+# Steal: stealable chance per successful gather/harvest (no PvE when stealable; crit cannot be stolen)
+STEAL_CHANCE_GATHER = 0.01   # 1% per /gather
+STEAL_CHANCE_HARVEST = 0.005  # 0.5% per /harvest
+STEAL_WINDOW_GATHER_SEC = 4
+STEAL_WINDOW_HARVEST_SEC = 2
+
+PVE_WILD_ANIMALS = [
+    {
+        "name": "Grizzly Bear",
+        "emoji": "🐻",
+        "hp_range": (50, 75),
+        "color": 0x8B4513,
+        "description": "A massive **Grizzly Bear** has burst through the treeline! Its eyes are locked on your crops!",
+        "defeat_msg": "The **Grizzly Bear** lets out a final roar and lumbers back into the wilderness!",
+    },
+    {
+        "name": "Black Bear",
+        "emoji": ":panda:",
+        "hp_range": (35, 45),
+        "color": 0x2C2C2C,
+        "description": "A scrappy **Black Bear** has wandered into the area, sniffing around for easy meals! It's raiding your plants!",
+        "defeat_msg": "The **Black Bear** whimpers and scurries back into the shadows!",
+    },
+    {
+        "name": "Polar Bear",
+        "emoji": "🐻‍❄️",
+        "hp_range": (90, 125),
+        "color": 0xE0F0FF,
+        "description": "A colossal **Polar Bear** has appeared from nowhere!",
+        "defeat_msg": "The **Polar Bear** shakes off the blows and trudges away, perhaps to be seen again...!",
+    },
+    {
+        "name": "Tiger",
+        "emoji": "🐅",
+        "hp_range": (150, 160),
+        "color": 0xFF8C00,
+        "description": "A ferocious **Tiger** has leapt into the clearing! It paces around, growling at everyone!",
+        "defeat_msg": "The **Tiger** snarls one last time and vanishes into the tall grass...",
+    },
+    {
+        "name": "Panther",
+        "emoji": "🐆",
+        "hp_range": (80, 100),
+        "color": 0x1C1C1C,
+        "description": "A sleek **Panther** has emerged from the darkness! It stalks through the gathering grounds!",
+        "defeat_msg": "The **Panther** hisses and recinds back into the shadows, defeated!",
+    },
+    {
+        "name": "Homeless Man on Fent",
+        "emoji": "🧟",
+        "hp_range": (67, 175),
+        "color": 0x6B8E23,
+        "description": "A **Homeless Man on Fent** has stumbled into the area! He's mumbling incoherently and swatting at invisible bees! He seems... unreasonably durable!",
+        "defeat_msg": "The **Homeless Man on Fent** finally passes out and is carried away by local authorities!",
+    },
+]
+
+# Tracks active PvE events per channel: channel_id -> PvE event data
+active_pve_events: dict[int, dict] = {}
 
 # Channel name for auto-logging rare occurrences (e.g. One in a Million, Mikellion, netherite+ imbues)
 RARES_CHANNEL_NAME = "rares"
@@ -4660,7 +4731,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.8.2 :3"
+            name="running /gather on V0.9.0 :3"
         )
     )
     try:
@@ -4914,10 +4985,25 @@ def _gather_critical_path(user_id: int, channel_name: str, area_mult: float,
     if chain_triggered:
         update_user_last_gather_time(user_id, 0)
 
+    # --- stealable roll: 1% for gather; cannot steal critical; stealable = no PvE ---
+    is_crit = gather_result.get("is_critical_gather", False)
+    stealable = not is_crit and random.random() < STEAL_CHANCE_GATHER
+    steal_payload = None
+    if stealable:
+        steal_payload = {
+            "value": gather_result["value"],
+            "item_name": gather_result["name"],
+            "ripeness_name": gather_result["ripeness"],
+            "category": gather_result["category"],
+        }
+
     return {
         "gather_result": gather_result,
         "full_data": full_data,
         "chain_triggered": chain_triggered,
+        "stealable": stealable,
+        "victim_planter_level": user_planter_level,
+        "steal_payload": steal_payload,
     }
 
 
@@ -4987,6 +5073,434 @@ async def _gather_post_response(interaction: discord.Interaction, user_id: int,
         print(f"Error in gather post-response: {e}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Steal View — STEAL button for stealable gather/harvest (time window, rank check)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class StealView(discord.ui.View):
+    """Red STEAL button on stealable gather/harvest. Valid for 5s (gather) or 1s (harvest)."""
+
+    def __init__(self, victim_id: int, victim_planter_level: int, steal_type: str, steal_payload: dict, window_sec: float):
+        super().__init__(timeout=window_sec + 1.0)  # slightly longer so we can disable on_timeout
+        self.victim_id = victim_id
+        self.victim_planter_level = victim_planter_level
+        self.steal_type = steal_type
+        self.steal_payload = steal_payload
+        self._window_sec = window_sec
+        self._created_at = time.time()
+        self._stolen = False
+        self._message = None  # set by caller after send so on_timeout can edit
+
+    def _expired(self) -> bool:
+        return (time.time() - self._created_at) > self._window_sec
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if getattr(self, "_message", None) is not None:
+            try:
+                await self._message.edit(view=self)
+            except Exception:
+                pass
+
+    @discord.ui.button(label="STEAL", style=discord.ButtonStyle.danger, custom_id="steal_btn")
+    async def steal_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id == self.victim_id:
+            await safe_interaction_response(
+                interaction, interaction.response.send_message,
+                "❌ You can't steal from yourself!", ephemeral=True)
+            return
+        if self._stolen:
+            await safe_interaction_response(
+                interaction, interaction.response.send_message,
+                "❌ This has already been stolen!", ephemeral=True)
+            return
+        if self._expired():
+            await safe_interaction_response(
+                interaction, interaction.response.send_message,
+                "❌ Too late! The steal window has closed!", ephemeral=True)
+            return
+
+        stealer_level = get_user_planter_level(interaction.user)
+        if stealer_level == 0:
+            await safe_interaction_response(
+                interaction, interaction.response.send_message,
+                "❌ You need a Planter rank to steal! Use /gather to rank up.", ephemeral=True)
+            return
+        if abs(stealer_level - self.victim_planter_level) > 1:
+            await safe_interaction_response(
+                interaction, interaction.response.send_message,
+                "❌ You can only steal from someone with equal rank, or one rank above/below!", ephemeral=True)
+            return
+
+        self._stolen = True
+        stealer_id = interaction.user.id
+        victim_id = self.victim_id
+        payload = self.steal_payload
+
+        def _do_steal():
+            if self.steal_type == "gather":
+                steal_revert_gather(
+                    victim_id, payload["value"], payload["item_name"],
+                    payload["ripeness_name"], payload["category"])
+                steal_apply_gather(
+                    stealer_id, payload["value"], payload["item_name"],
+                    payload["ripeness_name"], payload["category"])
+            else:
+                steal_revert_harvest(
+                    victim_id, payload["items_inc"], payload["ripeness_inc"],
+                    payload["total_value"], payload["num_items"])
+                steal_apply_harvest(
+                    stealer_id, payload["items_inc"], payload["ripeness_inc"],
+                    payload["total_value"], payload["num_items"])
+
+        await asyncio.to_thread(_do_steal)
+
+        for child in self.children:
+            child.disabled = True
+
+        stealer_name = interaction.user.display_name
+        try:
+            old_embed = interaction.message.embeds[0] if interaction.message.embeds else None
+            if self.steal_type == "gather" and old_embed:
+                # Rebuild as dark-red "STOLEN GATHER!" embed with clean formatting
+                DARK_RED = 0x8B0000
+                new_embed = discord.Embed(
+                    title="🔴 STOLEN GATHER!",
+                    description=f"**{stealer_name}** stole this gather!",
+                    color=DARK_RED,
+                )
+                for f in old_embed.fields:
+                    new_embed.add_field(name=f.name, value=f.value, inline=f.inline)
+                embed = new_embed
+            elif self.steal_type == "harvest" and old_embed:
+                # Harvest: keep embed, add footer for who stole it
+                old_embed.set_footer(text=f"🔴 Stolen by **{stealer_name}**")
+                embed = old_embed
+            elif old_embed:
+                old_embed.set_footer(text=f"🔴 Stolen by **{stealer_name}**")
+                embed = old_embed
+            else:
+                embed = discord.Embed(
+                    description=f"🔴 Stolen by **{stealer_name}**!",
+                    color=0x8B0000,
+                )
+            await safe_interaction_response(
+                interaction, interaction.response.edit_message, embed=embed, view=self)
+        except Exception:
+            await safe_interaction_response(
+                interaction, interaction.response.send_message,
+                f"🔴 Stolen by **{stealer_name}**!", ephemeral=False)
+        self.stop()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PvE Wild Animal Event — View, trigger, and reward logic
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class WildAnimalView(discord.ui.View):
+    """Interactive button view for the PvE wild animal event.
+    
+    Each button press drains 1 HP and records the attacker.
+    When HP reaches 0, rewards are distributed and the channel is unlocked.
+    """
+
+    def __init__(self, animal: dict, hp: int, channel_id: int, area_multiplier: float):
+        super().__init__(timeout=None)
+        self.animal = animal
+        self.max_hp = hp
+        self.hp = hp
+        self.channel_id = channel_id
+        self.area_multiplier = area_multiplier
+        self.attackers: dict[int, int] = {}  # user_id -> hit count
+        self.defeated = False
+        self._lock = asyncio.Lock()
+
+    def _hp_bar(self) -> str:
+        filled = max(0, round((self.hp / self.max_hp) * 20))
+        empty = 20 - filled
+        return f"{'🟥' * filled}{'⬛' * empty}"
+
+    @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_attack")
+    async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self._lock:
+            if self.defeated:
+                await safe_interaction_response(
+                    interaction, interaction.response.send_message,
+                    f"The **{self.animal['name']}** has already been defeated!", ephemeral=True)
+                return
+
+            self.hp -= 1
+            self.attackers[interaction.user.id] = self.attackers.get(interaction.user.id, 0) + 1
+
+            if self.hp <= 0:
+                self.defeated = True
+                button.disabled = True
+                button.label = "☠️ Defeated!"
+                button.style = discord.ButtonStyle.secondary
+
+                victory_embed = discord.Embed(
+                    title=f"☠️ {self.animal['emoji']} {self.animal['name']} Defeated! ☠️",
+                    description=self.animal["defeat_msg"],
+                    color=discord.Color.gold())
+                victory_embed.add_field(
+                    name="HP", value=f"**0** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
+
+                participants_lines = []
+                sorted_attackers = sorted(self.attackers.items(), key=lambda x: -x[1])
+                for uid, hits in sorted_attackers:
+                    member = interaction.guild.get_member(uid)
+                    name = member.display_name if member else f"User {uid}"
+                    participants_lines.append(f"**{name}** — {hits} hit{'s' if hits != 1 else ''}")
+                participants_text = "\n".join(participants_lines) if participants_lines else "No participants"
+                if len(participants_text) > 1024:
+                    participants_text = participants_text[:1020] + " …"
+                victory_embed.add_field(name="🏆 Contributors", value=participants_text, inline=False)
+                victory_embed.set_footer(text="Rewards are being distributed…")
+
+                await safe_interaction_response(
+                    interaction, interaction.response.edit_message, embed=victory_embed, view=self)
+
+                # Unlock the channel IMMEDIATELY so commands aren't stuck
+                active_pve_events.pop(self.channel_id, None)
+
+                asyncio.create_task(
+                    _pve_distribute_rewards(interaction, self.animal, dict(self.attackers), self.channel_id, self.area_multiplier))
+                return
+
+            progress_embed = discord.Embed(
+                title=f"🚨 {self.animal['emoji']} Wild {self.animal['name']} Appeared! 🚨",
+                description=self.animal["description"],
+                color=self.animal["color"])
+            progress_embed.add_field(
+                name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
+            progress_embed.add_field(
+                name="⚔️ Last Hit", value=f"**{interaction.user.display_name}**!", inline=False)
+            progress_embed.set_footer(text="All commands are blocked until it's defeated")
+
+            await safe_interaction_response(
+                interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+
+
+def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplier: float):
+    """Roll N gather items using pure math, then write everything to DB in ONE operation.
+
+    Returns (display_results, total_value).
+    Only 1 DB read + 1 DB write regardless of num_items.
+    """
+    full_data = get_user_gather_full_data(user_id)
+    active_events = get_active_events_cached()
+
+    hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
+    daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
+
+    # Pre-compute event-adjusted item weights once
+    item_weights = None
+    hourly_eid = hourly_event.get("effects", {}).get("event_id", "") if hourly_event else ""
+    daily_eid = daily_event.get("effects", {}).get("event_id", "") if daily_event else ""
+
+    if hourly_eid == "may_flowers":
+        item_weights = [1.6 if i["category"] == "Flower" else 1.0 for i in GATHERABLE_ITEMS]
+    elif hourly_eid == "fruit_festival":
+        item_weights = [1.5 if i["category"] == "Fruit" else 1.0 for i in GATHERABLE_ITEMS]
+    elif hourly_eid == "vegetable_boom":
+        item_weights = [1.5 if i["category"] == "Vegetable" else 1.0 for i in GATHERABLE_ITEMS]
+
+    # Pre-compute user multipliers once (all from full_data, zero extra DB calls)
+    user_upgrades = full_data.get("basket_upgrades", {})
+    basket_tier = user_upgrades.get("basket", 0)
+    basket_multiplier = BASKET_UPGRADES[basket_tier - 1]["multiplier"] if basket_tier > 0 else 1.0
+    soil_tier = user_upgrades.get("soil", 0)
+    base_gmo_chance = 0.05 + (SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] if soil_tier > 0 else 0)
+    if full_data.get("shop_inventory", {}).get("mutagenic_serum", 0) >= 1:
+        base_gmo_chance += 0.07
+
+    bloom_mult = 1.0 + (full_data.get("tree_rings", 0) * 0.005)
+    water_mult = 1.0 + (full_data.get("water_count", 0) * 0.01)
+    ach_mult = get_achievement_multiplier(user_id, full_data=full_data)
+    daily_mult = 1.0 + (full_data.get("consecutive_water_days", 0) * 0.02)
+    rank_mult = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
+    hoe_enchant = full_data.get("hoe_enchantment")
+    enchant_pct = hoe_enchant.get("money_bonus", 0) if hoe_enchant else 0
+    has_scarecrow = full_data.get("shop_inventory", {}).get("scarecrow", 0) >= 1
+    has_bloomstone = full_data.get("shop_inventory", {}).get("bloomstone", 0) >= 1
+
+    if hourly_eid == "basket_boost":
+        basket_multiplier *= 1.5
+    value_multiplier = 1.0
+    if hourly_eid == "bumper_crop":
+        value_multiplier *= 2.0
+    elif hourly_eid == "lucky_strike":
+        value_multiplier *= 1.25
+    if daily_eid == "double_money":
+        value_multiplier *= 1.5
+    elif daily_eid == "harvest_festival":
+        value_multiplier *= 1.5
+
+    gmo_chance = min(base_gmo_chance + (0.20 if hourly_eid == "radiation_leak" else 0)
+                     + (0.10 if daily_eid == "gmo_surge" else 0), 1.0)
+
+    # Additive boost factor (computed once)
+    additive_boost = (bloom_mult - 1.0) + (water_mult - 1.0) + (ach_mult - 1.0) + (daily_mult - 1.0) + enchant_pct
+
+    # Pre-compute ripeness weights per category
+    def _ripe_cfg(rlist):
+        base_w = [r["chance"] for r in rlist]
+        if hourly_eid == "perfect_ripeness":
+            return rlist, base_w, True
+        if daily_eid == "ripeness_rush":
+            return rlist, [r["chance"] * 2 if "Perfect" in r["name"] else r["chance"] for r in rlist], False
+        return rlist, base_w, False
+
+    fruit_cfg = _ripe_cfg(LEVEL_OF_RIPENESS_FRUITS)
+    veg_cfg = _ripe_cfg(LEVEL_OF_RIPENESS_VEGETABLES)
+    flower_cfg = _ripe_cfg(LEVEL_OF_RIPENESS_FLOWERS)
+
+    # Roll all items (pure CPU, zero DB)
+    items_inc: dict[str, int] = {}
+    ripeness_inc: dict[str, int] = {}
+    total_balance = 0.0
+    display_results = []
+
+    for _ in range(num_items):
+        item = random.choices(GATHERABLE_ITEMS, weights=item_weights, k=1)[0] if item_weights else random.choice(GATHERABLE_ITEMS)
+        bv = item["base_value"] * area_multiplier
+        cat = item["category"]
+
+        if hourly_eid == "may_flowers" and cat == "Flower":
+            bv *= 3
+        elif hourly_eid == "fruit_festival" and cat == "Fruit":
+            bv *= 2
+        elif hourly_eid == "vegetable_boom" and cat == "Vegetable":
+            bv *= 2
+
+        if cat == "Fruit":
+            rlist, rw, pb = fruit_cfg
+        elif cat == "Vegetable":
+            rlist, rw, pb = veg_cfg
+        elif cat == "Flower":
+            rlist, rw, pb = flower_cfg
+        else:
+            rlist, rw, pb = [], [], False
+
+        if rlist:
+            rip = random.choices(rlist, weights=rw, k=1)[0]
+            rm = rip["multiplier"] * 1.5 if pb else rip["multiplier"]
+            fv = bv * rm
+        else:
+            rip = {"name": "Normal"}
+            fv = bv
+
+        if random.random() < gmo_chance:
+            fv *= 2
+
+        fv *= basket_multiplier * value_multiplier
+        fv *= get_seasonal_multiplier(random.randint(0, 11), cat)[0]
+
+        base_fv = fv
+        fv = (base_fv + base_fv * additive_boost) * rank_mult
+
+        if has_scarecrow:
+            fv *= 1.10
+        if has_bloomstone and cat == "Flower":
+            fv *= 3.0
+
+        total_balance += fv
+        name = item["name"]
+        items_inc[name] = items_inc.get(name, 0) + 1
+        ripeness_inc[rip["name"]] = ripeness_inc.get(rip["name"], 0) + 1
+        display_results.append({"name": name, "value": fv})
+
+    # Single batched DB write
+    pre_total = full_data.get("gather_stats_total_items", 0) or full_data.get("total_forage_count", 0)
+    pre_bloom_cycle = full_data.get("bloom_cycle_plants", 0)
+    perform_harvest_batch_update(
+        user_id=user_id,
+        items_inc=items_inc,
+        ripeness_inc=ripeness_inc,
+        balance_increment=total_balance,
+        num_items=num_items,
+        pre_total_items=pre_total,
+        pre_bloom_cycle=pre_bloom_cycle,
+        set_cooldown=False,
+        increment_command_count=False,
+    )
+
+    return display_results, total_balance
+
+
+async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict,
+                                   attackers: dict[int, int], channel_id: int,
+                                   area_multiplier: float):
+    """Award plants to every participant. 1 DB read + 1 DB write per user regardless of hits."""
+    channel = interaction.guild.get_channel(channel_id)
+    try:
+        for user_id, hits in attackers.items():
+            try:
+                member = interaction.guild.get_member(user_id)
+                if not member:
+                    continue
+
+                results, total_value = await asyncio.to_thread(
+                    _pve_roll_items_and_batch_write, user_id, hits, area_multiplier)
+
+                plant_emojis = [get_item_display_emoji(r["name"]) for r in results]
+                emoji_display = " ".join(plant_emojis)
+                header = (
+                    f"You landed **{hits}** hit{'s' if hits != 1 else ''} "
+                    f"and gathered **{hits}** plant{'s' if hits != 1 else ''}!\n\n")
+                max_emoji_len = 4000 - len(header)
+                if len(emoji_display) > max_emoji_len:
+                    emoji_display = emoji_display[:max_emoji_len - 5] + " …"
+
+                reward_embed = discord.Embed(
+                    title=f"🎁 PvE Rewards — {animal['emoji']} {animal['name']}",
+                    description=f"{header}{emoji_display}",
+                    color=discord.Color.green())
+                reward_embed.add_field(
+                    name="💰 Total Earned", value=f"**${total_value:,.2f}**", inline=True)
+                reward_embed.set_footer(text="Thanks for defending the gathering grounds!")
+
+                if channel:
+                    await channel.send(f"{member.mention}", embed=reward_embed, delete_after=60)
+                else:
+                    try:
+                        await member.send(embed=reward_embed)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"PvE reward failed for user {user_id}: {e}")
+
+    except Exception as e:
+        print(f"Error distributing PvE rewards: {e}")
+
+
+async def trigger_pve_event(channel: discord.TextChannel, area_multiplier: float):
+    """Spawn a wild animal PvE event in the given channel and lock it from commands."""
+    if channel.id in active_pve_events:
+        return
+
+    animal = random.choice(PVE_WILD_ANIMALS)
+    hp = random.randint(*animal["hp_range"])
+
+    active_pve_events[channel.id] = {"animal": animal, "hp": hp, "start_time": time.time()}
+
+    embed = discord.Embed(
+        title=f"🚨 {animal['emoji']} Wild {animal['name']} Appeared! 🚨",
+        description=animal["description"],
+        color=animal["color"])
+    hp_bar_filled = "🟥" * 20
+    embed.add_field(name="HP", value=f"**{hp}** / **{hp}**\n{hp_bar_filled}", inline=False)
+    embed.add_field(
+        name="⚔️ How to Fight",
+        value="Press the **Attack** button below! Each hit deals **1 damage** and earns you **1 plant**!",
+        inline=False)
+    embed.set_footer(text="All gathering commands are BLOCKED until the wild animal is defeated")
+
+    view = WildAnimalView(animal=animal, hp=hp, channel_id=channel.id, area_multiplier=area_multiplier)
+    await channel.send(embed=embed, view=view)
+
+
 @bot.tree.command(name="gather", description="Gather a random item from nature!")
 async def gather(interaction: discord.Interaction):
     try:
@@ -5001,6 +5515,16 @@ async def gather(interaction: discord.Interaction):
             channels_list = ", ".join(f"**{GATHERING_AREAS[a]['display_name']}**" for a in GATHERING_AREAS)
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"❌ You can only use this command in gathering channels: {channels_list}", ephemeral=True)
+            return
+
+        # Block commands while a PvE wild animal event is active in this channel
+        if interaction.channel.id in active_pve_events:
+            pve_info = active_pve_events[interaction.channel.id]
+            animal_name = pve_info["animal"]["name"]
+            animal_emoji = pve_info["animal"]["emoji"]
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"🚨 {animal_emoji} A wild **{animal_name}** is terrorizing this channel! "
+                f"Defeat it before you can gather again!", ephemeral=True)
             return
 
         area = GATHERING_AREAS[channel_name]
@@ -5106,8 +5630,22 @@ async def gather(interaction: discord.Interaction):
             embed.add_field(name="\U0001f4b0 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
             embed.add_field(name="\U0001f4b5 New Balance", value=f"**${gather_result['new_balance']:.2f}**", inline=True)
 
-        # === Send the response ASAP ===
-        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+        # === Send the response ASAP (with optional STEAL button) ===
+        view = None
+        if result.get("stealable") and result.get("steal_payload"):
+            view = StealView(
+                victim_id=user_id,
+                victim_planter_level=result.get("victim_planter_level", 1),
+                steal_type="gather",
+                steal_payload=result["steal_payload"],
+                window_sec=STEAL_WINDOW_GATHER_SEC,
+            )
+        if view:
+            msg = await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
+            if msg:
+                view._message = msg
+        else:
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
 
         # Chain message (must be after the main embed)
         if chain_triggered:
@@ -5125,6 +5663,12 @@ async def gather(interaction: discord.Interaction):
 
         # === Background: role assignment + achievements (user already has the response) ===
         asyncio.create_task(_gather_post_response(interaction, user_id, full_data, gather_result))
+
+        # === PvE wild animal trigger (0.1% chance per /gather); NOT when stealable ===
+        if (channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
+                and not result.get("stealable")):
+            if random.random() < PVE_TRIGGER_CHANCE_GATHER:
+                asyncio.create_task(trigger_pve_event(interaction.channel, area_mult))
     except Exception as e:
         print(f"Error in gather command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
@@ -5523,6 +6067,9 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         "total_seasonal_bonus": total_seasonal_bonus,
         "base_plants": base_items,
         "car_extra_plants": extra_items,
+        "items_inc": items_inc,
+        "ripeness_inc": ripeness_inc,
+        "num_items": total_items_to_harvest,
     }
 
 async def perform_harvest_for_user(user_id: int, allow_chain: bool = True,
@@ -5577,10 +6124,24 @@ def _harvest_critical_path(user_id: int, channel_name: str, area_mult: float,
     if chain_triggered:
         update_user_last_harvest_time(user_id, 0)
 
+    # --- stealable roll: 0.5% for harvest; stealable = no PvE ---
+    stealable = random.random() < STEAL_CHANCE_HARVEST
+    steal_payload = None
+    if stealable:
+        steal_payload = {
+            "total_value": result["total_value"],
+            "items_inc": result["items_inc"],
+            "ripeness_inc": result["ripeness_inc"],
+            "num_items": result["num_items"],
+        }
+
     return {
         "result": result,
         "full_data": full_data,
         "chain_triggered": chain_triggered,
+        "stealable": stealable,
+        "victim_planter_level": user_planter_level,
+        "steal_payload": steal_payload,
     }
 
 
@@ -5670,6 +6231,16 @@ async def harvest(interaction: discord.Interaction):
                 f"❌ You can only use this command in gathering channels: {channels_list}", ephemeral=True)
             return
 
+        # Block commands while a PvE wild animal event is active in this channel
+        if interaction.channel.id in active_pve_events:
+            pve_info = active_pve_events[interaction.channel.id]
+            animal_name = pve_info["animal"]["name"]
+            animal_emoji = pve_info["animal"]["emoji"]
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"🚨 {animal_emoji} A wild **{animal_name}** is terrorizing this channel! "
+                f"Defeat it before you can harvest again!", ephemeral=True)
+            return
+
         area = GATHERING_AREAS[channel_name]
         area_mult = area.get("multiplier", 1.0)
         if has_shop_item(user_id, "atlas"):
@@ -5709,9 +6280,6 @@ async def harvest(interaction: discord.Interaction):
 
         # --- build embed (pure computation, no DB) ---
         embed = discord.Embed(title="You Harvested!", color=discord.Color.green())
-        month_name = result.get("month_name", "")
-        if month_name:
-            embed.add_field(name="Month", value=month_name, inline=True)
 
         # (obsolete) (~35–50 chars per line; 20–30 items stay under Discord’s 1024 limit)
         # One line per item: emoji (ripeness) GMO? — no plant name text to stay under 1024
@@ -5719,7 +6287,7 @@ async def harvest(interaction: discord.Interaction):
         for item in gathered_items:
             emoji = get_item_display_emoji(item["name"])
             gmo = " GMO! ✨" if item["is_gmo"] else ""
-            lines.append(f"{emoji} ({item['ripeness']}){gmo}")
+            lines.append(f"{emoji} (**{item['ripeness']}**){gmo}")
         items_display = "\n".join(lines)
         if len(items_display) > 1024:
             max_content = 1024 - 20  # reserve space for " … and 99999 more"
@@ -5732,8 +6300,6 @@ async def harvest(interaction: discord.Interaction):
                 n += 1
             items_display = "\n".join(lines[:n]) + f" … and {len(lines) - n} more"
         embed.add_field(name="📦 Items Gathered", value=items_display or "No items", inline=False)
-        embed.add_field(name="💰 Total Value", value=f"**${total_value:.2f}**", inline=True)
-        embed.add_field(name="💵 New Balance", value=f"**${current_balance:.2f}**", inline=True)
 
         bloom_count = full_data.get("bloom_count", 0)
         extra_money_from_bloom = total_base_value * (bloom_multiplier - 1.0)
@@ -5775,8 +6341,28 @@ async def harvest(interaction: discord.Interaction):
             embed.add_field(name="\u2728 Attunement",
                 value=f"**{tractor_name}** {tractor_rarity_display}", inline=False)
 
-        # === Send the response ASAP ===
-        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+        month_name = result.get("month_name", "")
+        if month_name:
+            embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
+        embed.add_field(name="💰 Total Value", value=f"**${total_value:.2f}**", inline=True)
+        embed.add_field(name="💵 New Balance", value=f"**${current_balance:.2f}**", inline=True)
+
+        # === Send the response ASAP (with optional STEAL button) ===
+        view = None
+        if crit.get("stealable") and crit.get("steal_payload"):
+            view = StealView(
+                victim_id=user_id,
+                victim_planter_level=crit.get("victim_planter_level", 1),
+                steal_type="harvest",
+                steal_payload=crit["steal_payload"],
+                window_sec=STEAL_WINDOW_HARVEST_SEC,
+            )
+        if view:
+            msg = await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
+            if msg:
+                view._message = msg
+        else:
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
 
         # Chain message (must be after the main embed)
         if chain_triggered:
@@ -5795,6 +6381,12 @@ async def harvest(interaction: discord.Interaction):
 
         # === Background: role assignment + achievements (user already has the response) ===
         asyncio.create_task(_harvest_post_response(interaction, user_id, full_data, result))
+
+        # === PvE wild animal trigger (0.5% chance per /harvest); NOT when stealable ===
+        if (channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
+                and not crit.get("stealable")):
+            if random.random() < PVE_TRIGGER_CHANCE_HARVEST:
+                asyncio.create_task(trigger_pve_event(interaction.channel, area_mult))
     except Exception as e:
         print(f"Error in harvest command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
