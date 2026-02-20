@@ -617,7 +617,7 @@ ENCHANTMENT_RARITIES = [
     {"name": "NETHERITE",  "weight": 1.0},        # 1%
     {"name": "LUMINITE",   "weight": 0.5},        # 0.5%
     {"name": "CELESTIAL",  "weight": 0.1234},     # 0.1234%
-    {"name": "SECRET",     "weight": 90.0},    # 0.01666%
+    {"name": "SECRET",     "weight": 0.01666},    # 0.01666%
 ]
 
 RARITY_COLORS = {
