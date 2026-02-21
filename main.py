@@ -180,6 +180,8 @@ from database import (
     steal_apply_gather,
     steal_revert_harvest,
     steal_apply_harvest,
+    get_user_beta_tester,
+    set_user_beta_tester,
 )
 
 try:
@@ -1232,8 +1234,8 @@ VALID_GATHERING_CHANNELS = set(GATHERING_AREAS.keys())
 # PvE Wild Animal Event System
 # ═══════════════════════════════════════════════════════════════════════════════
 
-PVE_TRIGGER_CHANCE_GATHER = 0.001   # 0.1% per /gather
-PVE_TRIGGER_CHANCE_HARVEST = 0.0025  # 0.25% per /harvest
+PVE_TRIGGER_CHANCE_GATHER = 0.005   # 0.5% per /gather (spawns in all gathering areas: forest, grove, marsh, bog, mire)
+PVE_TRIGGER_CHANCE_HARVEST = 0.01   # 1% per /harvest
 
 # Steal: stealable chance per successful gather/harvest (no PvE when stealable; crit cannot be stolen)
 STEAL_CHANCE_GATHER = 0.01   # 1% per /gather
@@ -2245,6 +2247,23 @@ def get_rank_perma_buff_multiplier(user_id, full_data=None):
     return 1.2 ** level
 
 
+BETA_TESTER_ROLE_NAME = "BETA TESTER"
+BETA_TESTER_MONEY_MULTIPLIER = 1.3
+
+
+def sync_beta_tester_from_member(member: discord.Member) -> None:
+    """Sync the user's BETA TESTER role from Discord to the database cache."""
+    if member is None:
+        return
+    has_role = discord.utils.get(member.roles, name=BETA_TESTER_ROLE_NAME) is not None
+    set_user_beta_tester(member.id, has_role)
+
+
+def get_beta_tester_money_multiplier(user_id: int) -> float:
+    """Return 1.3 if user has BETA TESTER role (cached in DB), else 1.0."""
+    return BETA_TESTER_MONEY_MULTIPLIER if get_user_beta_tester(user_id) else 1.0
+
+
 def can_gather(user_id, user_data=None, active_events=None, full_data=None):
     """
     Check if user can gather. Returns (can_gather: bool, time_left: int, is_roulette_cooldown: bool).
@@ -2595,6 +2614,11 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         elif full_data is None and has_shop_item(user_id, "bloomstone"):
             final_value *= 3.0
 
+    # BETA TESTER: permanent 1.3x on all money gained
+    beta_tester_mult = get_beta_tester_money_multiplier(user_id)
+    final_value *= beta_tester_mult
+    extra_money_from_beta_tester = final_value * (beta_tester_mult - 1.0) / beta_tester_mult if beta_tester_mult > 1.0 else 0.0
+
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
     new_balance = current_balance + final_value
@@ -2630,6 +2654,8 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         "is_critical_gather": is_critical_gather,
         "hoe_enchant": hoe_enchant,
         "month_name": month_name,
+        "beta_tester_multiplier": beta_tester_mult,
+        "extra_money_from_beta_tester": extra_money_from_beta_tester,
         "seasonal_multiplier": seasonal_multiplier,
         "seasonal_label": seasonal_label,
         "tree_ring_awarded": tree_ring_awarded,
@@ -3842,17 +3868,44 @@ GATHEMON_FIRST = [
     {"name": "Bulbasaur", "hp": 18, "atk": 3, "def": 3, "moves": [_move("Tackle", 3), _move("Vine Whip", 4), _move("Growl", lower_atk_enemy=1), _move("Defense Curl", raise_def_self=1)]},
     {"name": "Snivy", "hp": 17, "atk": 3, "def": 2, "moves": [_move("Tackle", 3), _move("Leaf Blade", 4), _move("Leer", lower_def_enemy=1), _move("Growth", raise_atk_self=1)]},
     {"name": "Eevee", "hp": 17, "atk": 3, "def": 3, "moves": [_move("Tackle", 3), _move("Quick Attack", 4), _move("Tail Whip", lower_def_enemy=1), _move("Baby-Doll Eyes", lower_atk_enemy=1)]},
+    {"name": "Oddish", "hp": 17, "atk": 3, "def": 3, "moves": [_move("Absorb", 3), _move("Acid", 4), _move("Growth", raise_atk_self=1), _move("Sweet Scent", lower_def_enemy=1)]},
+    {"name": "Bellsprout", "hp": 16, "atk": 4, "def": 2, "moves": [_move("Vine Whip", 4), _move("Wrap", 3), _move("Growth", raise_atk_self=1), _move("Leer", lower_def_enemy=1)]},
+    {"name": "Chikorita", "hp": 18, "atk": 2, "def": 4, "moves": [_move("Tackle", 3), _move("Razor Leaf", 4), _move("Growl", lower_atk_enemy=1), _move("Reflect", raise_def_self=1)]},
+    {"name": "Treecko", "hp": 16, "atk": 4, "def": 2, "moves": [_move("Pound", 3), _move("Leaf Blade", 4), _move("Leer", lower_def_enemy=1), _move("Growth", raise_atk_self=1)]},
+    {"name": "Turtwig", "hp": 18, "atk": 3, "def": 4, "moves": [_move("Tackle", 3), _move("Razor Leaf", 4), _move("Withdraw", raise_def_self=1), _move("Growl", lower_atk_enemy=1)]},
+    {"name": "Chespin", "hp": 17, "atk": 4, "def": 3, "moves": [_move("Tackle", 3), _move("Vine Whip", 4), _move("Leer", lower_def_enemy=1), _move("Defense Curl", raise_def_self=1)]},
+    {"name": "Rowlet", "hp": 16, "atk": 3, "def": 3, "moves": [_move("Peck", 3), _move("Razor Leaf", 4), _move("Growl", lower_atk_enemy=1), _move("Feather Dance", lower_atk_enemy=1)]},
+    {"name": "Grookey", "hp": 17, "atk": 4, "def": 2, "moves": [_move("Scratch", 3), _move("Branch Poke", 4), _move("Leer", lower_def_enemy=1), _move("Growth", raise_atk_self=1)]},
+    {"name": "Sprigatito", "hp": 16, "atk": 4, "def": 2, "moves": [_move("Scratch", 3), _move("Leafage", 4), _move("Tail Whip", lower_def_enemy=1), _move("Hone Claws", raise_atk_self=1)]},
 ]
 GATHEMON_SECOND = [
     {"name": "Ivysaur", "hp": 24, "atk": 5, "def": 4, "moves": [_move("Razor Leaf", 6), _move("Seed Bomb", 7), _move("Growl", lower_atk_enemy=1), _move("Iron Defense", raise_def_self=2)]},
     {"name": "Swadloon", "hp": 26, "atk": 4, "def": 6, "moves": [_move("Razor Leaf", 6), _move("Bug Bite", 6), _move("Iron Defense", raise_def_self=2), _move("String Shot", lower_def_enemy=1)]},
     {"name": "Servine", "hp": 23, "atk": 5, "def": 4, "moves": [_move("Leaf Blade", 6), _move("Slam", 7), _move("Growth", raise_atk_self=2), _move("Leer", lower_def_enemy=1)]},
+    {"name": "Gloom", "hp": 25, "atk": 5, "def": 4, "moves": [_move("Razor Leaf", 6), _move("Acid", 6), _move("Growth", raise_atk_self=2), _move("Sweet Scent", lower_def_enemy=1)]},
+    {"name": "Weepinbell", "hp": 24, "atk": 6, "def": 3, "moves": [_move("Vine Whip", 6), _move("Slam", 7), _move("Growth", raise_atk_self=2), _move("Leer", lower_def_enemy=1)]},
+    {"name": "Bayleef", "hp": 27, "atk": 4, "def": 6, "moves": [_move("Razor Leaf", 6), _move("Body Slam", 7), _move("Growl", lower_atk_enemy=1), _move("Reflect", raise_def_self=2)]},
+    {"name": "Grovyle", "hp": 23, "atk": 6, "def": 4, "moves": [_move("Leaf Blade", 7), _move("Fury Cutter", 6), _move("Leer", lower_def_enemy=1), _move("Swords Dance", raise_atk_self=2)]},
+    {"name": "Grotle", "hp": 26, "atk": 5, "def": 6, "moves": [_move("Razor Leaf", 6), _move("Bite", 6), _move("Withdraw", raise_def_self=2), _move("Growl", lower_atk_enemy=1)]},
+    {"name": "Quilladin", "hp": 27, "atk": 5, "def": 6, "moves": [_move("Vine Whip", 6), _move("Body Slam", 7), _move("Defense Curl", raise_def_self=2), _move("Leer", lower_def_enemy=1)]},
+    {"name": "Dartrix", "hp": 23, "atk": 5, "def": 4, "moves": [_move("Razor Leaf", 6), _move("Pluck", 6), _move("Growl", lower_atk_enemy=1), _move("Swords Dance", raise_atk_self=2)]},
+    {"name": "Thwackey", "hp": 24, "atk": 6, "def": 4, "moves": [_move("Branch Poke", 6), _move("Slam", 7), _move("Screech", lower_def_enemy=2), _move("Growth", raise_atk_self=2)]},
+    {"name": "Floragato", "hp": 23, "atk": 6, "def": 4, "moves": [_move("Leafage", 6), _move("Slash", 7), _move("Hone Claws", raise_atk_self=2), _move("Tail Whip", lower_def_enemy=1)]},
 ]
 GATHEMON_THIRD = [
     {"name": "Leavanny", "hp": 34, "atk": 8, "def": 6, "moves": [_move("Leaf Blade", 9), _move("X-Scissor", 8), _move("Swords Dance", raise_atk_self=2), _move("Screech", lower_def_enemy=2)]},
     {"name": "Venusaur", "hp": 36, "atk": 7, "def": 8, "moves": [_move("Petal Blizzard", 9), _move("Seed Bomb", 8), _move("Growl", lower_atk_enemy=2), _move("Iron Defense", raise_def_self=2)]},
     {"name": "Serperior", "hp": 35, "atk": 8, "def": 7, "moves": [_move("Leaf Blade", 9), _move("Slam", 8), _move("Coil", raise_atk_self=1, raise_def_self=1), _move("Leer", lower_def_enemy=2)]},
     {"name": "Leafeon", "hp": 34, "atk": 9, "def": 7, "moves": [_move("Leaf Blade", 10), _move("Quick Attack", 8), _move("Swords Dance", raise_atk_self=2), _move("Tail Whip", lower_def_enemy=2)]},
+    {"name": "Vileplume", "hp": 36, "atk": 7, "def": 8, "moves": [_move("Petal Dance", 10), _move("Sludge Bomb", 9), _move("Growth", raise_atk_self=2), _move("Sweet Scent", lower_def_enemy=2)]},
+    {"name": "Victreebel", "hp": 34, "atk": 9, "def": 6, "moves": [_move("Leaf Blade", 9), _move("Power Whip", 10), _move("Swords Dance", raise_atk_self=2), _move("Screech", lower_def_enemy=2)]},
+    {"name": "Meganium", "hp": 38, "atk": 6, "def": 9, "moves": [_move("Petal Blizzard", 9), _move("Body Slam", 8), _move("Reflect", raise_def_self=2), _move("Growl", lower_atk_enemy=2)]},
+    {"name": "Sceptile", "hp": 33, "atk": 10, "def": 6, "moves": [_move("Leaf Blade", 11), _move("X-Scissor", 9), _move("Swords Dance", raise_atk_self=2), _move("Leer", lower_def_enemy=2)]},
+    {"name": "Torterra", "hp": 38, "atk": 9, "def": 9, "moves": [_move("Wood Hammer", 11), _move("Earthquake", 10), _move("Withdraw", raise_def_self=2), _move("Growl", lower_atk_enemy=2)]},
+    {"name": "Chesnaught", "hp": 37, "atk": 9, "def": 8, "moves": [_move("Seed Bomb", 9), _move("Hammer Arm", 10), _move("Bulk Up", raise_atk_self=1, raise_def_self=1), _move("Screech", lower_def_enemy=2)]},
+    {"name": "Decidueye", "hp": 35, "atk": 10, "def": 6, "moves": [_move("Leaf Blade", 11), _move("Spirit Shackle", 9), _move("Swords Dance", raise_atk_self=2), _move("Feather Dance", lower_atk_enemy=2)]},
+    {"name": "Rillaboom", "hp": 36, "atk": 11, "def": 7, "moves": [_move("Drum Beating", 11), _move("Wood Hammer", 10), _move("Swords Dance", raise_atk_self=2), _move("Screech", lower_def_enemy=2)]},
+    {"name": "Meowscarada", "hp": 34, "atk": 11, "def": 6, "moves": [_move("Flower Trick", 11), _move("Night Slash", 9), _move("Hone Claws", raise_atk_self=2), _move("Leer", lower_def_enemy=2)]},
 ]
 
 def _gathemon_tier_for_plants(plants: int) -> int:
@@ -3918,7 +3971,7 @@ def _gathemon_apply_move(move: dict, attacker: dict, defender: dict) -> tuple[in
         add = new_total - current
         if add != 0:
             target["modifiers"].append({"stat": stat_key, "amount": add, "turns_left": 3})
-            log_parts.append(f"{target['name']} {stat_key}: {'+' if add > 0 else ''}{add} (3 turns)")
+            log_parts.append(f"{target['name']} {stat_key.upper()}: {'+' if add > 0 else ''}{add} (3 turns)")
     # Damage
     damage = 0
     if move.get("power") is not None:
@@ -3927,7 +3980,8 @@ def _gathemon_apply_move(move: dict, attacker: dict, defender: dict) -> tuple[in
         damage = _gathemon_damage(move["power"], atk_eff, def_eff)
         defender["hp"] = max(0, defender["hp"] - damage)
         log_parts.append(f"{move['name']} hit for {damage} damage.")
-    return damage, " ".join(log_parts) if log_parts else move["name"] + "."
+    raw = " ".join(log_parts) if log_parts else move["name"] + "."
+    return damage, f"***{raw}***"
 
 
 active_gathemon_challenges = {}  # challenge_id -> { challenger_id, opponent_id, bet }
@@ -3948,7 +4002,8 @@ class GathemonBattle:
         self.pokemon2 = _gathemon_random_pokemon(bet)
         self.current_turn_id = player1_id  # player1 goes first
         self.message = None  # single in-channel battle message
-        self.last_log = "Battle started!"
+        self.last_log = "***Battle started!***"
+        self.last_mover_id = None  # user id who made the move that produced last_log
 
     def get_pokemon(self, is_player1: bool):
         return self.pokemon1 if is_player1 else self.pokemon2
@@ -3991,30 +4046,116 @@ def _gathemon_battle_embed(battle: GathemonBattle, for_player1: bool) -> discord
     return embed
 
 
+def _gathemon_winner_gathers_sync(user_id: int, num_plants: int) -> tuple[list, float]:
+    """Run N gathers in one thread (single DB round-trip per gather, no async overhead). Returns (results, total_value)."""
+    results = []
+    total_value = 0.0
+    user_data = None
+    active_events = get_active_events_cached()
+    for _ in range(num_plants):
+        r = _perform_gather_for_user_sync(
+            user_id,
+            apply_cooldown=False,
+            user_data=user_data,
+            active_events=active_events,
+            apply_orchard_fertilizer=False,
+            area_multiplier=1.0,
+            full_data=None,
+            increment_command_count=False,
+        )
+        results.append({"name": r["name"], "value": r["value"]})
+        total_value += r["value"]
+        user_data = get_user_gather_data(user_id)
+    return results, total_value
+
+
+async def _gathemon_award_winner_gathers(winner_id: int, num_plants: int, channel: discord.abc.Messageable):
+    """Show victory embed immediately, run N gathers in one thread, then update embed with results."""
+    if num_plants <= 0 or channel is None:
+        return
+    placeholder_embed = discord.Embed(
+        title="🌿 GathéMon Victory Rewards",
+        description=f"**GathéMon Victory!** Gathering your **{num_plants}** plants… ⏳",
+        color=discord.Color.gold(),
+    )
+    placeholder_embed.set_footer(text="Processing…")
+    try:
+        msg = await channel.send(f"<@{winner_id}>", embed=placeholder_embed, delete_after=60)
+    except Exception as e:
+        print(f"Gathemon victory placeholder send failed: {e}")
+        return
+    results, total_value = await asyncio.to_thread(_gathemon_winner_gathers_sync, winner_id, num_plants)
+    plant_emojis = [get_item_display_emoji(r["name"]) for r in results]
+    emoji_display = " ".join(plant_emojis)
+    header = f"**GathéMon Victory!** You won **{num_plants}** plants and gathered them!\n\n"
+    max_emoji_len = 4000 - len(header)
+    if len(emoji_display) > max_emoji_len:
+        emoji_display = emoji_display[: max_emoji_len - 5] + " …"
+    reward_embed = discord.Embed(
+        title="🌿 GathéMon Victory Rewards",
+        description=f"{header}{emoji_display}",
+        color=discord.Color.gold(),
+    )
+    reward_embed.add_field(name="🌱 Plants Gathered", value=f"**{num_plants}**", inline=True)
+    reward_embed.add_field(name="💰 Total Earned", value=f"**${total_value:,.2f}**", inline=True)
+    reward_embed.set_footer(text="Victory harvest — your plants, your spoils!")
+    try:
+        await msg.edit(embed=reward_embed)
+    except Exception as e:
+        print(f"Gathemon victory reward edit failed: {e}")
+
+
+def _gathemon_hp_bar(current: int, max_hp: int, segments: int = 10) -> str:
+    """HP bar: 100-50% green 🟩, 49-25% yellow 🟨, 24-0% red 🟥. Empty = ⬛."""
+    if max_hp <= 0:
+        return "⬛" * segments
+    pct = current / max_hp
+    filled = max(0, min(segments, round((current / max_hp) * segments)))
+    empty = segments - filled
+    if pct > 0.49:
+        square = "🟩"
+    elif pct > 0.24:
+        square = "🟨"
+    else:
+        square = "🟥"
+    return f"{square * filled}{'⬛' * empty}"
+
+
 def _gathemon_battle_embed_public(battle: GathemonBattle) -> discord.Embed:
-    """Build the single in-channel battle embed (both Pokémon, whose turn)."""
+    """Build the single in-channel battle embed (both Pokémon, HP bars, who did what, whose turn)."""
     p1 = battle.pokemon1
     p2 = battle.pokemon2
     atk1 = _gathemon_effective_stat(p1["atk"], p1["modifiers"], "atk")
     def1 = _gathemon_effective_stat(p1["def"], p1["modifiers"], "def")
     atk2 = _gathemon_effective_stat(p2["atk"], p2["modifiers"], "atk")
     def2 = _gathemon_effective_stat(p2["def"], p2["modifiers"], "def")
+    bar1 = _gathemon_hp_bar(p1["hp"], p1["max_hp"])
+    bar2 = _gathemon_hp_bar(p2["hp"], p2["max_hp"])
+    # Capitalize ATK/DEF in modifier display
+    def _mod_str(modifiers):
+        return ", ".join(f"{m['stat'].upper()} {m['amount']:+d} ({m['turns_left']}t)" for m in modifiers)
     title = f"🌿 {p1['name']} vs {p2['name']} 🌿"
-    desc = f"**<@{battle.player1_id}> — {p1['name']}**\nHP: **{p1['hp']}/{p1['max_hp']}** | ATK: **{atk1}** | DEF: **{def1}**"
+    desc = f"**<@{battle.player1_id}> — {p1['name']}**\nATK: **{atk1}** | DEF: **{def1}**\n{bar1} **{p1['hp']}/{p1['max_hp']}**"
     if p1["modifiers"]:
-        buf = ", ".join(f"{m['stat']} {m['amount']:+d} ({m['turns_left']}t)" for m in p1["modifiers"])
-        desc += f"\n*{buf}*"
-    desc += f"\n\n**<@{battle.player2_id}> — {p2['name']}**\nHP: **{p2['hp']}/{p2['max_hp']}** | ATK: **{atk2}** | DEF: **{def2}**"
+        desc += f"\n*{_mod_str(p1['modifiers'])}*"
+    if battle.last_mover_id == battle.player1_id:
+        desc += f"\n**Your move:** {battle.last_log}"
+    elif battle.last_mover_id == battle.player2_id:
+        desc += f"\n**Opponent's move:** {battle.last_log}"
+    desc += f"\n\n**<@{battle.player2_id}> — {p2['name']}**\nATK: **{atk2}** | DEF: **{def2}**\n{bar2} **{p2['hp']}/{p2['max_hp']}**"
     if p2["modifiers"]:
-        buf = ", ".join(f"{m['stat']} {m['amount']:+d} ({m['turns_left']}t)" for m in p2["modifiers"])
-        desc += f"\n*{buf}*"
-    desc += f"\n\n{battle.last_log}"
-    if battle.current_turn_id == battle.player1_id:
-        desc += f"\n\n**▶ It's <@{battle.player1_id}>'s turn!** Choose a move below."
-    else:
-        desc += f"\n\n**▶ It's <@{battle.player2_id}>'s turn!** Choose a move below."
+        desc += f"\n*{_mod_str(p2['modifiers'])}*"
+    if battle.last_mover_id == battle.player2_id:
+        desc += f"\n**Your move:** {battle.last_log}"
+    elif battle.last_mover_id == battle.player1_id:
+        desc += f"\n**Opponent's move:** {battle.last_log}"
+    battle_over = p1["hp"] <= 0 or p2["hp"] <= 0
+    if not battle_over:
+        if battle.current_turn_id == battle.player1_id:
+            desc += f"\n\n**▶ It's <@{battle.player1_id}>'s turn!** Choose a move below."
+        else:
+            desc += f"\n\n**▶ It's <@{battle.player2_id}>'s turn!** Choose a move below."
     embed = discord.Embed(title=title, description=desc, color=discord.Color.green())
-    embed.add_field(name="🌱 Bet", value=f"{battle.bet} plants each", inline=True)
     return embed
 
 
@@ -4027,8 +4168,9 @@ class GathemonLobbyView(discord.ui.View):
         self.bet = bet
 
     async def on_timeout(self):
-        if self.challenge_id in active_gathemon_challenges:
-            del active_gathemon_challenges[self.challenge_id]
+        if self.challenge_id not in active_gathemon_challenges:
+            return
+        del active_gathemon_challenges[self.challenge_id]
         try:
             await self.message.edit(content="⏰ Challenge timed out.", view=None)
         except Exception:
@@ -4044,7 +4186,7 @@ class GathemonLobbyView(discord.ui.View):
             return
         chall = active_gathemon_challenges[self.challenge_id]
         if self.challenger_id in user_active_gathemon or self.opponent_id in user_active_gathemon:
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ You or the challenger is already in a GatheMon battle!", ephemeral=False)
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ You or the challenger is already in a GathéMon battle!", ephemeral=False)
             return
         bet = self.bet
         if get_user_bloom_cycle_plants(self.challenger_id) < bet or get_user_bloom_cycle_plants(self.opponent_id) < bet:
@@ -4163,16 +4305,20 @@ class GathemonMoveButton(discord.ui.Button):
         move = attacker["moves"][self.move_index]
         damage, log_line = _gathemon_apply_move(move, attacker, defender)
         battle.last_log = log_line
+        battle.last_mover_id = battle.player1_id if is_p1 else battle.player2_id
         battle.tick_both_modifiers()
         winner_id = None
+        num_plants_won = 0
+        channel = None
         if defender["hp"] <= 0:
             winner_id = battle.player1_id if is_p1 else battle.player2_id
-            add_user_bloom_cycle_plants(winner_id, battle.bet * 2)
+            num_plants_won = battle.bet * 2
+            channel = interaction.channel
             for uid in (battle.player1_id, battle.player2_id):
                 if uid in user_active_gathemon:
                     del user_active_gathemon[uid]
             del active_gathemon_battles[self.game_id]
-            battle.last_log = f"{battle.last_log}\n\n🏆 <@{winner_id}> wins {battle.bet * 2} plants!"
+            battle.last_log = f"{battle.last_log}\n\n🏆 <@{winner_id}> wins {num_plants_won} plants!"
             view = None
         else:
             battle.current_turn_id = battle.player2_id if battle.current_turn_id == battle.player1_id else battle.player1_id
@@ -4183,6 +4329,8 @@ class GathemonMoveButton(discord.ui.Button):
                 await battle.message.edit(embed=embed, view=view)
         except Exception as e:
             print(f"Gathemon edit messages: {e}")
+        if winner_id is not None and num_plants_won and channel:
+            await _gathemon_award_winner_gathers(winner_id, num_plants_won, channel)
 
 
 # --- GATHERSHIP (PVP Battleship-style game) ---
@@ -5184,7 +5332,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.9.1 :3"
+            name="running /gather on V0.9.2 :3"
         )
     )
     try:
@@ -5960,6 +6108,7 @@ async def gather(interaction: discord.Interaction):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
+        sync_beta_tester_from_member(interaction.user)
         channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
         user_id = interaction.user.id
 
@@ -6034,9 +6183,31 @@ async def gather(interaction: discord.Interaction):
             embed.add_field(name="Value", value=f"**${gather_result['base_value']:.2f}**", inline=True)
             embed.add_field(name="Ripeness", value=f"{gather_result['ripeness']}", inline=True)
             embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
+
+            bloom_count = full_data.get("bloom_count", 0)
+            if bloom_count > 0 and gather_result.get('extra_money_from_bloom', 0) > 0:
+                multiplier_percent = (gather_result['bloom_multiplier'] - 1.0) * 100
+                embed.add_field(name="<:TreeRing:1474244868288282817> Tree Ring Boost",
+                    value=f"+{multiplier_percent:.1f}% - **+${gather_result['extra_money_from_bloom']:.2f}**", inline=False)
+            bloom_rank = _bloom_count_to_rank(bloom_count)
+            if bloom_rank != "PINE I" and gather_result.get('extra_money_from_rank', 0) > 0:
+                embed.add_field(name="⭐ Rank Boost",
+                    value=f"{gather_result['rank_perma_buff_multiplier']:.2f}x - **+${gather_result['extra_money_from_rank']:.2f}**", inline=False)
+            if gather_result.get('extra_money_from_achievement', 0) > 0:
+                achievement_percent = (gather_result['achievement_multiplier'] - 1.0) * 100
+                embed.add_field(name="🏆 Achievement Boost",
+                    value=f"+{achievement_percent:.1f}% - **+${gather_result['extra_money_from_achievement']:.2f}**", inline=False)
+            if gather_result.get('extra_money_from_daily', 0) > 0:
+                daily_bonus_percent = (gather_result['daily_bonus_multiplier'] - 1.0) * 100
+                embed.add_field(name="💧 Water Streak Boost",
+                    value=f"+{daily_bonus_percent:.1f}% - **+${gather_result['extra_money_from_daily']:.2f}**", inline=False)
+
             embed.add_field(name="\u2728 Attunement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
             embed.add_field(name="\U0001f4a5 Critical Multiplier",
                 value=f"${pre_crit_value:.2f} \u2192 **${gather_result['value']:.2f}**", inline=False)
+            if gather_result.get('extra_money_from_beta_tester', 0) > 0:
+                embed.add_field(name="🧪 Beta Tester!",
+                    value=f"{gather_result['beta_tester_multiplier']:.2f}x - **+${gather_result['extra_money_from_beta_tester']:.2f}**", inline=False)
             month_name = gather_result.get("month_name", "—")
             embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
             embed.add_field(name="\U0001f4b0 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
@@ -6070,6 +6241,10 @@ async def gather(interaction: discord.Interaction):
                 daily_bonus_percent = (gather_result['daily_bonus_multiplier'] - 1.0) * 100
                 embed.add_field(name="💧 Water Streak Boost",
                     value=f"+{daily_bonus_percent:.1f}% - **+${gather_result['extra_money_from_daily']:.2f}**", inline=False)
+
+            if gather_result.get('extra_money_from_beta_tester', 0) > 0:
+                embed.add_field(name="🧪 Beta Tester!",
+                    value=f"{gather_result['beta_tester_multiplier']:.2f}x - **+${gather_result['extra_money_from_beta_tester']:.2f}**", inline=False)
 
             hoe_enc = gather_result.get('hoe_enchant')
             if hoe_enc:
@@ -6117,7 +6292,7 @@ async def gather(interaction: discord.Interaction):
         # === Background: role assignment + achievements (user already has the response) ===
         asyncio.create_task(_gather_post_response(interaction, user_id, full_data, gather_result))
 
-        # === PvE wild animal trigger (0.1% chance per /gather); NOT when stealable ===
+        # === PvE wild animal trigger (see PVE_TRIGGER_CHANCE_GATHER); NOT when stealable ===
         if (channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
                 and not result.get("stealable")):
             if random.random() < PVE_TRIGGER_CHANCE_GATHER:
@@ -6133,7 +6308,7 @@ async def water(interaction: discord.Interaction):
     try:
         if not await safe_defer(interaction, ephemeral=False):
             return
-        
+
         user_id = interaction.user.id
         current_time = time.time()
         last_water_time = get_user_last_water_time(user_id)
@@ -6487,6 +6662,11 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     if shop_inv.get("fuzzy_dice", 0) >= 1:
         total_value *= 1.05
 
+    # BETA TESTER: permanent 1.3x on all money gained
+    beta_tester_mult = get_beta_tester_money_multiplier(user_id)
+    total_value *= beta_tester_mult
+    extra_money_from_beta_tester = total_value * (beta_tester_mult - 1.0) / beta_tester_mult if beta_tester_mult > 1.0 else 0.0
+
     # ----- single batch write: items + ripeness + balance + counts + tree rings + cooldown -----
     num_items = total_items_to_harvest
     tree_rings_to_award = perform_harvest_batch_update(
@@ -6523,6 +6703,8 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         "items_inc": items_inc,
         "ripeness_inc": ripeness_inc,
         "num_items": total_items_to_harvest,
+        "beta_tester_multiplier": beta_tester_mult,
+        "extra_money_from_beta_tester": extra_money_from_beta_tester,
     }
 
 async def perform_harvest_for_user(user_id: int, allow_chain: bool = True,
@@ -6674,6 +6856,7 @@ async def harvest(interaction: discord.Interaction):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
+        sync_beta_tester_from_member(interaction.user)
         channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
         user_id = interaction.user.id
 
@@ -6786,6 +6969,10 @@ async def harvest(interaction: discord.Interaction):
             embed.add_field(name="⭐ Rank Boost",
                 value=f"{rank_perma_buff_multiplier:.2f}x - **+${extra_money_from_rank:.2f}**", inline=False)
 
+        if result.get("extra_money_from_beta_tester", 0) > 0:
+            embed.add_field(name="🧪 Beta Tester!",
+                value=f"{result['beta_tester_multiplier']:.2f}x - **+${result['extra_money_from_beta_tester']:.2f}**", inline=False)
+
         tractor_enc = result.get("tractor_enchant")
         if tractor_enc:
             tractor_name = tractor_enc.get("name", "Unknown")
@@ -6835,7 +7022,7 @@ async def harvest(interaction: discord.Interaction):
         # === Background: role assignment + achievements (user already has the response) ===
         asyncio.create_task(_harvest_post_response(interaction, user_id, full_data, result))
 
-        # === PvE wild animal trigger (0.5% chance per /harvest); NOT when stealable ===
+        # === PvE wild animal trigger (see PVE_TRIGGER_CHANCE_HARVEST); NOT when stealable ===
         if (channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
                 and not crit.get("stealable")):
             if random.random() < PVE_TRIGGER_CHANCE_HARVEST:
@@ -12240,7 +12427,8 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
     try:
         if not await safe_defer(interaction, ephemeral=False):
             return
-        
+
+        sync_beta_tester_from_member(interaction.user)
         user_id = interaction.user.id
         holdings = get_user_crypto_holdings(user_id)
         prices = get_crypto_prices()
@@ -12290,6 +12478,7 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             # Rank is multiplicative on subtotal
             extra_from_rank = subtotal * (rank_perma_buff_multiplier - 1.0)
             total_sale_value = subtotal + extra_from_rank
+            total_sale_value *= get_beta_tester_money_multiplier(user_id)
             
             # Add money to balance (with boosts)
             current_balance = get_user_balance(user_id)
@@ -12337,6 +12526,13 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
                 embed.add_field(
                     name="⭐ Rank Boost",
                     value=f"{rank_perma_buff_multiplier:.2f}x - **+${extra_from_rank:.2f}**",
+                    inline=False
+                )
+            if get_user_beta_tester(user_id):
+                extra_beta = total_sale_value * (BETA_TESTER_MONEY_MULTIPLIER - 1.0) / BETA_TESTER_MONEY_MULTIPLIER
+                embed.add_field(
+                    name="🧪 Beta Tester!",
+                    value=f"{BETA_TESTER_MONEY_MULTIPLIER:.2f}x - **+${extra_beta:.2f}**",
                     inline=False
                 )
             
@@ -12397,6 +12593,7 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         # Rank is multiplicative on subtotal
         extra_from_rank = subtotal * (rank_perma_buff_multiplier - 1.0)
         sale_value = subtotal + extra_from_rank
+        sale_value *= get_beta_tester_money_multiplier(user_id)
         
         # Update holdings (subtract)
         update_user_crypto_holdings(user_id, coin, -amount)
@@ -12446,6 +12643,13 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             embed.add_field(
                 name="⭐ Rank Boost",
                 value=f"{rank_perma_buff_multiplier:.2f}x - **+${extra_from_rank:.2f}**",
+                inline=False
+            )
+        if get_user_beta_tester(user_id):
+            extra_beta = sale_value * (BETA_TESTER_MONEY_MULTIPLIER - 1.0) / BETA_TESTER_MONEY_MULTIPLIER
+            embed.add_field(
+                name="🧪 Beta Tester!",
+                value=f"{BETA_TESTER_MONEY_MULTIPLIER:.2f}x - **+${extra_beta:.2f}**",
                 inline=False
             )
         
@@ -12941,9 +13145,9 @@ async def russian(
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
-@bot.tree.command(name="gathemon", description="Challenge a user to a turn-based Pokémon battle for plants!")
+@bot.tree.command(name="gathemon", description="Challenge a user to a turn-based GathéMon battle for plants!")
 @app_commands.describe(
-    user="The user you challenge to a GatheMon battle",
+    user="The user you challenge to a GathéMon battle",
     plants="Number of plants to wager (1–10). Both players must have this many."
 )
 async def gathemon(interaction: discord.Interaction, user: discord.Member, plants: int):
@@ -12953,7 +13157,7 @@ async def gathemon(interaction: discord.Interaction, user: discord.Member, plant
         channel_name = (interaction.channel.name or "").lower()
         if channel_name not in ("gathemon-1", "gathemon-2"):
             await safe_interaction_response(interaction, interaction.followup.send,
-                "❌ GatheMon can only be played in **#gathemon-1** or **#gathemon-2**!", ephemeral=False)
+                "❌ GathéMon can only be played in **#gathemon-1** or **#gathemon-2**!", ephemeral=False)
             return
         challenger_id = interaction.user.id
         opponent_id = user.id
@@ -12968,10 +13172,10 @@ async def gathemon(interaction: discord.Interaction, user: discord.Member, plant
             return
         if active_gathemon_challenges or active_gathemon_battles:
             await safe_interaction_response(interaction, interaction.followup.send,
-                "❌ A GatheMon game is already in progress. Wait for it to finish!", ephemeral=False)
+                "❌ A GathéMon game is already in progress. Wait for it to finish!", ephemeral=False)
             return
         if challenger_id in user_active_gathemon or opponent_id in user_active_gathemon:
-            await safe_interaction_response(interaction, interaction.followup.send, "❌ You or your opponent is already in a GatheMon battle!", ephemeral=False)
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ You or your opponent is already in a GathéMon battle!", ephemeral=False)
             return
         if get_user_bloom_cycle_plants(challenger_id) < plants:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ You don't have enough plants for this wager!", ephemeral=False)
@@ -12984,12 +13188,11 @@ async def gathemon(interaction: discord.Interaction, user: discord.Member, plant
         }
         view = GathemonLobbyView(challenge_id, challenger_id, opponent_id, plants, timeout=300)
         embed = discord.Embed(
-            title="🌿 GatheMon — Pokémon Battle",
-            description=f"{interaction.user.mention} challenges {user.mention} to a **GatheMon** battle for **{plants}** plants!\n\n{user.mention}, click **Accept** to start the battle!",
+            title="🌿 GathéMon Battle!",
+            description=f"{interaction.user.mention} challenges {user.mention} to a **GathéMon** battle for **{plants}** plants!\n\n{user.mention}, click **Accept** to start the battle!",
             color=discord.Color.green(),
         )
-        embed.add_field(name="🌱 Wager", value=f"{plants} plants each", inline=True)
-        embed.add_field(name="⏰ Timeout", value="5 min to accept", inline=True)
+        embed.set_footer(text="You have 5 minutes to accept!")
         msg = await interaction.followup.send(embed=embed, view=view, ephemeral=False)
         view.message = msg
     except Exception as e:

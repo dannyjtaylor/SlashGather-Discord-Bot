@@ -294,6 +294,24 @@ def update_user_balance(user_id: int, new_balance: float) -> None:
     )
 
 
+def get_user_beta_tester(user_id: int) -> bool:
+    """Return True if user has the BETA TESTER role (cached in DB)."""
+    users = _get_users_collection()
+    doc = users.find_one({"_id": int(user_id)}, {"beta_tester": 1})
+    return bool(doc.get("beta_tester", False) if doc else False)
+
+
+def set_user_beta_tester(user_id: int, value: bool) -> None:
+    """Set the cached BETA TESTER flag for the user (synced from Discord role)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"beta_tester": bool(value)}},
+        upsert=True,
+    )
+
+
 def increment_forage_count(user_id: int) -> None:
     users = _get_users_collection()
     users.update_one(
