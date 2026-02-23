@@ -260,6 +260,77 @@ def perform_gather_update(user_id: int, balance_increment: float, item_name: str
     # Return whether a Tree Ring was awarded
     return should_award_tree_ring
 
+
+def perform_batch_gather_update(user_id: int, results: list, apply_cooldown: bool = False,
+                                increment_command_count: bool = False) -> int:
+    """
+    Apply multiple gather results in a single MongoDB operation (e.g. Gathemon 20-plant reward).
+    Each result dict must have: "name", "value", "ripeness", "category".
+    Returns the number of tree rings awarded.
+    """
+    if not results:
+        return 0
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+
+    doc = users.find_one(
+        {"_id": int(user_id)},
+        {"gather_stats.total_items": 1, "bloom_cycle_plants": 1}
+    )
+    current_total = 0
+    current_bloom_cycle = 0
+    if doc:
+        if doc.get("gather_stats"):
+            current_total = int(doc.get("gather_stats", {}).get("total_items", 0))
+        current_bloom_cycle = int(doc.get("bloom_cycle_plants", 0))
+
+    n = len(results)
+    total_balance = sum(float(r["value"]) for r in results)
+    items_inc = {}
+    ripeness_inc = {}
+    categories_inc = {}
+    for r in results:
+        name = r["name"]
+        items_inc[f"items.{name}"] = items_inc.get(f"items.{name}", 0) + 1
+        rn = r.get("ripeness", "Normal")
+        ripeness_inc[f"ripeness_stats.{rn}"] = ripeness_inc.get(f"ripeness_stats.{rn}", 0) + 1
+        cat = r["category"]
+        categories_inc[f"gather_stats.categories.{cat}"] = categories_inc.get(f"gather_stats.categories.{cat}", 0) + 1
+    gather_items_inc = {}
+    for r in results:
+        name = r["name"]
+        gather_items_inc[f"gather_stats.items.{name}"] = gather_items_inc.get(f"gather_stats.items.{name}", 0) + 1
+
+    tree_rings = sum(1 for i in range(n) if ((current_total + 1 + i) % 200 == 0) and (current_total + 1 + i) > 0)
+    new_bloom_cycle = current_bloom_cycle + n
+
+    update_ops = {
+        "$inc": {
+            "balance": total_balance,
+            "gather_stats.total_items": n,
+            "total_forage_count": n,
+            **items_inc,
+            **ripeness_inc,
+            **categories_inc,
+            **gather_items_inc,
+        },
+        "$set": {"bloom_cycle_plants": new_bloom_cycle},
+    }
+    if tree_rings > 0:
+        update_ops["$inc"]["tree_rings"] = tree_rings
+    if increment_command_count:
+        update_ops["$inc"]["gather_command_count"] = n
+    if apply_cooldown:
+        update_ops["$set"]["last_gather_time"] = float(time.time())
+
+    users.update_one(
+        {"_id": int(user_id)},
+        update_ops,
+        upsert=True,
+    )
+    return tree_rings
+
+
 def init_database() -> None:
     """Initialise MongoDB indexes and verify connectivity."""
     users = _get_users_collection()

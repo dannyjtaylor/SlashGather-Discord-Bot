@@ -7,6 +7,7 @@ import os
 import random
 import time
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import uuid
 import threading
 import datetime
@@ -105,6 +106,7 @@ from database import (
     clear_expired_events,
     get_user_gather_data,
     perform_gather_update,
+    perform_batch_gather_update,
     get_user_tree_rings,
     increment_tree_rings,
     get_bloom_multiplier,
@@ -226,6 +228,9 @@ _invite_cache = {}
 
 # Per-user locks to prevent concurrent /imbue operations for the same user
 _imbue_locks: dict[int, asyncio.Lock] = {}
+
+# Per-user locks so only one of gather/harvest post-response sends a rank-up embed for the same user
+_planter_role_locks: dict[int, asyncio.Lock] = {}
 
 # Helper function to safely handle interaction responses and prevent "interaction failed" messages
 async def safe_interaction_response(interaction: discord.Interaction, 
@@ -1106,6 +1111,11 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
     #PLANTER X - 15000+ items gathered this cycle
 
     user_id = member.id
+    # Refetch member so we see current Discord roles (avoids double rank-up when gather and harvest run close together)
+    try:
+        member = await guild.fetch_member(user_id)
+    except Exception:
+        pass  # use passed-in member if fetch fails
     cycle_plants = get_user_bloom_cycle_plants(user_id)  # Use bloom cycle counter (resets per bloom)
     planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V", "PLANTER VI", "PLANTER VII", "PLANTER VIII", "PLANTER IX", "PLANTER X"]
 
@@ -1234,8 +1244,8 @@ VALID_GATHERING_CHANNELS = set(GATHERING_AREAS.keys())
 # PvE Wild Animal Event System
 # ═══════════════════════════════════════════════════════════════════════════════
 
-PVE_TRIGGER_CHANCE_GATHER = 0.005   # 0.5% per /gather (spawns in all gathering areas: forest, grove, marsh, bog, mire)
-PVE_TRIGGER_CHANCE_HARVEST = 0.01   # 1% per /harvest
+PVE_TRIGGER_CHANCE_GATHER = 0.10   # 10% per /gather (spawns in all gathering channels)
+PVE_TRIGGER_CHANCE_HARVEST = 0.08  # 8% per /harvest
 
 # Steal: stealable chance per successful gather/harvest (no PvE when stealable; crit cannot be stolen)
 STEAL_CHANCE_GATHER = 0.01   # 1% per /gather
@@ -2360,7 +2370,8 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
                                   apply_orchard_fertilizer: bool = False,
                                   area_multiplier: float = 1.0,
                                   full_data=None,
-                                  increment_command_count: bool = False) -> dict:
+                                  increment_command_count: bool = False,
+                                  apply_update: bool = True) -> dict:
     """
     Synchronous implementation of gather logic. Runs in a thread via asyncio.to_thread()
     to avoid blocking the event loop with pymongo calls.
@@ -2622,17 +2633,19 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
     new_balance = current_balance + final_value
-    
-    # Perform all database updates in a single batched operation
-    tree_ring_awarded = perform_gather_update(
-        user_id=user_id,
-        balance_increment=final_value,
-        item_name=name,
-        ripeness_name=ripeness["name"],
-        category=item["category"],
-        apply_cooldown=apply_cooldown,
-        increment_command_count=increment_command_count,
-    )
+
+    if apply_update:
+        tree_ring_awarded = perform_gather_update(
+            user_id=user_id,
+            balance_increment=final_value,
+            item_name=name,
+            ripeness_name=ripeness["name"],
+            category=item["category"],
+            apply_cooldown=apply_cooldown,
+            increment_command_count=increment_command_count,
+        )
+    else:
+        tree_ring_awarded = False
 
     return {
         "name": name,
@@ -3908,6 +3921,51 @@ GATHEMON_THIRD = [
     {"name": "Meowscarada", "hp": 34, "atk": 11, "def": 6, "moves": [_move("Flower Trick", 11), _move("Night Slash", 9), _move("Hone Claws", raise_atk_self=2), _move("Leer", lower_def_enemy=2)]},
 ]
 
+# GathéMon type emojis (custom Discord); Pokéball for rewards/start embed
+GATHEMON_TYPE_EMOJI = {
+    "Normal": "<:NORMAL:1475497322665218149>",
+    "Flying": "<:FLYING:1475496973288341720>",
+    "Dark": "<:DARK:1475497015763800296>",
+    "Fighting": "<:FIGHT:1475496879155318937>",
+    "Bug": "<:BUG:1475496917814349824>",
+    "Ghost": "<:GHOST:1475497105220042844>",
+    "Grass": "<:GRASS:1475497139261014047>",
+    "Ground": "<:GROUND:1475497183741743300>",
+    "Poison": "<:POISON:1475497230394855475>",
+}
+GATHEMON_POKEBALL_EMOJI = "<:pokeball:1475494042195333220>"
+
+# Pokemon name -> list of type keys (for display)
+GATHEMON_POKEMON_TYPES = {
+    "Sewaddle": ["Bug", "Grass"], "Bulbasaur": ["Grass", "Poison"], "Snivy": ["Grass"], "Eevee": ["Normal"],
+    "Oddish": ["Grass", "Poison"], "Bellsprout": ["Grass", "Poison"], "Chikorita": ["Grass"], "Treecko": ["Grass"],
+    "Turtwig": ["Grass"], "Chespin": ["Grass"], "Rowlet": ["Grass", "Flying"], "Grookey": ["Grass"], "Sprigatito": ["Grass"],
+    "Ivysaur": ["Grass", "Poison"], "Swadloon": ["Bug", "Grass"], "Servine": ["Grass"], "Gloom": ["Grass", "Poison"],
+    "Weepinbell": ["Grass", "Poison"], "Bayleef": ["Grass"], "Grovyle": ["Grass"], "Grotle": ["Grass"],
+    "Quilladin": ["Grass"], "Dartrix": ["Grass", "Flying"], "Thwackey": ["Grass"], "Floragato": ["Grass"],
+    "Leavanny": ["Bug", "Grass"], "Venusaur": ["Grass", "Poison"], "Serperior": ["Grass"], "Leafeon": ["Grass"],
+    "Vileplume": ["Grass", "Poison"], "Victreebel": ["Grass", "Poison"], "Meganium": ["Grass"], "Sceptile": ["Grass"],
+    "Torterra": ["Grass", "Ground"], "Chesnaught": ["Grass", "Fighting"], "Decidueye": ["Grass", "Ghost"],
+    "Rillaboom": ["Grass"], "Meowscarada": ["Grass", "Dark"],
+}
+
+# Per-Pokemon level options (pick one of the 3 at random)
+GATHEMON_POKEMON_LEVELS = {
+    "Sewaddle": [15, 16, 17], "Bulbasaur": [11, 12, 13], "Snivy": [12, 13, 14], "Eevee": [15, 16, 17],
+    "Oddish": [16, 17, 18], "Bellsprout": [16, 17, 18], "Chikorita": [11, 12, 13], "Treecko": [11, 12, 13],
+    "Turtwig": [13, 14, 15], "Chespin": [11, 12, 13], "Rowlet": [12, 13, 14], "Grookey": [11, 12, 13],
+    "Sprigatito": [11, 12, 13],
+    "Ivysaur": [27, 28, 29], "Swadloon": [21, 22, 23], "Servine": [31, 32, 33], "Gloom": [27, 28, 29],
+    "Weepinbell": [27, 28, 29], "Bayleef": [27, 28, 29], "Grovyle": [31, 32, 33], "Grotle": [27, 28, 29],
+    "Quilladin": [31, 32, 33], "Dartrix": [29, 30, 31], "Thwackey": [30, 31, 32], "Floragato": [31, 32, 33],
+    "Leavanny": [30, 31, 32], "Venusaur": [33, 34, 35], "Serperior": [37, 38, 39], "Leafeon": [31, 32, 33],
+    "Vileplume": [33, 34, 35], "Victreebel": [33, 34, 35], "Meganium": [33, 34, 35], "Sceptile": [37, 38, 39],
+    "Torterra": [33, 34, 35], "Chesnaught": [37, 38, 39], "Decidueye": [35, 36, 37], "Rillaboom": [36, 37, 38],
+    "Meowscarada": [37, 38, 39],
+}
+GATHEMON_GENDER_MALE = "\u2642"   # ♂
+GATHEMON_GENDER_FEMALE = "\u2640" # ♀
+
 def _gathemon_tier_for_plants(plants: int) -> int:
     """Return 1 (first), 2 (second), or 3 (third) evolution tier for bet amount 1-10."""
     if plants <= 3:
@@ -3926,6 +3984,10 @@ def _gathemon_random_pokemon(plants: int) -> dict:
     else:
         pool = GATHEMON_THIRD
     base = random.choice(pool)
+    level_opts = GATHEMON_POKEMON_LEVELS.get(base["name"], [15, 16, 17])
+    level = random.choice(level_opts)
+    gender = random.choice([GATHEMON_GENDER_MALE, GATHEMON_GENDER_FEMALE])
+    types = GATHEMON_POKEMON_TYPES.get(base["name"], ["Grass"])
     return {
         "name": base["name"],
         "hp": base["hp"],
@@ -3934,7 +3996,23 @@ def _gathemon_random_pokemon(plants: int) -> dict:
         "def": base["def"],
         "moves": base["moves"],
         "modifiers": [],  # {"stat": "atk"|"def", "amount": int, "turns_left": int}
+        "types": types,
+        "level": level,
+        "gender": gender,
     }
+
+
+def _gathemon_pokemon_display_name(p: dict) -> str:
+    """Format: Name TypeEmojis Gender Lv.XX (types before gender, gender before level)."""
+    types_str = " ".join(GATHEMON_TYPE_EMOJI.get(t, "") for t in p.get("types", []))
+    level = p.get("level", 50)
+    gender = p.get("gender", GATHEMON_GENDER_MALE)
+    parts = [p["name"]]
+    if types_str:
+        parts.append(types_str)
+    parts.append(gender)
+    parts.append(f"Lv.{level}")
+    return " ".join(parts)
 
 def _gathemon_effective_stat(base: int, modifiers: list, stat: str) -> int:
     total = sum(m["amount"] for m in modifiers if m["stat"] == stat)
@@ -3984,6 +4062,26 @@ def _gathemon_apply_move(move: dict, attacker: dict, defender: dict) -> tuple[in
     return damage, f"***{raw}***"
 
 
+def _gathemon_pick_random_move(moves: list, last_used_move_index: int | None = None) -> int:
+    """Pick a move index: 70% attack (power), 30% stat (boost/lower ATK/DEF). Cannot pick the same stat move twice in a row."""
+    attack_indices = [i for i, m in enumerate(moves) if m.get("power") is not None]
+    # Exclude last-used move from stat pool if it was a stat move (so same ATK/DEF move can't repeat)
+    stat_indices = [i for i, m in enumerate(moves) if m.get("power") is None]
+    if last_used_move_index is not None and 0 <= last_used_move_index < len(moves) and moves[last_used_move_index].get("power") is None:
+        stat_indices = [i for i in stat_indices if i != last_used_move_index]
+    use_attack = random.random() < 0.70
+    if use_attack and attack_indices:
+        return random.choice(attack_indices)
+    if not use_attack and stat_indices:
+        return random.choice(stat_indices)
+    # Fallback: use whichever pool has moves
+    if attack_indices:
+        return random.choice(attack_indices)
+    if stat_indices:
+        return random.choice(stat_indices)
+    return 0
+
+
 active_gathemon_challenges = {}  # challenge_id -> { challenger_id, opponent_id, bet }
 active_gathemon_battles = {}     # game_id -> GathemonBattle
 user_active_gathemon = {}        # user_id -> game_id
@@ -4004,6 +4102,8 @@ class GathemonBattle:
         self.message = None  # single in-channel battle message
         self.last_log = "***Battle started!***"
         self.last_mover_id = None  # user id who made the move that produced last_log
+        self.last_move_index_p1 = None  # last move index used by player1 (so same stat move can't repeat)
+        self.last_move_index_p2 = None  # last move index used by player2
 
     def get_pokemon(self, is_player1: bool):
         return self.pokemon1 if is_player1 else self.pokemon2
@@ -4025,12 +4125,12 @@ def _gathemon_battle_embed(battle: GathemonBattle, for_player1: bool) -> discord
     other = battle.get_opponent_pokemon(for_player1)
     atk_eff = _gathemon_effective_stat(mine["atk"], mine["modifiers"], "atk")
     def_eff = _gathemon_effective_stat(mine["def"], mine["modifiers"], "def")
-    title = f"🌿 {mine['name']} vs {other['name']} 🌿"
-    desc = f"**Your {mine['name']}**\nHP: **{mine['hp']}/{mine['max_hp']}** | ATK: **{atk_eff}** | DEF: **{def_eff}**"
+    title = f"{GATHEMON_POKEBALL_EMOJI} {mine['name']} vs. {other['name']} {GATHEMON_POKEBALL_EMOJI}"
+    desc = f"**Your {_gathemon_pokemon_display_name(mine)}**\nHP: **{mine['hp']}/{mine['max_hp']}** | ATK: **{atk_eff}** | DEF: **{def_eff}**"
     if mine["modifiers"]:
         buf = ", ".join(f"{m['stat']} {m['amount']:+d} ({m['turns_left']}t)" for m in mine["modifiers"])
         desc += f"\n*Buffs/Debuffs: {buf}*"
-    desc += f"\n\n**Enemy {other['name']}** — HP: **{other['hp']}/{other['max_hp']}**"
+    desc += f"\n\n**Enemy {_gathemon_pokemon_display_name(other)}** — HP: **{other['hp']}/{other['max_hp']}**"
     if other["modifiers"]:
         buf = ", ".join(f"{m['stat']} {m['amount']:+d} ({m['turns_left']}t)" for m in other["modifiers"])
         desc += f"\n*Buffs/Debuffs: {buf}*"
@@ -4038,71 +4138,81 @@ def _gathemon_battle_embed(battle: GathemonBattle, for_player1: bool) -> discord
     turn_id = battle.current_turn_id
     is_my_turn = (turn_id == battle.player1_id) == for_player1
     if is_my_turn:
-        desc += "\n\n**▶ Your turn!** Choose a move."
+        desc += "\n\n**▶ Your turn!** Press the button to use a random move (70% attack, 30% buff/debuff). (2 min)"
     else:
         desc += "\n\n*Waiting for opponent...*"
     embed = discord.Embed(title=title, description=desc, color=discord.Color.green())
-    embed.add_field(name="🌱 Bet", value=f"{battle.bet} plants", inline=True)
+    embed.add_field(name=f"{GATHEMON_POKEBALL_EMOJI} Bet", value=f"{battle.bet} plants", inline=True)
     return embed
 
 
+def _gathemon_highest_area_mult_from_data(full_data: dict) -> float:
+    """Return the highest unlocked area multiplier from pre-fetched full_data."""
+    unlocked = full_data.get("unlocked_areas", {})
+    best = 1.0
+    for area_key, area_config in GATHERING_AREAS.items():
+        if area_key == "forest" or unlocked.get(area_key, False):
+            best = max(best, area_config.get("multiplier", 1.0))
+    return best
+
+
 def _gathemon_winner_gathers_sync(user_id: int, num_plants: int) -> tuple[list, float]:
-    """Run N gathers in one thread (single DB round-trip per gather, no async overhead). Returns (results, total_value)."""
-    results = []
-    total_value = 0.0
-    user_data = None
+    """Compute N gathers using winner's highest unlocked area and their boosts; one batch DB update. Returns (results, total_value)."""
+    if num_plants <= 0:
+        return [], 0.0
+    full_data = get_user_gather_full_data(user_id)
     active_events = get_active_events_cached()
-    for _ in range(num_plants):
-        r = _perform_gather_for_user_sync(
+    area_mult = _gathemon_highest_area_mult_from_data(full_data)
+
+    def do_one_gather(_: int) -> dict:
+        return _perform_gather_for_user_sync(
             user_id,
             apply_cooldown=False,
-            user_data=user_data,
+            user_data=full_data,
             active_events=active_events,
             apply_orchard_fertilizer=False,
-            area_multiplier=1.0,
-            full_data=None,
+            area_multiplier=area_mult,
+            full_data=full_data,
             increment_command_count=False,
+            apply_update=False,
         )
-        results.append({"name": r["name"], "value": r["value"]})
-        total_value += r["value"]
-        user_data = get_user_gather_data(user_id)
+
+    with ThreadPoolExecutor(max_workers=min(num_plants, 32)) as executor:
+        raw_results = list(executor.map(do_one_gather, range(num_plants)))
+
+    batch_payload = [
+        {"name": r["name"], "value": r["value"], "ripeness": r["ripeness"], "category": r["category"]}
+        for r in raw_results
+    ]
+    perform_batch_gather_update(user_id, batch_payload, apply_cooldown=False, increment_command_count=False)
+
+    results = [{"name": r["name"], "value": r["value"]} for r in raw_results]
+    total_value = sum(r["value"] for r in raw_results)
     return results, total_value
 
 
-async def _gathemon_award_winner_gathers(winner_id: int, num_plants: int, channel: discord.abc.Messageable):
-    """Show victory embed immediately, run N gathers in one thread, then update embed with results."""
+async def _gathemon_award_winner_gathers(winner_id: int, loser_id: int, num_plants: int, channel: discord.abc.Messageable):
+    """Award plants instantly (run gathers in thread), then send a single reward embed. Uses winner's highest area + boosts."""
     if num_plants <= 0 or channel is None:
         return
-    placeholder_embed = discord.Embed(
-        title="🌿 GathéMon Victory Rewards",
-        description=f"**GathéMon Victory!** Gathering your **{num_plants}** plants… ⏳",
-        color=discord.Color.gold(),
-    )
-    placeholder_embed.set_footer(text="Processing…")
-    try:
-        msg = await channel.send(f"<@{winner_id}>", embed=placeholder_embed, delete_after=60)
-    except Exception as e:
-        print(f"Gathemon victory placeholder send failed: {e}")
-        return
+    # Run all gathers first so plants, statistics, and money are awarded instantly
     results, total_value = await asyncio.to_thread(_gathemon_winner_gathers_sync, winner_id, num_plants)
     plant_emojis = [get_item_display_emoji(r["name"]) for r in results]
     emoji_display = " ".join(plant_emojis)
-    header = f"**GathéMon Victory!** You won **{num_plants}** plants and gathered them!\n\n"
+    header = f"<@{winner_id}> beat <@{loser_id}> in a **GathéMon** battle for **{num_plants}** plant{'s' if num_plants != 1 else ''}!\n\n"
     max_emoji_len = 4000 - len(header)
     if len(emoji_display) > max_emoji_len:
         emoji_display = emoji_display[: max_emoji_len - 5] + " …"
     reward_embed = discord.Embed(
-        title="🌿 GathéMon Victory Rewards",
+        title=f"{GATHEMON_POKEBALL_EMOJI} YOU WON!",
         description=f"{header}{emoji_display}",
         color=discord.Color.gold(),
     )
-    reward_embed.add_field(name="🌱 Plants Gathered", value=f"**{num_plants}**", inline=True)
     reward_embed.add_field(name="💰 Total Earned", value=f"**${total_value:,.2f}**", inline=True)
-    reward_embed.set_footer(text="Victory harvest — your plants, your spoils!")
     try:
-        await msg.edit(embed=reward_embed)
+        await channel.send(f"<@{winner_id}>", embed=reward_embed)
     except Exception as e:
-        print(f"Gathemon victory reward edit failed: {e}")
+        print(f"Gathemon victory reward send failed: {e}")
 
 
 def _gathemon_hp_bar(current: int, max_hp: int, segments: int = 10) -> str:
@@ -4134,27 +4244,40 @@ def _gathemon_battle_embed_public(battle: GathemonBattle) -> discord.Embed:
     # Capitalize ATK/DEF in modifier display
     def _mod_str(modifiers):
         return ", ".join(f"{m['stat'].upper()} {m['amount']:+d} ({m['turns_left']}t)" for m in modifiers)
-    title = f"🌿 {p1['name']} vs {p2['name']} 🌿"
-    desc = f"**<@{battle.player1_id}> — {p1['name']}**\nATK: **{atk1}** | DEF: **{def1}**\n{bar1} **{p1['hp']}/{p1['max_hp']}**"
+    d1 = _gathemon_pokemon_display_name(p1)
+    d2 = _gathemon_pokemon_display_name(p2)
+    title = f"{GATHEMON_POKEBALL_EMOJI} {p1['name']} vs. {p2['name']} {GATHEMON_POKEBALL_EMOJI}"
+    desc = f"**<@{battle.player1_id}> — {d1}**\nATK: **{atk1}** | DEF: **{def1}**\n{bar1} **{p1['hp']}/{p1['max_hp']}**"
     if p1["modifiers"]:
         desc += f"\n*{_mod_str(p1['modifiers'])}*"
     if battle.last_mover_id == battle.player1_id:
         desc += f"\n**Your move:** {battle.last_log}"
     elif battle.last_mover_id == battle.player2_id:
         desc += f"\n**Opponent's move:** {battle.last_log}"
-    desc += f"\n\n**<@{battle.player2_id}> — {p2['name']}**\nATK: **{atk2}** | DEF: **{def2}**\n{bar2} **{p2['hp']}/{p2['max_hp']}**"
+    battle_over = p1["hp"] <= 0 or p2["hp"] <= 0
+    if battle_over:
+        # Winner (top) section: foe fainted + Exp.; loser (bottom) section: your Pokemon fainted.
+        if p1["hp"] > 0:  # p1 won
+            desc += f"\n**The foe's {p2['name']} fainted!**\n**{p1['name']} gained {getattr(battle, 'exp_gained', 0)} Exp. Points!**"
+        else:  # p1 lost
+            desc += f"\n**Your {p1['name']} fainted!**"
+    desc += f"\n\n**<@{battle.player2_id}> — {d2}**\nATK: **{atk2}** | DEF: **{def2}**\n{bar2} **{p2['hp']}/{p2['max_hp']}**"
     if p2["modifiers"]:
         desc += f"\n*{_mod_str(p2['modifiers'])}*"
     if battle.last_mover_id == battle.player2_id:
         desc += f"\n**Your move:** {battle.last_log}"
     elif battle.last_mover_id == battle.player1_id:
         desc += f"\n**Opponent's move:** {battle.last_log}"
-    battle_over = p1["hp"] <= 0 or p2["hp"] <= 0
-    if not battle_over:
-        if battle.current_turn_id == battle.player1_id:
-            desc += f"\n\n**▶ It's <@{battle.player1_id}>'s turn!** Choose a move below."
-        else:
-            desc += f"\n\n**▶ It's <@{battle.player2_id}>'s turn!** Choose a move below."
+    if battle_over:
+        if p2["hp"] > 0:  # p2 won
+            desc += f"\n**The foe's {p1['name']} fainted!**\n**{p2['name']} gained {getattr(battle, 'exp_gained', 0)} Exp. Points!**"
+        else:  # p2 lost
+            desc += f"\n**Your {p2['name']} fainted!**"
+        desc += "\n\n🏆 **Battle over!**"
+    elif battle.current_turn_id == battle.player1_id:
+        desc += f"\n\n**▶ It's <@{battle.player1_id}>'s turn!** Press the button to use a random move (2 min)."
+    else:
+        desc += f"\n\n**▶ It's <@{battle.player2_id}>'s turn!** Press the button to use a random move (2 min)."
     embed = discord.Embed(title=title, description=desc, color=discord.Color.green())
     return embed
 
@@ -4210,11 +4333,11 @@ class GathemonLobbyView(discord.ui.View):
         user_active_gathemon[self.challenger_id] = game_id
         user_active_gathemon[self.opponent_id] = game_id
 
-        view = GathemonBattleView(game_id, timeout=300)
+        view = GathemonBattleView(game_id, battle.current_turn_id)
         embed = _gathemon_battle_embed_public(battle)
         battle.message = await interaction.channel.send(embed=embed, view=view)
         try:
-            await interaction.message.edit(content="🌿 **Battle started!**", view=None)
+            await interaction.message.edit(content=f"{GATHEMON_POKEBALL_EMOJI} **Battle started!**", view=None)
         except Exception:
             pass
 
@@ -4228,46 +4351,56 @@ class GathemonLobbyView(discord.ui.View):
         await safe_interaction_response(interaction, interaction.response.edit_message, content="❌ Challenge declined.", view=None)
 
 
+GATHEMON_TURN_TIMEOUT_SEC = 120  # 2 minutes per turn (like Gathership)
+
 class GathemonBattleView(discord.ui.View):
-    def __init__(self, game_id: str, timeout=300):
+    def __init__(self, game_id: str, current_turn_id: int, timeout: int = GATHEMON_TURN_TIMEOUT_SEC):
         super().__init__(timeout=timeout)
         self.game_id = game_id
+        self.current_turn_id = current_turn_id  # whose turn this view is for; on timeout they forfeit
         self._add_move_buttons()
 
     def _add_move_buttons(self):
         if self.game_id not in active_gathemon_battles:
             return
-        battle = active_gathemon_battles[self.game_id]
-        is_p1 = battle.is_player1_turn()
-        pokemon = battle.get_pokemon(is_p1)
-        for i, move in enumerate(pokemon["moves"]):
-            label = move["name"]
-            if move.get("power") is not None:
-                label += f" ({move['power']})"
-            self.add_item(GathemonMoveButton(self.game_id, i, label))
+        self.add_item(GathemonUseMoveButton(self.game_id))
 
     async def on_timeout(self):
         if self.game_id not in active_gathemon_battles:
             return
         battle = active_gathemon_battles[self.game_id]
+        # Only forfeit if it's still this player's turn (same as Gathership turn_sequence check)
+        if battle.current_turn_id != self.current_turn_id:
+            return
+        forfeiter_id = self.current_turn_id
+        winner_id = battle.player2_id if forfeiter_id == battle.player1_id else battle.player1_id
         for uid in (battle.player1_id, battle.player2_id):
             if uid in user_active_gathemon:
                 del user_active_gathemon[uid]
-        add_user_bloom_cycle_plants(battle.player1_id, battle.bet)
-        add_user_bloom_cycle_plants(battle.player2_id, battle.bet)
         del active_gathemon_battles[self.game_id]
         try:
             if battle.message:
-                await battle.message.edit(content="⏰ Battle timed out. Plants refunded.", embed=None, view=None)
+                await battle.message.edit(
+                    content=f"⏰ <@{forfeiter_id}> ran out of time and forfeits! <@{winner_id}> wins!",
+                    embed=None,
+                    view=None,
+                )
         except Exception:
             pass
+        channel = bot.get_channel(battle.channel_id) if battle.channel_id else None
+        if winner_id and channel:
+            await _gathemon_award_winner_gathers(winner_id, forfeiter_id, battle.bet * 2, channel)
+        else:
+            add_user_bloom_cycle_plants(battle.player1_id, battle.bet)
+            add_user_bloom_cycle_plants(battle.player2_id, battle.bet)
 
 
-class GathemonMoveButton(discord.ui.Button):
-    def __init__(self, game_id: str, move_index: int, label: str):
-        super().__init__(style=discord.ButtonStyle.primary, label=label[:80], custom_id=f"gathemon_{game_id}_{move_index}")
+class GathemonUseMoveButton(discord.ui.Button):
+    """Single button: on press, a move is chosen at random (70% attack, 30% buff/debuff) and used."""
+
+    def __init__(self, game_id: str):
+        super().__init__(style=discord.ButtonStyle.primary, label="Use move!", emoji="🎲", custom_id=f"gathemon_{game_id}_go")
         self.game_id = game_id
-        self.move_index = move_index
 
     async def callback(self, interaction: discord.Interaction):
         try:
@@ -4302,27 +4435,34 @@ class GathemonMoveButton(discord.ui.Button):
             except Exception:
                 pass
             return
-        move = attacker["moves"][self.move_index]
+        last_used = battle.last_move_index_p1 if is_p1 else battle.last_move_index_p2
+        move_index = _gathemon_pick_random_move(attacker["moves"], last_used_move_index=last_used)
+        move = attacker["moves"][move_index]
         damage, log_line = _gathemon_apply_move(move, attacker, defender)
         battle.last_log = log_line
         battle.last_mover_id = battle.player1_id if is_p1 else battle.player2_id
+        if is_p1:
+            battle.last_move_index_p1 = move_index
+        else:
+            battle.last_move_index_p2 = move_index
         battle.tick_both_modifiers()
         winner_id = None
         num_plants_won = 0
         channel = None
         if defender["hp"] <= 0:
             winner_id = battle.player1_id if is_p1 else battle.player2_id
+            loser_id = battle.player2_id if is_p1 else battle.player1_id
             num_plants_won = battle.bet * 2
             channel = interaction.channel
+            battle.exp_gained = random.randint(23, 53)  # for embed: winner's Pokemon gained X Exp.
             for uid in (battle.player1_id, battle.player2_id):
                 if uid in user_active_gathemon:
                     del user_active_gathemon[uid]
             del active_gathemon_battles[self.game_id]
-            battle.last_log = f"{battle.last_log}\n\n🏆 <@{winner_id}> wins {num_plants_won} plants!"
             view = None
         else:
             battle.current_turn_id = battle.player2_id if battle.current_turn_id == battle.player1_id else battle.player1_id
-            view = GathemonBattleView(self.game_id, timeout=300)
+            view = GathemonBattleView(self.game_id, battle.current_turn_id)
         embed = _gathemon_battle_embed_public(battle)
         try:
             if battle.message:
@@ -4330,7 +4470,8 @@ class GathemonMoveButton(discord.ui.Button):
         except Exception as e:
             print(f"Gathemon edit messages: {e}")
         if winner_id is not None and num_plants_won and channel:
-            await _gathemon_award_winner_gathers(winner_id, num_plants_won, channel)
+            loser_id = battle.player2_id if winner_id == battle.player1_id else battle.player1_id
+            await _gathemon_award_winner_gathers(winner_id, loser_id, num_plants_won, channel)
 
 
 # --- GATHERSHIP (PVP Battleship-style game) ---
@@ -4521,7 +4662,9 @@ class GathershipLobbyView(discord.ui.View):
             opponent_mention = f"<@{game.opponent_id}>"
             embed.description = f"{host_mention} is challenging {opponent_mention} to **GATHERSHIP**!\n\n✅ {opponent_mention} has joined! Host can start the game."
             embed.set_field_at(0, name="💰 Bet", value=f"${game.bet:.2f}", inline=True)
-            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+            # Reset 5-minute timeout when opponent joins (backend only; no UI mention)
+            fresh_view = GathershipLobbyView(self.game_id, self.host_id, self.opponent_id, timeout=300)
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=fresh_view)
         except Exception as e:
             print(f"Gathership join_game: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
@@ -4705,11 +4848,11 @@ class GathershipSetupView(discord.ui.View):
             embed = self._build_embed(game)
             await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
             if game.is_setup_done(True) and game.is_setup_done(False):
-                channel = bot.get_channel(game.channel_id)
-                if channel:
-                    game.phase = "battle"
-                    await channel.send("🔥 **All ships placed! GATHERSHIP STARTS!**")
-                    await _gathership_send_turn_message(channel, self.game_id)
+                # Prefer game channel; fallback to interaction.channel (get_channel can be None if not cached)
+                channel = bot.get_channel(game.channel_id) or interaction.channel
+                game.phase = "battle"
+                await channel.send("🔥 **All ships placed! GATHERSHIP STARTS!**")
+                await _gathership_send_turn_message(channel, self.game_id)
         except Exception as e:
             print(f"Gathership place_ship: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
@@ -4719,18 +4862,11 @@ async def _gathership_send_turn_message(channel, game_id: str):
     if game_id not in active_gathership_games:
         return
     game = active_gathership_games[game_id]
+    # Reset fire cursor to top-left (1,1) so each player starts their turn from a consistent position
+    game.fire_cursor = (0, 0)
     current_name = game.get_current_turn_name()
     view = GathershipTurnView(game_id, game.turn_sequence, timeout=120)
-    # Send the Take Shot button only to the current player via DM (so only they see the turn UI)
-    member = channel.guild.get_member(game.current_turn_id) if channel.guild else None
-    if member:
-        try:
-            await member.send(f"It's your turn! Click **Take Shot** below (2 min).", view=view)
-            await channel.send(f"🎯 **{current_name}**'s turn! (They have 2 min to take their shot.)")
-            return
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-    # Fallback: post in channel with button if DMs disabled or member not found
+    # Always post in the game channel (gathership-1 / gathership-2); never DM
     await channel.send(f"🎯 **{current_name}**'s turn! Click **Take Shot** below (2 min).", view=view)
 
 
@@ -5622,29 +5758,32 @@ async def _gather_post_response(interaction: discord.Interaction, user_id: int,
                 f"<:TreeRing:1474244868288282817> {interaction.user.mention} You've been awarded **1 Tree Ring**!",
                 ephemeral=True)
 
-        # Role assignment (async Discord API)
+        # Role assignment (async Discord API) — per-user lock so gather+harvest don't both send rank-up
         old_role = new_role = None
-        try:
-            old_role, new_role = await assign_gatherer_role(interaction.user, interaction.guild)
-        except Exception as e:
-            print(f"Error assigning gatherer role to user {user_id}: {e}")
+        if user_id not in _planter_role_locks:
+            _planter_role_locks[user_id] = asyncio.Lock()
+        async with _planter_role_locks[user_id]:
+            try:
+                old_role, new_role = await assign_gatherer_role(interaction.user, interaction.guild)
+            except Exception as e:
+                print(f"Error assigning gatherer role to user {user_id}: {e}")
 
-        if new_role:
-            if new_role == "PLANTER I" and old_role is None:
-                try:
-                    await assign_bloom_rank_role(interaction.user, interaction.guild)
-                except Exception as e:
-                    print(f"Error assigning bloom rank role to user {user_id}: {e}")
-                rankup_embed = discord.Embed(
-                    title="🌱 Rank Up!",
-                    description=f"{interaction.user.mention} advanced to **PLANTER I** and is ranked **PINE I**!",
-                    color=discord.Color.gold())
-            else:
-                rankup_embed = discord.Embed(
-                    title="🌱 Rank Up!",
-                    description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
-                    color=discord.Color.gold())
-            await safe_interaction_response(interaction, interaction.followup.send, embed=rankup_embed)
+            if new_role:
+                if new_role == "PLANTER I" and old_role is None:
+                    try:
+                        await assign_bloom_rank_role(interaction.user, interaction.guild)
+                    except Exception as e:
+                        print(f"Error assigning bloom rank role to user {user_id}: {e}")
+                    rankup_embed = discord.Embed(
+                        title="🌱 Rank Up!",
+                        description=f"{interaction.user.mention} advanced to **PLANTER I** and is ranked **PINE I**!",
+                        color=discord.Color.gold())
+                else:
+                    rankup_embed = discord.Embed(
+                        title="🌱 Rank Up!",
+                        description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
+                        color=discord.Color.gold())
+                await safe_interaction_response(interaction, interaction.followup.send, embed=rankup_embed)
 
         # Achievement checks (run all DB calls in a single thread)
         def _check_achievements():
@@ -6086,20 +6225,24 @@ async def trigger_pve_event(channel: discord.TextChannel, area_multiplier: float
 
     active_pve_events[channel.id] = {"animal": animal, "hp": hp, "start_time": time.time()}
 
-    embed = discord.Embed(
-        title=f"🚨 {animal['emoji']} Wild {animal['name']} Appeared! 🚨",
-        description=animal["description"],
-        color=animal["color"])
-    hp_bar_filled = "🟥" * 20
-    embed.add_field(name="HP", value=f"**{hp}** / **{hp}**\n{hp_bar_filled}", inline=False)
-    embed.add_field(
-        name="⚔️ How to Fight",
-        value="Press the **Attack** button below! Each hit deals **1 damage** and earns you **1 plant**!",
-        inline=False)
-    embed.set_footer(text="All gathering commands are BLOCKED until the wild animal is defeated")
+    try:
+        embed = discord.Embed(
+            title=f"🚨 {animal['emoji']} Wild {animal['name']} Appeared! 🚨",
+            description=animal["description"],
+            color=animal["color"])
+        hp_bar_filled = "🟥" * 20
+        embed.add_field(name="HP", value=f"**{hp}** / **{hp}**\n{hp_bar_filled}", inline=False)
+        embed.add_field(
+            name="⚔️ How to Fight",
+            value="Press the **Attack** button below! Each hit deals **1 damage** and earns you **1 plant**!",
+            inline=False)
+        embed.set_footer(text="All gathering commands are BLOCKED until the wild animal is defeated")
 
-    view = WildAnimalView(animal=animal, hp=hp, channel_id=channel.id, area_multiplier=area_multiplier)
-    await channel.send(embed=embed, view=view)
+        view = WildAnimalView(animal=animal, hp=hp, channel_id=channel.id, area_multiplier=area_multiplier)
+        await channel.send(embed=embed, view=view)
+    except Exception:
+        active_pve_events.pop(channel.id, None)
+        raise
 
 
 @bot.tree.command(name="gather", description="Gather a random item from nature!")
@@ -6292,7 +6435,7 @@ async def gather(interaction: discord.Interaction):
         # === Background: role assignment + achievements (user already has the response) ===
         asyncio.create_task(_gather_post_response(interaction, user_id, full_data, gather_result))
 
-        # === PvE wild animal trigger (see PVE_TRIGGER_CHANCE_GATHER); NOT when stealable ===
+        # === PvE wild animal trigger (see PVE_TRIGGER_CHANCE_GATHER); NOT when stealable; spawns in this channel only ===
         if (channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
                 and not result.get("stealable")):
             if random.random() < PVE_TRIGGER_CHANCE_GATHER:
@@ -6794,29 +6937,32 @@ async def _harvest_post_response(interaction: discord.Interaction, user_id: int,
                 f"<:TreeRing:1474244868288282817> {interaction.user.mention} You've been awarded **{tree_rings_to_award} Tree Ring{'s' if tree_rings_to_award > 1 else ''}**!",
                 ephemeral=True)
 
-        # Role assignment (async Discord API)
+        # Role assignment (async Discord API) — per-user lock so gather+harvest don't both send rank-up
         old_role = new_role = None
-        try:
-            old_role, new_role = await assign_gatherer_role(interaction.user, interaction.guild)
-        except Exception as e:
-            print(f"Error assigning gatherer role to user {user_id}: {e}")
+        if user_id not in _planter_role_locks:
+            _planter_role_locks[user_id] = asyncio.Lock()
+        async with _planter_role_locks[user_id]:
+            try:
+                old_role, new_role = await assign_gatherer_role(interaction.user, interaction.guild)
+            except Exception as e:
+                print(f"Error assigning gatherer role to user {user_id}: {e}")
 
-        if new_role:
-            if new_role == "PLANTER I" and old_role is None:
-                try:
-                    await assign_bloom_rank_role(interaction.user, interaction.guild)
-                except Exception as e:
-                    print(f"Error assigning bloom rank role to user {user_id}: {e}")
-                rankup_embed = discord.Embed(
-                    title="🌾 Rank Up!",
-                    description=f"{interaction.user.mention} advanced to **PLANTER I** and is ranked **PINE I**!",
-                    color=discord.Color.gold())
-            else:
-                rankup_embed = discord.Embed(
-                    title="🌾 Rank Up!",
-                    description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
-                    color=discord.Color.gold())
-            await safe_interaction_response(interaction, interaction.followup.send, embed=rankup_embed)
+            if new_role:
+                if new_role == "PLANTER I" and old_role is None:
+                    try:
+                        await assign_bloom_rank_role(interaction.user, interaction.guild)
+                    except Exception as e:
+                        print(f"Error assigning bloom rank role to user {user_id}: {e}")
+                    rankup_embed = discord.Embed(
+                        title="🌾 Rank Up!",
+                        description=f"{interaction.user.mention} advanced to **PLANTER I** and is ranked **PINE I**!",
+                        color=discord.Color.gold())
+                else:
+                    rankup_embed = discord.Embed(
+                        title="🌾 Rank Up!",
+                        description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
+                        color=discord.Color.gold())
+                await safe_interaction_response(interaction, interaction.followup.send, embed=rankup_embed)
 
         # Achievement checks in a single thread
         def _check_achievements():
@@ -7022,7 +7168,7 @@ async def harvest(interaction: discord.Interaction):
         # === Background: role assignment + achievements (user already has the response) ===
         asyncio.create_task(_harvest_post_response(interaction, user_id, full_data, result))
 
-        # === PvE wild animal trigger (see PVE_TRIGGER_CHANCE_HARVEST); NOT when stealable ===
+        # === PvE wild animal trigger (see PVE_TRIGGER_CHANCE_HARVEST); NOT when stealable; spawns in this channel only ===
         if (channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
                 and not crit.get("stealable")):
             if random.random() < PVE_TRIGGER_CHANCE_HARVEST:
@@ -13188,8 +13334,8 @@ async def gathemon(interaction: discord.Interaction, user: discord.Member, plant
         }
         view = GathemonLobbyView(challenge_id, challenger_id, opponent_id, plants, timeout=300)
         embed = discord.Embed(
-            title="🌿 GathéMon Battle!",
-            description=f"{interaction.user.mention} challenges {user.mention} to a **GathéMon** battle for **{plants}** plants!\n\n{user.mention}, click **Accept** to start the battle!",
+            title=f"{GATHEMON_POKEBALL_EMOJI} GathéMon Battle!",
+            description=f"{interaction.user.mention} challenges {user.mention} to a **GathéMon** battle for {GATHEMON_POKEBALL_EMOJI} **{plants}** plants!\n\n{user.mention}, click **Accept** to start the battle!",
             color=discord.Color.green(),
         )
         embed.set_footer(text="You have 5 minutes to accept!")
@@ -13243,6 +13389,7 @@ async def gathership(interaction: discord.Interaction, user: discord.Member, bet
             await safe_interaction_response(interaction, interaction.followup.send, "❌ You don't have enough balance for that bet!", ephemeral=True)
             return
 
+        # One game per channel (gathership-1 and gathership-2 can each have one game running at once)
         if channel_id in channel_gathership and channel_gathership[channel_id] in active_gathership_games:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ There's already a Gathership game in this channel!", ephemeral=True)
             return
@@ -13266,7 +13413,7 @@ async def gathership(interaction: discord.Interaction, user: discord.Member, bet
         )
         embed.add_field(name="💰 Bet", value=f"${bet:.2f} each", inline=True)
         embed.add_field(name="🚢 Ships", value=str(ships), inline=True)
-        embed.add_field(name="⏰ Timeout", value="5 min to join / start", inline=True)
+        embed.set_footer(text="You have 5 minutes to accept!")
         view = GathershipLobbyView(game_id, host_id, opponent_id, timeout=300)
         await safe_interaction_response(interaction, interaction.followup.send, content=user.mention, embed=embed, view=view)
     except Exception as e:
