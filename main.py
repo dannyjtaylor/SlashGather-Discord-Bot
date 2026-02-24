@@ -136,6 +136,9 @@ from database import (
     increment_hidden_achievements_count,
     has_hidden_achievement,
     unlock_hidden_achievement,
+    add_pve_defeat,
+    get_user_pve_defeated,
+    get_user_total_pve_defeats,
     get_user_coinflip_count,
     increment_user_coinflip_count,
     get_user_coinflip_win_streak,
@@ -348,6 +351,30 @@ async def send_hidden_achievement_notification(interaction: discord.Interaction,
         await interaction.followup.send(embed=embed, ephemeral=True)
     except Exception as e:
         print(f"Error sending hidden achievement notification: {e}")
+
+async def send_achievement_notification_async(channel, user_mention: str, achievement_name: str, level: int):
+    """Send an achievement notification to a channel (e.g. after PvE defeat)."""
+    if achievement_name not in ACHIEVEMENTS or not channel:
+        return
+    achievement_data = ACHIEVEMENTS[achievement_name]
+    levels = achievement_data["levels"]
+    if level < len(levels):
+        level_data = levels[level]
+        achievement_display_name = level_data["name"]
+        achievement_description = level_data["description"]
+        boost_percent = level_data["boost"] * 100
+        embed = discord.Embed(
+            title="\U0001f3c6 Achievement Unlocked!",
+            description=f"{user_mention}\n\n**{achievement_display_name}**\n{achievement_description}",
+            color=discord.Color.gold()
+        )
+        if boost_percent > 0:
+            embed.add_field(name="\U0001f4b0 Boost", value=f"**+{boost_percent:.1f}%**", inline=False)
+        try:
+            await channel.send(embed=embed)
+        except Exception as e:
+            print(f"Error sending achievement notification to channel: {e}")
+
 
 # Helper function to send hidden achievement notification (for non-interaction contexts like background tasks)
 async def send_hidden_achievement_notification_async(channel, user_mention: str, achievement_key: str):
@@ -1235,17 +1262,58 @@ GATHERING_AREAS = {
         "unlocked_by_default": False,
         "previous_area": "bog",
         "order": 4
+    },
+    "underground-jungle": {
+        "display_name": "#underground-jungle",
+        "emoji": "🌴",
+        "multiplier": 12.0,
+        "gather_boost": 1.1,
+        "required_planter_rank": "PLANTER II",
+        "required_planter_level": 2,
+        "unlock_cost": 1_000_000_000,
+        "unlocked_by_default": False,
+        "previous_area": "mire",
+        "order": 5
     }
 }
 
 VALID_GATHERING_CHANNELS = set(GATHERING_AREAS.keys())
 
+# Day/Night (Terraria-style): Solar Eclipse = day (4:30 AM–7:29 PM UTC), Blood Moon = night (7:30 PM–4:29 AM UTC). Spawn boost during these.
+def _is_solar_eclipse_or_blood_moon():
+    """Return (is_solar_eclipse, is_blood_moon) based on UTC hour. Day 4:30–19:29, Night 19:30–4:29."""
+    from datetime import datetime
+    now = datetime.utcnow()
+    h = now.hour + now.minute / 60.0 + now.second / 3600.0
+    is_day = 4.5 <= h < 19.5   # 4:30 AM – 7:29 PM
+    is_night = not is_day
+    return is_day, is_night
+
+def _pve_spawn_multiplier():
+    """Return (animal_mult, boss_mult) for spawn chances. During active Solar Eclipse or Blood Moon (from DB): 2.5x each."""
+    if get_active_event_by_type("solar_eclipse") or get_active_event_by_type("blood_moon"):
+        return 2.5, 2.5
+    return 1.0, 1.0
+
+# Solar Eclipse and Blood Moon: 50% chance at respective start times (4:30 UTC, 19:30 UTC). Display in #events with start/end embeds.
+SOLAR_ECLIPSE_TITLE = "A Solar Eclipse is happening!"
+SOLAR_ECLIPSE_DESCRIPTION = "A Solar Eclipse is happening!"
+SOLAR_ECLIPSE_FOOTER = "Wild animals and bosses are more common!"
+BLOOD_MOON_TITLE = "The Blood Moon is rising..."
+BLOOD_MOON_DESCRIPTION = "The Blood Moon is rising..."
+BLOOD_MOON_FOOTER = "Wild animals and bosses are more common!"
+SOLAR_ECLIPSE_COLOR = 0xFF8C00   # bright orange
+BLOOD_MOON_COLOR = 0xDC143C      # bright red (crimson, distinct from discord red)
+CELESTIAL_DAY_START_UTC = (4, 30)   # 4:30 AM UTC
+CELESTIAL_NIGHT_START_UTC = (19, 30)  # 7:30 PM UTC
+CELESTIAL_TRIGGER_CHANCE = 0.5   # 50% at start time, Terraria-style
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # PvE Wild Animal Event System
 # ═══════════════════════════════════════════════════════════════════════════════
 
-PVE_TRIGGER_CHANCE_GATHER = 0.10   # 10% per /gather (spawns in all gathering channels)
-PVE_TRIGGER_CHANCE_HARVEST = 0.08  # 8% per /harvest
+PVE_TRIGGER_CHANCE_GATHER = 0.02   # 2% per /gather (event: 5%)
+PVE_TRIGGER_CHANCE_HARVEST = 0.01  # 1% per /harvest (event: 2.5%)
 
 # Steal: stealable chance per successful gather/harvest (no PvE when stealable; crit cannot be stolen)
 STEAL_CHANCE_GATHER = 0.01   # 1% per /gather
@@ -1255,6 +1323,7 @@ STEAL_WINDOW_HARVEST_SEC = 2
 
 PVE_WILD_ANIMALS = [
     {
+        "id": "grizzly_bear",
         "name": "Grizzly Bear",
         "emoji": "🐻",
         "hp_range": (50, 75),
@@ -1263,6 +1332,7 @@ PVE_WILD_ANIMALS = [
         "defeat_msg": "The **Grizzly Bear** lets out a final roar and lumbers back into the wilderness!",
     },
     {
+        "id": "black_bear",
         "name": "Black Bear",
         "emoji": ":panda:",
         "hp_range": (35, 45),
@@ -1271,6 +1341,7 @@ PVE_WILD_ANIMALS = [
         "defeat_msg": "The **Black Bear** whimpers and scurries back into the shadows!",
     },
     {
+        "id": "polar_bear",
         "name": "Polar Bear",
         "emoji": "🐻‍❄️",
         "hp_range": (90, 125),
@@ -1279,6 +1350,7 @@ PVE_WILD_ANIMALS = [
         "defeat_msg": "The **Polar Bear** shakes off the blows and trudges away, perhaps to be seen again...!",
     },
     {
+        "id": "tiger",
         "name": "Tiger",
         "emoji": "🐅",
         "hp_range": (150, 160),
@@ -1287,6 +1359,7 @@ PVE_WILD_ANIMALS = [
         "defeat_msg": "The **Tiger** snarls one last time and vanishes into the tall grass...",
     },
     {
+        "id": "panther",
         "name": "Panther",
         "emoji": "🐆",
         "hp_range": (80, 100),
@@ -1295,6 +1368,7 @@ PVE_WILD_ANIMALS = [
         "defeat_msg": "The **Panther** hisses and recinds back into the shadows, defeated!",
     },
     {
+        "id": "homeless_man_on_fent",
         "name": "Homeless Man on Fent",
         "emoji": "🧟",
         "hp_range": (67, 175),
@@ -1302,10 +1376,131 @@ PVE_WILD_ANIMALS = [
         "description": "A **Homeless Man on Fent** has stumbled into the area! He's mumbling incoherently and swatting at invisible bees! He seems... unreasonably durable!",
         "defeat_msg": "The **Homeless Man on Fent** finally passes out and is carried away by local authorities!",
     },
+    {
+        "id": "monkey",
+        "name": "Monkey",
+        "emoji": "🐵",
+        "hp_range": (15, 30),
+        "color": 0x8B7355,
+        "description": "A Monkey has swung in from the trees, snatching up all the fruit!",
+        "defeat_msg": "The Monkey chatters in outrage and scrambles back into the canopy!",
+    },
+    {
+        "id": "bullet_ant",
+        "name": "Bullet Ant",
+        "emoji": "🐜",
+        "hp_range": (3, 7),
+        "color": 0x2C1810,
+        "description": "A **Bullet Ant** from the swarm! Squash it!!",
+        "defeat_msg": "This ant is squashed!",
+        "is_swarm_ant": True,
+    },
 ]
+
+# Bullet Ant Swarm: intro/outro text only; individual ants use "Bullet Ant" above.
+BULLET_ANT_SWARM_INTRO = "A Bullet Ant Swarm has poured out of the undergrowth!"
+BULLET_ANT_SWARM_DEFEAT = "After squashing the Bullet Ants, the swarm retreats back into their anthill!"
+BULLET_ANT_SWARM_COUNT_RANGE = (4, 9)
+PVE_SWARM_TRIGGER_CHANCE = 0.125  # 1/8 chance to spawn swarm instead of single animal
+PVE_WILD_ANIMALS_SINGLE = [a for a in PVE_WILD_ANIMALS if not a.get("is_swarm_ant")]
+BULLET_ANT_ANIMAL = next(a for a in PVE_WILD_ANIMALS if a.get("is_swarm_ant"))
 
 # Tracks active PvE events per channel: channel_id -> PvE event data
 active_pve_events: dict[int, dict] = {}
+
+# Bosses: block all gather channels in guild, @here on warning, rarer spawn. 1-min warning embed before spawn.
+PVE_BOSS_TRIGGER_CHANCE = 0.02  # 2% per gather/harvest (when no boss active); day/night multiplies this
+PVE_BOSSES = [
+    {
+        "id": "skunkape",
+        "name": "Skunkape",
+        "emoji": "🦍",
+        "hp_range": (175, 200),
+        "color": 0x3d2914,
+        "description": "The ground is shaking... A Skunkape emerges from the wood, wearing a Winter Haven Technology Services polo!",
+        "defeat_msg": "The Skunkape bellows one last time and lumbers into the mist, back to his desk!",
+        "pre_spawn_text": "A foul stench fills the air…",
+    },
+    {
+        "id": "godzilla",
+        "name": "Godzilla",
+        "emoji": "🦖",
+        "hp_range": (300, 425),
+        "color": 0x2d5016,
+        "description": "The king of the monsters is trampling everything!",
+        "defeat_msg": "Godzilla roars in defeat and sinks beneath the waves. The gathering grounds are safe... for now...",
+        "pre_spawn_text": "The ground trembles...",
+    },
+    {
+        "id": "mothron",
+        "name": "Mothron",
+        "emoji": "🦋",
+        "hp_range": (215, 225),
+        "color": 0x1a0d1a,
+        "description": "The sky darkens as Mothron descends—a monstrous moth of nightmare! It's blocking all gathering channels; only a united effort can drive it off!",
+        "defeat_msg": "Mothron shrieks and flees into the night!",
+        "pre_spawn_text": "Wings blot out the Solar Eclipse...",
+    },
+    {
+        "id": "plantera",
+        "name": "Plantera",
+        "emoji": "🌸",
+        "hp_range": (450, 535),
+        "color": 0x2d5a1a,
+        "description": "Somebody broke a Plantera Bulb!",
+        "defeat_msg": "Plantera crumples into a heap of vines and petals!",
+        "pre_spawn_text": "The jungle grows restless...",
+    },
+    {
+        "id": "retinazer",
+        "name": "The Twins – Retinazer",
+        "emoji": "👁️",
+        "hp_range": (350, 350),
+        "color": 0xc41e3a,
+        "description": "It's hovering above all the gathering grounds, firing lasers at anything that moves!",
+        "defeat_msg": "Retinazer explodes into Hallowed Bars and Souls of Sight!",
+        "pre_spawn_text": "This is going to be a terrible night...",
+        "twins_pair": "spazmatism",
+    },
+    {
+        "id": "spazmatism",
+        "name": "The Twins – Spazmatism",
+        "emoji": "🔥",
+        "hp_range": (350, 350),
+        "color": 0x228b22,
+        "description": "It's tearing through the area, lighting the forest on fire with Cursed Flame!",
+        "defeat_msg": "Spazmatism sputters out and falls, crashing into the ground and exploding into Hallowed Bars and Souls of Sight! With both Twins defeated, the gathering channels are finally clear!",
+        "pre_spawn_text": "This is going to be a terrible night...",
+        "twins_pair": "retinazer",
+    },
+]
+# Twins: spawn both Retinazer and Spazmatism together; both must be defeated to unblock channels.
+PVE_BOSSES_TWINS_IDS = {"retinazer", "spazmatism"}
+# Enemy id -> hidden achievement key (for first-time defeat)
+PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT = {
+    "monkey": "no_monkey_business",
+    "grizzly_bear": "grizzly_victory",
+    "black_bear": "black_bear_blues",
+    "polar_bear": "polar_power",
+    "tiger": "tiger_tamer",
+    "panther": "panther_pounce",
+    "homeless_man_on_fent": "homeless_hero",
+    "bullet_ant": "bullet_ant_squasher",
+    "skunkape": "skunkape_slayer",
+    "godzilla": "godzilla_king",
+    "mothron": "mothron_masher",
+    "plantera": "plantera_crusher",
+    "retinazer": "retinazer_retired",
+    "spazmatism": "spazmatism_silenced",
+}
+PVE_MASTER_REQUIRED_IDS = frozenset(PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT.keys())
+active_boss_events: dict[int, list] = {}  # guild_id -> list of {channel_id, boss, hp, max_hp, attackers, message_id?}
+plantera_bulb_eligible_guilds: dict[int, float] = {}  # guild_id -> timestamp when last boss was defeated (for Plantera bulb chance)
+PLANTERA_BULB_CHANCE = 0.15
+PLANTERA_BULB_MAX_AGE_SEC = 86400  # 24h
+# #underground-jungle: higher wild animal spawn, slightly higher boss spawn
+UNDERGROUND_JUNGLE_ANIMAL_SPAWN_MULT = 1.5
+UNDERGROUND_JUNGLE_BOSS_SPAWN_MULT = 1.2
 
 # Channel name for auto-logging rare occurrences (e.g. One in a Million, Mikellion, netherite+ imbues)
 RARES_CHANNEL_NAME = "rares"
@@ -1379,70 +1574,70 @@ ACHIEVEMENTS = {
                 "name": "Baby's First Gather",
                 "description": "/gather 1 time",
                 "threshold": 1,
-                "boost": 0.005  # 0.5%
+                "boost": 0.015  # 1.5%
             },
             {
                 "level": 2,
                 "name": "Smelling What You're Stepping In",
                 "description": "/gather 25 times",
                 "threshold": 25,
-                "boost": 0.01  # 1%
+                "boost": 0.03  # 3%
             },
             {
                 "level": 3,
                 "name": "Getting The Hang Of It",
                 "description": "/gather 100 times",
                 "threshold": 100,
-                "boost": 0.02  # 2%
+                "boost": 0.06  # 6%
             },
             {
                 "level": 4,
                 "name": "Green Thumb",
                 "description": "/gather 500 times",
                 "threshold": 500,
-                "boost": 0.035  # 3.5%
+                "boost": 0.10  # 10%
             },
             {
                 "level": 5,
                 "name": "Serf",
                 "description": "/gather 1000 times",
                 "threshold": 1000,
-                "boost": 0.06  # 6%
+                "boost": 0.15  # 15%
             },
             {
                 "level": 6,
                 "name": "Farmer",
                 "description": "/gather 5,000 times",
                 "threshold": 5000,
-                "boost": 0.10  # 10%
+                "boost": 0.22  # 22%
             },
             {
                 "level": 7,
                 "name": "Gathousand",
                 "description": "/gather 10,000 times",
                 "threshold": 10000,
-                "boost": 0.15  # 15%
+                "boost": 0.32  # 32%
             },
             {
                 "level": 8,
                 "name": "Fifty Gathousand",
                 "description": "/gather 50,000 times",
                 "threshold": 50000,
-                "boost": 0.25  # 25%
+                "boost": 0.50  # 50%
             },
             {
                 "level": 9,
                 "name": "Hundred Gathousand",
                 "description": "/gather 100,000 times",
                 "threshold": 100000,
-                "boost": 0.40  # 40%
+                "boost": 0.75  # 75%
             },
             {
                 "level": 10,
                 "name": "Mikellion",
                 "description": "/gather 1,000,000 times",
                 "threshold": 1000000,
-                "boost": 1.0  # 100%
+                "boost": 2.0  # 200%
             }
         ]
     },
@@ -1585,28 +1780,28 @@ ACHIEVEMENTS = {
                 "name": "Just 1 More Win (In a Row)",
                 "description": "Win 7 coinflips in a row",
                 "threshold": 7,
-                "boost": 2.0  # 200%
+                "boost": 1.5  # 150%
             },
             {
                 "level": 8,
                 "name": "Is This Even Possible?",
                 "description": "Win 8 coinflips in a row",
                 "threshold": 8,
-                "boost": 5.0  # 500%
+                "boost": 2.5  # 250%
             },
             {
                 "level": 9,
                 "name": "You Should Buy A Lottery Ticket",
                 "description": "Win 9 coinflips in a row",
                 "threshold": 9,
-                "boost": 10.0  # 1000%
+                "boost": 4.0  # 400%
             },
             {
                 "level": 10,
                 "name": "Struck By Lightning (Twice)",
                 "description": "Win 10 coinflips in a row",
                 "threshold": 10,
-                "boost": 15.0  # 1500%
+                "boost": 6.0  # 600%
             }
         ]
     },
@@ -1871,42 +2066,42 @@ ACHIEVEMENTS = {
                 "name": "Maybe Just One Spin",
                 "description": "Play /russian once",
                 "threshold": 1,
-                "boost": 0.005  # 0.5%
+                "boost": 0.01  # 1%
             },
             {
                 "level": 2,
                 "name": "Risk Taker",
                 "description": "Play /russian 3 times",
                 "threshold": 3,
-                "boost": 0.01  # 1%
+                "boost": 0.02  # 2%
             },
             {
                 "level": 3,
                 "name": "It's Only A Bullet, Right?",
                 "description": "Play /russian 10 times",
                 "threshold": 10,
-                "boost": 0.05  # 5%
+                "boost": 0.10  # 10%
             },
             {
                 "level": 4,
                 "name": "Desensitized",
                 "description": "Play /russian 50 times",
                 "threshold": 50,
-                "boost": 0.15  # 15%
+                "boost": 0.25  # 25%
             },
             {
                 "level": 5,
                 "name": "I Can Stop Anytime",
                 "description": "Play /russian 125 times",
                 "threshold": 125,
-                "boost": 0.35  # 35%
+                "boost": 0.50  # 50%
             },
             {
                 "level": 6,
                 "name": "16.67's My Favorite Percentage",
                 "description": "Play /russian 300 times",
                 "threshold": 300,
-                "boost": 0.70  # 70%
+                "boost": 1.0  # 100%
             }
         ]
     },
@@ -2010,6 +2205,88 @@ ACHIEVEMENTS = {
                 "boost": 0.50  # 50%
             }
         ]
+    },
+    "slayer": {
+        "name": "Slayer Achievement Category",
+        "levels": [
+            {
+                "level": 0,
+                "name": "Pacifist",
+                "description": "You haven't defeated any enemies yet! Fight animals and bosses in gathering channels!",
+                "threshold": 0,
+                "boost": 0.0
+            },
+            {
+                "level": 1,
+                "name": "First Blood",
+                "description": "Defeat 1 enemy",
+                "threshold": 1,
+                "boost": 0.01  # 1%
+            },
+            {
+                "level": 2,
+                "name": "Pest Control",
+                "description": "Defeat 5 enemies",
+                "threshold": 5,
+                "boost": 0.025  # 2.5%
+            },
+            {
+                "level": 3,
+                "name": "Hunter",
+                "description": "Defeat 15 enemies",
+                "threshold": 15,
+                "boost": 0.05  # 5%
+            },
+            {
+                "level": 4,
+                "name": "Bounty Hunter",
+                "description": "Defeat 40 enemies",
+                "threshold": 40,
+                "boost": 0.10  # 10%
+            },
+            {
+                "level": 5,
+                "name": "Slayer",
+                "description": "Defeat 100 enemies",
+                "threshold": 100,
+                "boost": 0.20  # 20%
+            },
+            {
+                "level": 6,
+                "name": "Assassin",
+                "description": "Defeat 250 enemies",
+                "threshold": 250,
+                "boost": 0.35  # 35%
+            },
+            {
+                "level": 7,
+                "name": "Taro Sakamoto",
+                "description": "Defeat 500 enemies",
+                "threshold": 500,
+                "boost": 0.50  # 50%
+            },
+            {
+                "level": 8,
+                "name": "Frieren The Slayer",
+                "description": "Defeat 1,000 enemies",
+                "threshold": 1000,
+                "boost": 0.75  # 75%
+            },
+            {
+                "level": 9,
+                "name": "Ryomen Sukuna",
+                "description": "Defeat 2,500 enemies",
+                "threshold": 2500,
+                "boost": 1.0  # 100%
+            },
+            {
+                "level": 10,
+                "name": "Eren Yeager",
+                "description": "Defeat 5,000 enemies",
+                "threshold": 5000,
+                "boost": 1.5  # 150%
+            }
+        ]
     }
 }
 
@@ -2038,7 +2315,7 @@ HIDDEN_ACHIEVEMENTS = {
     "ceo": {
         "name": "CEO",
         "description": "Own over 50% of the amount of shares for any company in the stock market",
-        "boost": 20.00  # 2000%
+        "boost": 2.0  # 200%
     },
     "blockchain": {
         "name": "Blockchain",
@@ -2063,12 +2340,87 @@ HIDDEN_ACHIEVEMENTS = {
     "social_butterfly": {
         "name": "Social Butterfly",
         "description": "Invite 20 people to the server",
-        "boost": 1.0  # 100%
+        "boost": 2.0  # 200%
+    },
+    "no_monkey_business": {
+        "name": "No Monkey Business",
+        "description": "Defeat the Monkey",
+        "boost": 0.05  # 5%
+    },
+    "grizzly_victory": {
+        "name": "If It's Brown, Lay Down",
+        "description": "Defeat the Grizzly Bear",
+        "boost": 0.05  # 5%
+    },
+    "black_bear_blues": {
+        "name": "If It's Black, Fight Back",
+        "description": "Defeat the Black Bear",
+        "boost": 0.05  # 5%
+    },
+    "polar_power": {
+        "name": "If It's White, Goodnight",
+        "description": "Defeat the Polar Bear",
+        "boost": 0.05  # 5%
+    },
+    "tiger_tamer": {
+        "name": "Tiger Tamer",
+        "description": "Defeat the Tiger",
+        "boost": 0.05  # 5%
+    },
+    "panther_pounce": {
+        "name": "SFSC'S Mascot",
+        "description": "Defeat the Panther",
+        "boost": 0.05  # 5%
+    },
+    "homeless_hero": {
+        "name": "Lean No More",
+        "description": "Defeat the Homeless Man on Fent",
+        "boost": 0.05  # 5%
+    },
+    "bullet_ant_squasher": {
+        "name": "Dodged",
+        "description": "Defeat a Bullet Ant or Bullet Ant Swarm",
+        "boost": 0.05  # 5%
+    },
+    "skunkape_slayer": {
+        "name": "Give Me The Werx",
+        "description": "Defeat the Skunkape",
+        "boost": 0.05  # 5%
+    },
+    "godzilla_king": {
+        "name": "Kick 'Em In The Shin",
+        "description": "Defeat Godzilla",
+        "boost": 0.05  # 5%
+    },
+    "mothron_masher": {
+        "name": "Not To Be Confused With Mothra",
+        "description": "Defeat Mothron",
+        "boost": 0.05  # 5%
+    },
+    "plantera_crusher": {
+        "name": "The Great Southern Plantkill",
+        "description": "Defeat Plantera",
+        "boost": 0.05  # 5%
+    },
+    "retinazer_retired": {
+        "name": "Ophthalmologist",
+        "description": "Defeat Retinazer (The Twins)",
+        "boost": 0.05  # 5%
+    },
+    "spazmatism_silenced": {
+        "name": "Mechanical Menace",
+        "description": "Defeat Spazmatism (The Twins)",
+        "boost": 0.05  # 5%
+    },
+    "pve_master": {
+        "name": "Master Mode",
+        "description": "Defeat every type of animal and boss at least once",
+        "boost": 0.25  # 25%
     }
 }
 
 # Total number of hidden achievements
-TOTAL_HIDDEN_ACHIEVEMENTS = 10
+TOTAL_HIDDEN_ACHIEVEMENTS = 25
 
 
 def check_maxed_out_achievement(user_id: int) -> bool:
@@ -2255,6 +2607,29 @@ def get_rank_perma_buff_multiplier(user_id, full_data=None):
 
     level = _RANK_LEVELS.get(bloom_rank, 0)
     return 1.2 ** level
+
+
+# Bloom-scaled upgrade prices (Option B: compound per bloom)
+BLOOM_PRICE_MULT = 1.12
+
+# Bloom (prestige) cost scales 1.08x per bloom
+BASE_BLOOM_COST = 500_000_000
+BLOOM_PRESTIGE_MULT = 1.08
+BLOOM_PLANTS_REQUIRED = 15000  # PLANTER X = 15000+ plants this cycle
+
+
+def bloom_scaled_price(user_id: int, base_price: float) -> float:
+    """Return base_price scaled by bloom count: base_price * (BLOOM_PRICE_MULT ** bloom_count)."""
+    bloom_count = get_user_bloom_count(user_id)
+    if bloom_count <= 0:
+        return base_price
+    return base_price * (BLOOM_PRICE_MULT ** bloom_count)
+
+
+def bloom_prestige_cost(user_id: int) -> float:
+    """Return the cost to bloom (prestige), scaled by 1.08x per bloom: BASE_BLOOM_COST * (BLOOM_PRESTIGE_MULT ** bloom_count)."""
+    bloom_count = get_user_bloom_count(user_id)
+    return BASE_BLOOM_COST * (BLOOM_PRESTIGE_MULT ** bloom_count)
 
 
 BETA_TESTER_ROLE_NAME = "BETA TESTER"
@@ -2753,9 +3128,10 @@ GATHERABLE_ITEMS = [
 ]
 
 # Custom Discord emojis for items that don't have a Unicode emoji in the name (CDN IDs from server)
+# Use lowercase emoji names so :flowey: and :raspberry: display correctly in #rares and elsewhere
 CUSTOM_ITEM_EMOJIS = {
-    "Flowey": "<:Flowey:1473550098716819682>",
-    "Raspberry": "<:Raspberry:1473550163711627399>",
+    "Flowey": "<:flowey:1473550098716819682>",
+    "Raspberry": "<:raspberry:1473550163711627399>",
 }
 
 def get_item_display_emoji(item_name: str) -> str:
@@ -5468,7 +5844,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.9.3 :3"
+            name="running /gather on V0.10.0 :3
         )
     )
     try:
@@ -5513,6 +5889,8 @@ async def on_ready():
     print("Started daily event checking")
     bot.loop.create_task(event_cleanup_task())
     print("Started event cleanup task")
+    bot.loop.create_task(celestial_event_check())
+    print("Started celestial event check (Solar Eclipse / Blood Moon)")
     bot.loop.create_task(irrigation_auto_water_task())
     print("Started irrigation auto-water task")
     
@@ -5637,9 +6015,11 @@ async def _post_rares_plant(guild: discord.Guild, user: discord.Member, source: 
         return
     # Sparkle emoji for GMO rares, plant emoji otherwise
     lead_emoji = "✨" if label.startswith("GMO ") else "🌱"
+    # Use get_item_display_emoji so Flowey/Raspberry (custom server emojis) display correctly in #rares
+    item_emoji = get_item_display_emoji(item_name)
     # e.g. "🌱 @User caught a ONE IN A MILLION *Strawberry 🍓* in a GATHER worth $2,216,775.69! | **[FOREST]**"
     msg = (
-        f"{lead_emoji} {user.mention} caught a **{label}** *{item_name}* "
+        f"{lead_emoji} {user.mention} caught a **{label}** *{item_name} {item_emoji}* "
         f"in a **{source}** worth **${value:,.2f}**! | **{area_tag}**"
     )
     await _post_to_rares_channel(guild, msg)
@@ -6022,6 +6402,299 @@ class WildAnimalView(discord.ui.View):
                 interaction, interaction.response.edit_message, embed=progress_embed, view=self)
 
 
+# Reward display for Bullet Ant Swarm (used when swarm is fully defeated)
+BULLET_ANT_SWARM_REWARD_ANIMAL = {
+    "id": "bullet_ant",
+    "name": "Bullet Ant Swarm",
+    "emoji": "🐜",
+    "description": BULLET_ANT_SWARM_INTRO,
+    "defeat_msg": BULLET_ANT_SWARM_DEFEAT,
+    "color": 0x2C1810,
+}
+
+
+class BulletAntView(discord.ui.View):
+    """Single ant in a Bullet Ant Swarm. On defeat, decrements swarm ants_remaining; when 0, edits intro to defeat and distributes rewards."""
+
+    def __init__(self, ant_hp: int, channel_id: int, swarm_state: dict):
+        super().__init__(timeout=None)
+        self.max_hp = ant_hp
+        self.hp = ant_hp
+        self.channel_id = channel_id
+        self.swarm_state = swarm_state
+        self.defeated = False
+        self._lock = asyncio.Lock()
+
+    def _hp_bar(self) -> str:
+        filled = max(0, round((self.hp / self.max_hp) * 20))
+        empty = 20 - filled
+        return f"{'🟥' * filled}{'⬛' * empty}"
+
+    @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_ant_attack")
+    async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self._lock:
+            if self.defeated:
+                await safe_interaction_response(
+                    interaction, interaction.response.send_message,
+                    "This ant is already squashed!", ephemeral=True)
+                return
+
+            self.hp -= 1
+            self.swarm_state["attackers"][interaction.user.id] = self.swarm_state["attackers"].get(interaction.user.id, 0) + 1
+
+            if self.hp <= 0:
+                self.defeated = True
+                button.disabled = True
+                button.label = "☠️"
+                button.style = discord.ButtonStyle.secondary
+
+                await safe_interaction_response(
+                    interaction, interaction.response.edit_message,
+                    embed=discord.Embed(
+                        title=f"☠️ {BULLET_ANT_ANIMAL['emoji']} Bullet Ant squashed!",
+                        description=BULLET_ANT_ANIMAL["defeat_msg"],
+                        color=discord.Color.gold()),
+                    view=self)
+
+                self.swarm_state["ants_remaining"] -= 1
+                if self.swarm_state["ants_remaining"] <= 0:
+                    channel = interaction.guild.get_channel(self.channel_id)
+                    intro_id = self.swarm_state.get("intro_message_id")
+                    active_pve_events.pop(self.channel_id, None)
+                    if channel and intro_id:
+                        try:
+                            intro_msg = await channel.fetch_message(intro_id)
+                            defeat_embed = discord.Embed(
+                                title=f"☠️ 🐜 Bullet Ant Swarm Defeated! ☠️",
+                                description=self.swarm_state["defeat_msg"],
+                                color=discord.Color.gold())
+                            await intro_msg.edit(embed=defeat_embed)
+                        except Exception as e:
+                            print(f"Bullet Ant Swarm intro edit failed: {e}")
+                    asyncio.create_task(
+                        _pve_distribute_rewards(
+                            interaction, BULLET_ANT_SWARM_REWARD_ANIMAL,
+                            dict(self.swarm_state["attackers"]), self.channel_id,
+                            self.swarm_state["area_multiplier"]))
+                return
+
+            progress_embed = discord.Embed(
+                title=f"🚨 {BULLET_ANT_ANIMAL['emoji']} Bullet Ant 🚨",
+                description=BULLET_ANT_ANIMAL["description"],
+                color=BULLET_ANT_ANIMAL["color"])
+            progress_embed.add_field(
+                name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
+            progress_embed.add_field(name="⚔️ Last Hit", value=f"**{interaction.user.display_name}**!", inline=False)
+            await safe_interaction_response(
+                interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+
+
+def _get_guild_gather_channels(guild: discord.Guild) -> list[discord.TextChannel]:
+    """Return list of text channels in guild whose name is a valid gathering channel (forest, grove, marsh, bog, mire, underground-jungle)."""
+    out = []
+    for ch in guild.text_channels:
+        name = ch.name.lower().replace(" ", "-")
+        if name in VALID_GATHERING_CHANNELS:
+            out.append(ch)
+    return out
+
+
+class BossView(discord.ui.View):
+    """Boss PvE: same as wild animal but removes from active_boss_events on defeat; marks guild eligible for Plantera bulb."""
+
+    def __init__(self, boss: dict, hp: int, channel_id: int, guild_id: int, area_multiplier: float, boss_state_ref: dict):
+        super().__init__(timeout=None)
+        self.boss = boss
+        self.max_hp = hp
+        self.hp = hp
+        self.channel_id = channel_id
+        self.guild_id = guild_id
+        self.area_multiplier = area_multiplier
+        self.boss_state_ref = boss_state_ref  # ref into active_boss_events[guild_id] entry for this boss
+        self.attackers: dict[int, int] = {}
+        self.defeated = False
+        self._lock = asyncio.Lock()
+
+    def _hp_bar(self) -> str:
+        filled = max(0, round((self.hp / self.max_hp) * 20))
+        empty = 20 - filled
+        return f"{'🟥' * filled}{'⬛' * empty}"
+
+    @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_boss_attack")
+    async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self._lock:
+            if self.defeated:
+                await safe_interaction_response(
+                    interaction, interaction.response.send_message,
+                    f"The **{self.boss['name']}** has already been defeated!", ephemeral=True)
+                return
+
+            self.hp -= 1
+            self.attackers[interaction.user.id] = self.attackers.get(interaction.user.id, 0) + 1
+
+            if self.hp <= 0:
+                self.defeated = True
+                button.disabled = True
+                button.label = "☠️ Defeated!"
+                button.style = discord.ButtonStyle.secondary
+
+                victory_embed = discord.Embed(
+                    title=f"☠️ {self.boss['emoji']} {self.boss['name']} Defeated! ☠️",
+                    description=self.boss["defeat_msg"],
+                    color=discord.Color.gold())
+                victory_embed.add_field(name="HP", value=f"**0** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
+                participants_lines = []
+                for uid, hits in sorted(self.attackers.items(), key=lambda x: -x[1]):
+                    member = interaction.guild.get_member(uid)
+                    name = member.display_name if member else f"User {uid}"
+                    participants_lines.append(f"**{name}** — {hits} hit{'s' if hits != 1 else ''}")
+                victory_embed.add_field(name="🏆 Contributors", value="\n".join(participants_lines) or "No participants", inline=False)
+                victory_embed.set_footer(text="Rewards are being distributed…")
+                await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
+
+                # Remove this boss entry from active_boss_events[guild_id]
+                boss_list = active_boss_events.get(self.guild_id, [])
+                if self.boss_state_ref in boss_list:
+                    boss_list.remove(self.boss_state_ref)
+                if not boss_list:
+                    active_boss_events.pop(self.guild_id, None)
+
+                # Mark guild eligible for Plantera bulb (any boss defeat)
+                plantera_bulb_eligible_guilds[self.guild_id] = time.time()
+
+                asyncio.create_task(
+                    _pve_distribute_rewards(interaction, self.boss, dict(self.attackers), self.channel_id, self.area_multiplier))
+                return
+
+            progress_embed = discord.Embed(
+                title=f"🚨 {self.boss['emoji']} {self.boss['name']} 🚨",
+                description=self.boss["description"],
+                color=self.boss["color"])
+            progress_embed.add_field(name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
+            progress_embed.add_field(name="⚔️ Last Hit", value=f"**{interaction.user.display_name}**!", inline=False)
+            progress_embed.set_footer(text="All gathering channels are blocked until this boss is defeated!")
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+
+
+async def _send_boss_warning_embed(guild: discord.Guild, boss: dict):
+    """Send 1-min warning embed with @here to ALL gathering grounds channels. No footer so it's not obvious a boss is spawning."""
+    channels = _get_guild_gather_channels(guild)
+    text = boss.get("pre_spawn_text", "Something terrible is approaching...")
+    embed = discord.Embed(
+        title=f"⚠️ Boss Incoming! ⚠️",
+        description=text,
+        color=discord.Color.dark_red())
+    for ch in channels:
+        try:
+            if ch.permissions_for(guild.me).send_messages:
+                await ch.send("@here", embed=embed)
+        except Exception as e:
+            print(f"Boss warning embed failed in {ch.name}: {e}")
+
+
+async def trigger_boss_event(channel: discord.TextChannel, boss: dict, area_multiplier: float):
+    """Spawn a boss in the given channel. Blocks all gather channels in the guild until defeated."""
+    guild_id = channel.guild.id
+    if guild_id in active_boss_events:
+        return  # already a boss active
+    hp = random.randint(*boss["hp_range"])
+    entry = {"channel_id": channel.id, "boss": boss, "hp": hp, "max_hp": hp}
+    active_boss_events[guild_id] = [entry]
+
+    embed = discord.Embed(
+        title=f"🚨 {boss['emoji']} {boss['name']} 🚨",
+        description=boss["description"],
+        color=boss["color"])
+    embed.add_field(name="HP", value=f"**{hp}** / **{hp}**\n{'🟥' * 20}", inline=False)
+    embed.add_field(name="⚔️ How to Fight", value="Press **Attack**! Each hit deals **1 damage** and earns **1 plant**!", inline=False)
+    embed.set_footer(text="All gathering channels are BLOCKED until this boss is defeated!")
+    view = BossView(boss=boss, hp=hp, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_multiplier, boss_state_ref=entry)
+    await channel.send(embed=embed, view=view)
+
+
+async def trigger_twins_boss_event(channel: discord.TextChannel, area_multiplier: float):
+    """Spawn both Twins (Retinazer and Spazmatism) in the same channel. Both must be defeated to unblock."""
+    guild_id = channel.guild.id
+    if guild_id in active_boss_events:
+        return
+    retinazer = next(b for b in PVE_BOSSES if b["id"] == "retinazer")
+    spazmatism = next(b for b in PVE_BOSSES if b["id"] == "spazmatism")
+    hp_r = random.randint(*retinazer["hp_range"])
+    hp_s = random.randint(*spazmatism["hp_range"])
+    entry_r = {"channel_id": channel.id, "boss": retinazer, "hp": hp_r, "max_hp": hp_r}
+    entry_s = {"channel_id": channel.id, "boss": spazmatism, "hp": hp_s, "max_hp": hp_s}
+    active_boss_events[guild_id] = [entry_r, entry_s]
+
+    for boss, hp, entry in [(retinazer, hp_r, entry_r), (spazmatism, hp_s, entry_s)]:
+        embed = discord.Embed(
+            title=f"🚨 {boss['emoji']} {boss['name']} 🚨",
+            description=boss["description"],
+            color=boss["color"])
+        embed.add_field(name="HP", value=f"**{hp}** / **{hp}**\n{'🟥' * 20}", inline=False)
+        embed.add_field(name="⚔️ How to Fight", value="Press **Attack**! Both Twins must fall to free the channels!", inline=False)
+        embed.set_footer(text="All gathering channels are BLOCKED until BOTH Twins are defeated!")
+        view = BossView(boss=boss, hp=hp, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_multiplier, boss_state_ref=entry)
+        await channel.send(embed=embed, view=view)
+
+
+async def _delayed_boss_spawn(guild: discord.Guild, channel: discord.TextChannel, boss: dict, area_multiplier: float, delay: float = 60.0):
+    await asyncio.sleep(delay)
+    if guild.id not in active_boss_events:
+        try:
+            if boss["id"] in PVE_BOSSES_TWINS_IDS:
+                await trigger_twins_boss_event(channel, area_multiplier)
+            else:
+                await trigger_boss_event(channel, boss, area_multiplier)
+        except Exception as e:
+            print(f"Delayed boss spawn failed: {e}")
+
+
+# Bosses that can spawn randomly: excludes Plantera (bulb only); Mothron only when Solar Eclipse event is active in DB.
+def _get_random_spawn_bosses():
+    is_solar_eclipse = get_active_event_by_type("solar_eclipse") is not None
+    return [b for b in PVE_BOSSES if b["id"] != "plantera" and (b["id"] != "mothron" or is_solar_eclipse)]
+
+
+class PlanteraBulbView(discord.ui.View):
+    """Break or Ignore the Plantera Bulb. Break summons Plantera in this channel."""
+
+    def __init__(self, channel_id: int, guild_id: int, area_multiplier: float):
+        super().__init__(timeout=120.0)
+        self.channel_id = channel_id
+        self.guild_id = guild_id
+        self.area_multiplier = area_multiplier
+        self.resolved = False
+
+    @discord.ui.button(label="Break", style=discord.ButtonStyle.danger, custom_id="plantera_break")
+    async def break_bulb(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.resolved:
+            await safe_interaction_response(interaction, interaction.response.send_message, "Someone already chose!", ephemeral=True)
+            return
+        self.resolved = True
+        self.stop()
+        plantera = next(b for b in PVE_BOSSES if b["id"] == "plantera")
+        plantera_bulb_eligible_guilds.pop(self.guild_id, None)
+        await safe_interaction_response(interaction, interaction.response.edit_message,
+            content="The bulb breaks! **Plantera** has been summoned!",
+            view=None)
+        channel = interaction.guild.get_channel(self.channel_id) or interaction.channel
+        try:
+            await trigger_boss_event(channel, plantera, self.area_multiplier)
+        except Exception as e:
+            print(f"Plantera spawn after bulb break failed: {e}")
+
+    @discord.ui.button(label="Ignore", style=discord.ButtonStyle.secondary, custom_id="plantera_ignore")
+    async def ignore_bulb(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.resolved:
+            await safe_interaction_response(interaction, interaction.response.send_message, "Someone already chose!", ephemeral=True)
+            return
+        self.resolved = True
+        self.stop()
+        await safe_interaction_response(interaction, interaction.response.edit_message,
+            content="The bulb is left alone. The jungle settles back into silence.",
+            view=None)
+
+
 def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplier: float):
     """Roll N gather items using pure math, then write everything to DB in ONE operation.
 
@@ -6145,6 +6818,9 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
         if has_bloomstone and cat == "Flower":
             fv *= 3.0
 
+        # BETA TESTER: same 1.3x as /gather
+        fv *= get_beta_tester_money_multiplier(user_id)
+
         total_balance += fv
         name = item["name"]
         items_inc[name] = items_inc.get(name, 0) + 1
@@ -6172,17 +6848,47 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
 async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict,
                                    attackers: dict[int, int], channel_id: int,
                                    area_multiplier: float):
-    """Award plants to every participant. 1 DB read + 1 DB write per user regardless of hits."""
+    """Award plants to every participant. Record defeats, update PLANTER role, unlock achievements."""
     channel = interaction.guild.get_channel(channel_id)
+    enemy_id = animal.get("id")
+    guild = interaction.guild
     try:
         for user_id, hits in attackers.items():
             try:
-                member = interaction.guild.get_member(user_id)
+                member = guild.get_member(user_id)
                 if not member:
                     continue
 
                 results, total_value = await asyncio.to_thread(
                     _pve_roll_items_and_batch_write, user_id, hits, area_multiplier)
+
+                # Record PvE defeat and update PLANTER role (plants from PvE count toward rank)
+                if enemy_id:
+                    add_pve_defeat(user_id, enemy_id)
+                try:
+                    await assign_gatherer_role(member, guild)
+                except Exception as e:
+                    print(f"Error assigning gatherer role after PvE for user {user_id}: {e}")
+
+                # Unlock per-enemy hidden achievement if first time
+                if enemy_id:
+                    ach_key = PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT.get(enemy_id)
+                    if ach_key and unlock_hidden_achievement(user_id, ach_key) and channel:
+                        await send_hidden_achievement_notification_async(channel, member.mention, ach_key)
+
+                # Slayer achievement category (total defeats)
+                total_defeats = get_user_total_pve_defeats(user_id)
+                new_slayer_level = get_achievement_level_for_stat("slayer", total_defeats)
+                cur_slayer = get_user_achievement_level(user_id, "slayer")
+                if new_slayer_level > cur_slayer:
+                    set_user_achievement_level(user_id, "slayer", new_slayer_level)
+                    if channel:
+                        await send_achievement_notification_async(channel, member.mention, "slayer", new_slayer_level)
+
+                # PvE Master: defeat every type at least once
+                if PVE_MASTER_REQUIRED_IDS.issubset(set(get_user_pve_defeated(user_id))):
+                    if unlock_hidden_achievement(user_id, "pve_master") and channel:
+                        await send_hidden_achievement_notification_async(channel, member.mention, "pve_master")
 
                 plant_emojis = [get_item_display_emoji(r["name"]) for r in results]
                 emoji_display = " ".join(plant_emojis)
@@ -6215,12 +6921,55 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
         print(f"Error distributing PvE rewards: {e}")
 
 
+async def trigger_bullet_ant_swarm_event(channel: discord.TextChannel, area_multiplier: float):
+    """Spawn a Bullet Ant Swarm: one informational intro embed, then 4–9 individual Bullet Ant embeds with attack buttons."""
+    if channel.id in active_pve_events:
+        return
+    n_ants = random.randint(*BULLET_ANT_SWARM_COUNT_RANGE)
+    ant_hps = [random.randint(*BULLET_ANT_ANIMAL["hp_range"]) for _ in range(n_ants)]
+    swarm_state = {
+        "intro_message_id": None,
+        "ants_remaining": n_ants,
+        "attackers": {},
+        "defeat_msg": BULLET_ANT_SWARM_DEFEAT,
+        "area_multiplier": area_multiplier,
+        "channel_id": channel.id,
+    }
+    active_pve_events[channel.id] = {"swarm": True, "swarm_state": swarm_state, "start_time": time.time()}
+
+    try:
+        intro_embed = discord.Embed(
+            title="🚨 🐜 Bullet Ant Swarm has appeared! 🚨",
+            description=BULLET_ANT_SWARM_INTRO,
+            color=0x2C1810)
+        intro_embed.set_footer(text="Defeat each ant below! All gathering commands are BLOCKED until the swarm is defeated.")
+        intro_msg = await channel.send(embed=intro_embed)
+        swarm_state["intro_message_id"] = intro_msg.id
+
+        for ant_hp in ant_hps:
+            ant_embed = discord.Embed(
+                title=f"🚨 {BULLET_ANT_ANIMAL['emoji']} Bullet Ant 🚨",
+                description=BULLET_ANT_ANIMAL["description"],
+                color=BULLET_ANT_ANIMAL["color"])
+            filled = max(0, round((ant_hp / ant_hp) * 20))
+            ant_embed.add_field(name="HP", value=f"**{ant_hp}** / **{ant_hp}**\n{'🟥' * 20}", inline=False)
+            view = BulletAntView(ant_hp=ant_hp, channel_id=channel.id, swarm_state=swarm_state)
+            await channel.send(embed=ant_embed, view=view)
+    except Exception:
+        active_pve_events.pop(channel.id, None)
+        raise
+
+
 async def trigger_pve_event(channel: discord.TextChannel, area_multiplier: float):
     """Spawn a wild animal PvE event in the given channel and lock it from commands."""
     if channel.id in active_pve_events:
         return
 
-    animal = random.choice(PVE_WILD_ANIMALS)
+    if random.random() < PVE_SWARM_TRIGGER_CHANCE:
+        await trigger_bullet_ant_swarm_event(channel, area_multiplier)
+        return
+
+    animal = random.choice(PVE_WILD_ANIMALS_SINGLE)
     hp = random.randint(*animal["hp_range"])
 
     active_pve_events[channel.id] = {"animal": animal, "hp": hp, "start_time": time.time()}
@@ -6263,10 +7012,24 @@ async def gather(interaction: discord.Interaction):
             return
 
         # Block commands while a PvE wild animal event is active in this channel
+        # Block if a boss is active in this guild (all gather channels blocked until boss defeated)
+        guild_id = interaction.guild.id if interaction.guild else 0
+        if guild_id and guild_id in active_boss_events:
+            boss_list = active_boss_events[guild_id]
+            ch_id = boss_list[0]["channel_id"] if boss_list else 0
+            boss_ch = interaction.guild.get_channel(ch_id) if ch_id else None
+            where = f" in {boss_ch.mention}" if boss_ch else ""
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"🚨 A **boss** is terrorizing the gathering grounds! Defeat it{where} before you can gather again!", ephemeral=True)
+            return
+
         if interaction.channel.id in active_pve_events:
             pve_info = active_pve_events[interaction.channel.id]
-            animal_name = pve_info["animal"]["name"]
-            animal_emoji = pve_info["animal"]["emoji"]
+            if pve_info.get("swarm"):
+                animal_name, animal_emoji = "Bullet Ant Swarm", "🐜"
+            else:
+                animal_name = pve_info["animal"]["name"]
+                animal_emoji = pve_info["animal"]["emoji"]
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"🚨 {animal_emoji} A wild **{animal_name}** is terrorizing this channel! "
                 f"Defeat it before you can gather again!", ephemeral=True)
@@ -6276,6 +7039,7 @@ async def gather(interaction: discord.Interaction):
         area_mult = area.get("multiplier", 1.0)
         if has_shop_item(user_id, "atlas"):
             area_mult *= 2.0
+        area_mult *= area.get("gather_boost", 1.0)
         user_planter_level = get_user_planter_level(interaction.user)
 
         # === ONE thread call: data fetch + area check + cooldown + gather + chain roll ===
@@ -6296,8 +7060,8 @@ async def gather(interaction: discord.Interaction):
                     f"Sorry, {interaction.user.name}, you're dead. You cannot /gather for {time_left // 60} minute(s)", ephemeral=True)
             elif result.get("almost_unlocked"):
                 await safe_interaction_response(interaction, interaction.followup.send,
-                    f"You must wait {time_left} seconds before gathering again, {interaction.user.name}.\n\n"
-                    f"🎉 **Hidden Achievement Unlocked: Almost Got It!** 🎉", ephemeral=True)
+                    f"You must wait {time_left} seconds before gathering again, {interaction.user.name}.", ephemeral=True)
+                await send_hidden_achievement_notification(interaction, "almost_got_it")
             else:
                 await safe_interaction_response(interaction, interaction.followup.send,
                     f"You must wait {time_left} seconds before gathering again, {interaction.user.name}.", ephemeral=True)
@@ -6435,10 +7199,44 @@ async def gather(interaction: discord.Interaction):
         # === Background: role assignment + achievements (user already has the response) ===
         asyncio.create_task(_gather_post_response(interaction, user_id, full_data, gather_result))
 
-        # === PvE wild animal trigger (see PVE_TRIGGER_CHANCE_GATHER); NOT when stealable; spawns in this channel only ===
-        if (channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
+        # === Plantera bulb chance (only in #underground-jungle after a recent boss defeat) ===
+        if (channel_name == "underground-jungle" and guild_id
+                and guild_id in plantera_bulb_eligible_guilds
+                and (time.time() - plantera_bulb_eligible_guilds[guild_id]) <= PLANTERA_BULB_MAX_AGE_SEC
+                and interaction.channel.id not in active_pve_events
+                and guild_id not in active_boss_events
+                and random.random() < PLANTERA_BULB_CHANCE):
+            plantera_bulb_eligible_guilds.pop(guild_id, None)
+            bulb_embed = discord.Embed(
+                title="🌸 The jungle grows restless...",
+                description="A **Plantera Bulb** spawned!",
+                color=0x2d5a1a)
+            view = PlanteraBulbView(interaction.channel.id, guild_id, area_mult)
+            asyncio.create_task(interaction.channel.send(embed=bulb_embed, view=view))
+
+        # === Boss spawn (rarer): no animal/boss when a boss is active; 1-min warning then boss in this channel ===
+        elif (channel_name in VALID_GATHERING_CHANNELS and guild_id and guild_id not in active_boss_events
+                and interaction.channel.id not in active_pve_events
                 and not result.get("stealable")):
-            if random.random() < PVE_TRIGGER_CHANCE_GATHER:
+            _, boss_mult = _pve_spawn_multiplier()
+            effective_boss_chance = min(1.0, PVE_BOSS_TRIGGER_CHANCE * boss_mult)
+            if channel_name == "underground-jungle":
+                effective_boss_chance = min(1.0, effective_boss_chance * UNDERGROUND_JUNGLE_BOSS_SPAWN_MULT)
+            bosses_candidates = _get_random_spawn_bosses()
+            if random.random() < effective_boss_chance and bosses_candidates:
+                boss = random.choice(bosses_candidates)
+                await _send_boss_warning_embed(interaction.guild, boss)
+                asyncio.create_task(_delayed_boss_spawn(interaction.guild, interaction.channel, boss, area_mult, 60.0))
+
+        # === PvE wild animal: only if no boss active and this channel has no animal; spawns in this channel only ===
+        elif (channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
+                and guild_id not in active_boss_events
+                and not result.get("stealable")):
+            animal_mult, _ = _pve_spawn_multiplier()
+            effective_chance = min(1.0, PVE_TRIGGER_CHANCE_GATHER * animal_mult)
+            if channel_name == "underground-jungle":
+                effective_chance = min(1.0, effective_chance * UNDERGROUND_JUNGLE_ANIMAL_SPAWN_MULT)
+            if random.random() < effective_chance:
                 asyncio.create_task(trigger_pve_event(interaction.channel, area_mult))
     except Exception as e:
         print(f"Error in gather command: {e}")
@@ -7013,11 +7811,24 @@ async def harvest(interaction: discord.Interaction):
                 f"❌ You can only use this command in gathering channels: {channels_list}", ephemeral=True)
             return
 
+        guild_id = interaction.guild.id if interaction.guild else 0
+        if guild_id and guild_id in active_boss_events:
+            boss_list = active_boss_events[guild_id]
+            ch_id = boss_list[0]["channel_id"] if boss_list else 0
+            boss_ch = interaction.guild.get_channel(ch_id) if ch_id else None
+            where = f" in {boss_ch.mention}" if boss_ch else ""
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"🚨 A **boss** is terrorizing the gathering grounds! Defeat it{where} before you can harvest again!", ephemeral=True)
+            return
+
         # Block commands while a PvE wild animal event is active in this channel
         if interaction.channel.id in active_pve_events:
             pve_info = active_pve_events[interaction.channel.id]
-            animal_name = pve_info["animal"]["name"]
-            animal_emoji = pve_info["animal"]["emoji"]
+            if pve_info.get("swarm"):
+                animal_name, animal_emoji = "Bullet Ant Swarm", "🐜"
+            else:
+                animal_name = pve_info["animal"]["name"]
+                animal_emoji = pve_info["animal"]["emoji"]
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"🚨 {animal_emoji} A wild **{animal_name}** is terrorizing this channel! "
                 f"Defeat it before you can harvest again!", ephemeral=True)
@@ -7027,6 +7838,7 @@ async def harvest(interaction: discord.Interaction):
         area_mult = area.get("multiplier", 1.0)
         if has_shop_item(user_id, "atlas"):
             area_mult *= 2.0
+        area_mult *= area.get("gather_boost", 1.0)
         user_planter_level = get_user_planter_level(interaction.user)
 
         # === ONE thread call: data fetch + area check + cooldown + harvest + chain roll ===
@@ -7168,10 +7980,44 @@ async def harvest(interaction: discord.Interaction):
         # === Background: role assignment + achievements (user already has the response) ===
         asyncio.create_task(_harvest_post_response(interaction, user_id, full_data, result))
 
-        # === PvE wild animal trigger (see PVE_TRIGGER_CHANCE_HARVEST); NOT when stealable; spawns in this channel only ===
-        if (channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
+        # === Plantera bulb chance (only in #underground-jungle after a recent boss defeat) ===
+        if (channel_name == "underground-jungle" and guild_id
+                and guild_id in plantera_bulb_eligible_guilds
+                and (time.time() - plantera_bulb_eligible_guilds[guild_id]) <= PLANTERA_BULB_MAX_AGE_SEC
+                and interaction.channel.id not in active_pve_events
+                and guild_id not in active_boss_events
+                and random.random() < PLANTERA_BULB_CHANCE):
+            plantera_bulb_eligible_guilds.pop(guild_id, None)
+            bulb_embed = discord.Embed(
+                title="🌸 The jungle grows restless...",
+                description="A **Plantera Bulb** spawned!",
+                color=0x2d5a1a)
+            view = PlanteraBulbView(interaction.channel.id, guild_id, area_mult)
+            asyncio.create_task(interaction.channel.send(embed=bulb_embed, view=view))
+
+        # === Boss spawn (rarer): no animal/boss when a boss is active ===
+        elif (channel_name in VALID_GATHERING_CHANNELS and guild_id and guild_id not in active_boss_events
+                and interaction.channel.id not in active_pve_events
                 and not crit.get("stealable")):
-            if random.random() < PVE_TRIGGER_CHANCE_HARVEST:
+            _, boss_mult = _pve_spawn_multiplier()
+            effective_boss_chance = min(1.0, PVE_BOSS_TRIGGER_CHANCE * boss_mult)
+            if channel_name == "underground-jungle":
+                effective_boss_chance = min(1.0, effective_boss_chance * UNDERGROUND_JUNGLE_BOSS_SPAWN_MULT)
+            bosses_candidates = _get_random_spawn_bosses()
+            if random.random() < effective_boss_chance and bosses_candidates:
+                boss = random.choice(bosses_candidates)
+                await _send_boss_warning_embed(interaction.guild, boss)
+                asyncio.create_task(_delayed_boss_spawn(interaction.guild, interaction.channel, boss, area_mult, 60.0))
+
+        # === PvE wild animal: only if no boss active and this channel has no animal ===
+        elif (channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
+                and guild_id not in active_boss_events
+                and not crit.get("stealable")):
+            animal_mult, _ = _pve_spawn_multiplier()
+            effective_chance = min(1.0, PVE_TRIGGER_CHANCE_HARVEST * animal_mult)
+            if channel_name == "underground-jungle":
+                effective_chance = min(1.0, effective_chance * UNDERGROUND_JUNGLE_ANIMAL_SPAWN_MULT)
+            if random.random() < effective_chance:
                 asyncio.create_task(trigger_pve_event(interaction.channel, area_mult))
     except Exception as e:
         print(f"Error in harvest command: {e}")
@@ -7276,95 +8122,117 @@ async def achievements(interaction: discord.Interaction, hidden: bool = False):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
-@bot.tree.command(name="bloom", description="Bloom to advance your Bloom Rank! (Requires PLANTER X & $500,000,000)")
-async def bloom(interaction: discord.Interaction):
-    try:
-        if not await safe_defer(interaction, ephemeral=False):
+class BloomConfirmView(discord.ui.View):
+    """Confirmation view for /bloom: 'Bloom!' button performs the bloom and edits the message to success embed."""
+    def __init__(self, user_id: int, timeout: float = 120.0):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.done = False
+
+    @discord.ui.button(label="Bloom!", emoji="🌸", style=discord.ButtonStyle.success, custom_id="bloom_confirm")
+    async def confirm_bloom(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Only the user who ran /bloom can confirm.", ephemeral=True)
             return
-        
+        if self.done:
+            await interaction.response.send_message("You already bloomed!", ephemeral=True)
+            return
+        self.done = True
+        self.stop()
+        await interaction.response.defer(ephemeral=True)
+
         user_id = interaction.user.id
-        
-        # Block bloom if user is in an active roulette game (prevent exploit:
-        # deposit money into /russian, bloom to reset balance, then cash out to recover money)
-        if user_id in user_active_games:
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"❌ You cannot bloom while in an active **/russian** game, {interaction.user.name}! Finish or cash out first.",
-                ephemeral=True)
-            return
-        
-        # Check if user has PLANTER X role
-        planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V", "PLANTER VI", "PLANTER VII", "PLANTER VIII", "PLANTER IX", "PLANTER X"]
-        user_roles = [role.name for role in interaction.user.roles]
-        has_planter_x = "PLANTER X" in user_roles
-        
-        if not has_planter_x:
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"❌ You must be **PLANTER X** to bloom, {interaction.user.name}!",
-                ephemeral=True)
-            return
-        
-        # Check if user has at least $500,000,000
-        bloom_cost = 500_000_000
-        user_balance = get_user_balance(user_id)
-        if user_balance < bloom_cost:
-            money_needed = bloom_cost - user_balance
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"❌ You need **${money_needed:,.2f}** more to bloom, {interaction.user.name}! (Cost: **$500,000,000**)",
-                ephemeral=True)
-            return
-        
-        # Get current stats before blooming
         old_rank = get_bloom_rank(user_id)
         tree_rings = get_user_tree_rings(user_id)
-        
-        # Perform bloom (resets money, cycle plants, upgrades; keeps lifetime total_items, achievements, tree rings)
         perform_bloom(user_id)
-        
-        # Get new stats
         new_rank = get_bloom_rank(user_id)
-        
-        # Reset PLANTER rank role back to PLANTER I (bloom_cycle_plants is now 0)
+
         try:
             await assign_gatherer_role(interaction.user, interaction.guild)
         except Exception as e:
             print(f"Error resetting planter role for user {user_id}: {e}")
-        
-        # Assign Bloom Rank role
-        old_bloom_role = None
-        new_bloom_role = None
         try:
-            old_bloom_role, new_bloom_role = await assign_bloom_rank_role(interaction.user, interaction.guild)
+            await assign_bloom_rank_role(interaction.user, interaction.guild)
         except Exception as e:
             print(f"Error assigning bloom rank role to user {user_id}: {e}")
-        
-        # Create confirmation embed
-        embed = discord.Embed(
+
+        success_embed = discord.Embed(
             title="<:TreeRing:1474244868288282817> You Bloomed!",
             description=f"{interaction.user.mention} has advanced to **{new_rank}**!",
             color=discord.Color.gold()
         )
-        
-        embed.add_field(name="🌲 Bloom Rank", value=f"**{old_rank}** → **{new_rank}**", inline=False)
-        embed.add_field(name="<:TreeRing:1474244868288282817> Tree Rings", value=f"**{tree_rings}** Tree Rings", inline=False)
-        
+        success_embed.add_field(name="🌲 Bloom Rank", value=f"**{old_rank}** → **{new_rank}**", inline=False)
+        success_embed.add_field(name="<:TreeRing:1474244868288282817> Tree Rings", value=f"**{tree_rings}** Tree Rings", inline=False)
         if tree_rings > 0:
             multiplier = get_bloom_multiplier(user_id)
-            multiplier_percent = (multiplier - 1.0) * 100
-            embed.add_field(
-                name="💰 Money Boost", 
-                value=f"+{multiplier_percent:.1f}% on all earnings", 
-                inline=False
-            )
-        embed.add_field(name="🗺️ Areas Reset", value="All unlocked areas have been reset. You're back in **#forest**!", inline=False)
-        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
-        
-        # Check and update blooming achievement level (after main response)
+            success_embed.add_field(name="💰 Money Boost", value=f"+{(multiplier - 1.0) * 100:.1f}% on all earnings", inline=False)
+        success_embed.add_field(name="🗺️ Areas Reset", value="All unlocked areas have been reset. You're back in **#forest**!", inline=False)
+
+        try:
+            await interaction.message.edit(embed=success_embed, view=None)
+        except Exception as e:
+            print(f"Error editing bloom message: {e}")
+        await interaction.followup.send("You bloomed! 🌸", ephemeral=True)
+
         bloom_count = get_user_bloom_count(user_id)
         new_blooming_level = get_achievement_level_for_stat("blooming", bloom_count)
         current_blooming_level = get_user_achievement_level(user_id, "blooming")
         if new_blooming_level > current_blooming_level:
             set_user_achievement_level(user_id, "blooming", new_blooming_level)
             await send_achievement_notification(interaction, "blooming", new_blooming_level)
+
+
+@bot.tree.command(name="bloom", description="Bloom to advance your Bloom Rank! (Requires PLANTER X & cost scales per bloom)")
+async def bloom(interaction: discord.Interaction):
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        user_id = interaction.user.id
+        if user_id in user_active_games:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ You cannot bloom while in an active **/russian** game, {interaction.user.name}! Finish or cash out first.",
+                ephemeral=True)
+            return
+
+        user_roles = [role.name for role in interaction.user.roles]
+        has_planter_x = "PLANTER X" in user_roles
+        cycle_plants = get_user_bloom_cycle_plants(user_id)
+        bloom_cost = bloom_prestige_cost(user_id)
+        user_balance = get_user_balance(user_id)
+        plants_needed = max(0, BLOOM_PLANTS_REQUIRED - cycle_plants)
+        money_needed = max(0.0, bloom_cost - user_balance)
+
+        what_bloom_does = (
+            "This is a command that allows you to prestige and reset all your upgrades, money, and current plant count, "
+            "but you keep lifetime progress, achievements, and Tree Rings! <:TreeRing:1474244868288282817> "
+            "Each prestige makes your Bloom Rank increase (1.2x permabuff per rank increase)."
+        )
+
+        can_bloom = has_planter_x and plants_needed == 0 and money_needed <= 0
+
+        embed = discord.Embed(
+            title=f"🌸 {interaction.user.display_name} wants to Bloom!",
+            color=discord.Color.gold()
+        )
+        embed.add_field(name="📊 Plants Needed", value=f"**{plants_needed:,}**", inline=True)
+        embed.add_field(name="💰 Money needed", value=f"**${money_needed:,.0f}**", inline=True)
+        embed.add_field(name="ℹ️ What is /bloom?", value=what_bloom_does, inline=False)
+        if can_bloom:
+            embed.add_field(name="✅ Ready", value="You meet all requirements. Click **Bloom!** below to confirm.", inline=False)
+        else:
+            if not has_planter_x:
+                embed.add_field(name="❌ Requirement", value="You must be **PLANTER X**", inline=False)
+            elif plants_needed > 0:
+                embed.add_field(name="❌ Requirement", value=f"Gather **{plants_needed:,}** more plants this cycle to reach PLANTER X.", inline=False)
+            else:
+                embed.add_field(name="❌ Requirement", value=f"Not enough money! Earn **${money_needed:,.2f}** more to /bloom!", inline=False)
+
+        if can_bloom:
+            view = BloomConfirmView(user_id=user_id)
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
+        else:
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
     except Exception as e:
         print(f"Error in bloom command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
@@ -7378,6 +8246,7 @@ async def bloom(interaction: discord.Interaction):
     app_commands.Choice(name="Marsh ($5,000,000 & PLANTER V)", value="marsh"),
     app_commands.Choice(name="Bog ($75,000,000 & PLANTER VII)", value="bog"),
     app_commands.Choice(name="Mire ($300,000,000 & PLANTER IX)", value="mire"),
+    app_commands.Choice(name="Underground Jungle ($1,000,000,000 & PLANTER II)", value="underground-jungle"),
 ])
 async def unlock(interaction: discord.Interaction, area: app_commands.Choice[str]):
     try:
@@ -7976,13 +8845,10 @@ async def userstats(interaction: discord.Interaction):
         else:
             embed.add_field(name="✨ Harvest Attunement", value="**None**", inline=True)
         
-        bloom_cost = 500_000_000
-        can_bloom = (cycle_plants >= 15000) and (user_balance >= bloom_cost)
-        bloom_line = f":cherry_blossom: Can Bloom? - {'Yes' if can_bloom else 'No'}"
         if items_needed == 0:
-            embed.add_field(name="🏆 Rank Status", value=f"**{next_rank}** - You've reached **PLANTER X**!\n\n{bloom_line}", inline=False)
+            embed.add_field(name="🏆 Rank Status", value=f"**{next_rank}** - You've reached **PLANTER X**!", inline=False)
         else:
-            embed.add_field(name="📈 Next Rank", value=f"**{items_needed}** more plants until **{next_rank}**\n\n{bloom_line}", inline=False)
+            embed.add_field(name="📈 Next Rank", value=f"**{items_needed}** more plants until **{next_rank}**", inline=False)
         
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
     except Exception as e:
@@ -8054,7 +8920,7 @@ class BasketUpgradeView(discord.ui.View):
         if basket_tier < 10:
             next_basket = BASKET_UPGRADES[basket_tier]["name"]
             next_multiplier = BASKET_UPGRADES[basket_tier]["multiplier"]
-            next_cost = UPGRADE_PRICES[basket_tier]
+            next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[basket_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
             basket_text = f"**Upgrade {basket_tier + 1}/10**\n**Current:** {current_basket} ({current_multiplier}x money)\n**Next:** {next_basket} ({next_multiplier}x money)\n**Cost:** ${next_cost:,.2f} {can_afford}"
         else:
@@ -8073,7 +8939,7 @@ class BasketUpgradeView(discord.ui.View):
         if shoes_tier < 10:
             next_shoes = SHOES_UPGRADES[shoes_tier]["name"]
             next_reduction = SHOES_UPGRADES[shoes_tier]["reduction"]
-            next_cost = UPGRADE_PRICES[shoes_tier]
+            next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[shoes_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
             shoes_text = f"**Upgrade {shoes_tier + 1}/10**\n**Current:** {current_shoes} (-{current_reduction}s cooldown)\n**Next:** {next_shoes} (-{next_reduction}s cooldown)\n**Cost:** ${next_cost:,.2f} {can_afford}"
         else:
@@ -8092,7 +8958,7 @@ class BasketUpgradeView(discord.ui.View):
         if gloves_tier < 10:
             next_gloves = GLOVES_UPGRADES[gloves_tier]["name"]
             next_chain = GLOVES_UPGRADES[gloves_tier]["chain_chance"] * 100
-            next_cost = UPGRADE_PRICES[gloves_tier]
+            next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[gloves_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
             gloves_text = f"**Upgrade {gloves_tier + 1}/10**\n**Current:** {current_gloves} ({current_chain}% chain chance)\n**Next:** {next_gloves} ({next_chain}% chain chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
         else:
@@ -8111,7 +8977,7 @@ class BasketUpgradeView(discord.ui.View):
         if soil_tier < 10:
             next_soil = SOIL_UPGRADES[soil_tier]["name"]
             next_gmo = SOIL_UPGRADES[soil_tier]["gmo_boost"] * 100
-            next_cost = UPGRADE_PRICES[soil_tier]
+            next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[soil_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
             soil_text = f"**Upgrade {soil_tier + 1}/10**\n**Current:** {current_soil} (+{current_gmo}% GMO chance)\n**Next:** {next_soil} (+{next_gmo}% GMO chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
         else:
@@ -8185,7 +9051,7 @@ class BasketUpgradeView(discord.ui.View):
                 await safe_interaction_response(interaction, interaction.response.send_message, f"❌ You already have the maximum {upgrade_name} upgrade!", ephemeral=True)
                 return
             
-            cost = UPGRADE_PRICES[current_tier]
+            cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[current_tier])
             balance = get_user_balance(self.user_id)
             
             if balance < cost:
@@ -8256,7 +9122,7 @@ class HarvestUpgradeView(discord.ui.View):
         if car_tier < 10:
             next_car = HARVEST_CAR_UPGRADES[car_tier]["name"]
             next_extra = HARVEST_CAR_UPGRADES[car_tier]["extra_items"]
-            next_cost = HARVEST_CAR_PRICES[car_tier]
+            next_cost = bloom_scaled_price(self.user_id, HARVEST_CAR_PRICES[car_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
             car_text = f"**Upgrade {car_tier + 1}/10**\n**Current:** {current_car} (+{current_extra} extra items)\n**Next:** {next_car} (+{next_extra} extra items)\n**Cost:** ${next_cost:,.2f} {can_afford}"
         else:
@@ -8275,7 +9141,7 @@ class HarvestUpgradeView(discord.ui.View):
         if chain_tier < 10:
             next_season = HARVEST_CHAIN_UPGRADES[chain_tier]["name"]
             next_chain = HARVEST_CHAIN_UPGRADES[chain_tier]["chain_chance"] * 100
-            next_cost = HARVEST_CHAIN_PRICES[chain_tier]
+            next_cost = bloom_scaled_price(self.user_id, HARVEST_CHAIN_PRICES[chain_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
             chain_text = f"**Upgrade {chain_tier + 1}/10**\n**Current:** {current_season} ({current_chain}% chain chance)\n**Next:** {next_season} ({next_chain}% chain chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
         else:
@@ -8294,7 +9160,7 @@ class HarvestUpgradeView(discord.ui.View):
         if fertilizer_tier < 10:
             next_fertilizer = HARVEST_FERTILIZER_UPGRADES[fertilizer_tier]["name"]
             next_multiplier = HARVEST_FERTILIZER_UPGRADES[fertilizer_tier]["multiplier"] * 100
-            next_cost = HARVEST_FERTILIZER_PRICES[fertilizer_tier]
+            next_cost = bloom_scaled_price(self.user_id, HARVEST_FERTILIZER_PRICES[fertilizer_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
             fertilizer_text = f"**Upgrade {fertilizer_tier + 1}/10**\n**Current:** {current_fertilizer} (+{current_multiplier}% money)\n**Next:** {next_fertilizer} (+{next_multiplier}% money)\n**Cost:** ${next_cost:,.2f} {can_afford}"
         else:
@@ -8313,7 +9179,7 @@ class HarvestUpgradeView(discord.ui.View):
         if cooldown_tier < 10:
             next_workers = HARVEST_COOLDOWN_UPGRADES[cooldown_tier]["name"]
             next_reduction = HARVEST_COOLDOWN_UPGRADES[cooldown_tier]["reduction"]
-            next_cost = HARVEST_COOLDOWN_PRICES[cooldown_tier]
+            next_cost = bloom_scaled_price(self.user_id, HARVEST_COOLDOWN_PRICES[cooldown_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
             # Format reduction time nicely
             if next_reduction < 60:
@@ -8438,7 +9304,7 @@ class HarvestUpgradeView(discord.ui.View):
                 await safe_interaction_response(interaction, interaction.response.send_message, f"❌ You already have the maximum {upgrade_name} upgrade!", ephemeral=True)
                 return
             
-            cost = price_list[current_tier]
+            cost = bloom_scaled_price(self.user_id, price_list[current_tier])
             balance = get_user_balance(self.user_id)
             
             if balance < cost:
@@ -8764,7 +9630,7 @@ class HireView(discord.ui.View):
         balance = get_user_balance(self.user_id)
         gardener_dict = {g["id"]: g for g in gardeners}
         gardener = gardener_dict.get(slot_id)
-        price = GARDENER_PRICES[slot_id - 1]
+        price = bloom_scaled_price(self.user_id, GARDENER_PRICES[slot_id - 1])
         
         # Get the chance for this gardener level
         gardener_chance = GARDENER_CHANCES.get(slot_id, 0.05) * 100  # Convert to percentage
@@ -8880,7 +9746,7 @@ class HireView(discord.ui.View):
         gardener_dict = {g["id"]: g for g in gardeners}
         gardener = gardener_dict.get(slot_id)
         balance = get_user_balance(self.user_id)
-        price = GARDENER_PRICES[slot_id - 1]
+        price = bloom_scaled_price(self.user_id, GARDENER_PRICES[slot_id - 1])
         
         if gardener:
             # Already hired
@@ -8911,7 +9777,7 @@ class HireView(discord.ui.View):
                 self.buy_tool_button.label = f"Tool: {tool_info['name']} \u2713"
                 self.buy_tool_button.style = discord.ButtonStyle.secondary
             else:
-                tool_cost = tool_info["cost"]
+                tool_cost = bloom_scaled_price(self.user_id, tool_info["cost"])
                 if balance < tool_cost:
                     self.buy_tool_button.disabled = True
                     self.buy_tool_button.label = f"Buy {tool_info['name']} (${tool_cost:,.0f})"
@@ -8982,7 +9848,7 @@ class HireView(discord.ui.View):
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ You already have the maximum of 5 gardeners!", ephemeral=True)
                 return
             
-            price = GARDENER_PRICES[slot_id - 1]
+            price = bloom_scaled_price(self.user_id, GARDENER_PRICES[slot_id - 1])
             balance = get_user_balance(self.user_id)
             
             if balance < price:
@@ -9037,7 +9903,7 @@ class HireView(discord.ui.View):
                 return
             
             tool_info = GARDENER_TOOLS.get(slot_id, {"name": "Tool", "cost": 0})
-            tool_cost = tool_info["cost"]
+            tool_cost = bloom_scaled_price(self.user_id, tool_info["cost"])
             balance = get_user_balance(self.user_id)
             
             if balance < tool_cost:
@@ -9107,6 +9973,7 @@ class GpuView(discord.ui.View):
         
         # Check if user owns this GPU
         already_owned = gpu_name in user_gpus
+        price = bloom_scaled_price(self.user_id, gpu_info["price"])
         
         embed = discord.Embed(
             title=f"🖥️ {gpu_name}",
@@ -9126,7 +9993,7 @@ class GpuView(discord.ui.View):
         )
         embed.add_field(
             name="Price",
-            value=f"**${gpu_info['price']:,.2f}** {'✅' if balance >= gpu_info['price'] else '❌'}",
+            value=f"**${price:,.2f}** {'✅' if balance >= price else '❌'}",
             inline=True
         )
         embed.add_field(
@@ -9149,7 +10016,7 @@ class GpuView(discord.ui.View):
         gpu_info = GPU_SHOP[self.current_page]
         gpu_name = gpu_info["name"]
         balance = get_user_balance(self.user_id)
-        price = gpu_info["price"]
+        price = bloom_scaled_price(self.user_id, gpu_info["price"])
         user_gpus = get_user_gpus(self.user_id)
         already_owned = gpu_name in user_gpus
         
@@ -9214,7 +10081,7 @@ class GpuView(discord.ui.View):
             
             gpu_info = GPU_SHOP[self.current_page]
             gpu_name = gpu_info["name"]
-            price = gpu_info["price"]
+            price = bloom_scaled_price(self.user_id, gpu_info["price"])
             balance = get_user_balance(self.user_id)
             user_gpus = get_user_gpus(self.user_id)
             
@@ -9438,60 +10305,150 @@ async def startdailyevent(interaction: discord.Interaction, event: str):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
-@bot.tree.command(name="endevent", description="[ADMIN] End the currently active hourly or daily event")
+@bot.tree.command(name="startcelestialevent", description="[ADMIN] Start a Solar Eclipse or Blood Moon event manually")
+@app_commands.default_permissions(administrator=True)
+@app_commands.choices(event=[
+    app_commands.Choice(name="☀️ Solar Eclipse", value="solar_eclipse"),
+    app_commands.Choice(name="🌙 Blood Moon", value="blood_moon")
+])
+@app_commands.choices(duration=[
+    app_commands.Choice(name="30 minutes", value=30),
+    app_commands.Choice(name="1 hour", value=60),
+    app_commands.Choice(name="2 hours", value=120),
+    app_commands.Choice(name="6 hours", value=360)
+])
+async def startcelestialevent(interaction: discord.Interaction, event: str, duration: int):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+
+        existing = get_active_event_by_type(event)
+        if existing and existing.get("end_time", 0) > time.time():
+            label = SOLAR_ECLIPSE_TITLE if event == "solar_eclipse" else BLOOD_MOON_TITLE
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ **Error**: **{label}** is already active. Use `/endevent` to end it first.",
+                ephemeral=True)
+            return
+        if existing:
+            clear_event(existing.get("event_id", ""))
+
+        # End any active hourly and daily (send their end embeds, then clear) before starting celestial
+        for ev_type in ("hourly", "daily"):
+            other = get_active_event_by_type(ev_type)
+            if other:
+                await _end_active_event_for_all_guilds(other)
+                print(f"Admin start celestial: ended active {ev_type} event.")
+
+        start_time = time.time()
+        end_time = start_time + duration * 60
+        event_id = f"{event}_{int(start_time)}"
+        title = SOLAR_ECLIPSE_TITLE if event == "solar_eclipse" else BLOOD_MOON_TITLE
+
+        set_active_event(
+            event_id=event_id,
+            event_type=event,
+            event_name=title,
+            start_time=start_time,
+            end_time=end_time,
+            effects={"event_id": event}
+        )
+
+        for guild in bot.guilds:
+            try:
+                await send_event_start_embed(guild, {
+                    "event_type": event,
+                    "event_id": event,
+                    "event_name": title,
+                    "effects": {"event_id": event}
+                }, duration)
+            except Exception as e:
+                print(f"Error sending celestial start embed to {guild.name}: {e}")
+
+        embed = discord.Embed(
+            title="✅ Celestial Event Started",
+            description=f"**{title}** for {duration} minutes.",
+            color=discord.Color.green()
+        )
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+        print(f"Admin {interaction.user.name} started celestial event: {title} for {duration} minutes")
+    except Exception as e:
+        print(f"Error in startcelestialevent command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+@bot.tree.command(name="endevent", description="[ADMIN] End the currently active hourly, daily, Solar Eclipse, or Blood Moon event")
 @app_commands.default_permissions(administrator=True)
 @app_commands.choices(event_type=[
     app_commands.Choice(name="hourly", value="hourly"),
-    app_commands.Choice(name="daily", value="daily")
+    app_commands.Choice(name="daily", value="daily"),
+    app_commands.Choice(name="Solar Eclipse", value="solar_eclipse"),
+    app_commands.Choice(name="Blood Moon", value="blood_moon")
 ])
 async def endevent(interaction: discord.Interaction, event_type: str):
     try:
         if not await safe_defer(interaction, ephemeral=True):
             return
-        
-        # Check if user has administrator permissions
+
         if not interaction.user.guild_permissions.administrator:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
             return
-        
-        # Get the active event
+
         active_event = get_active_event_by_type(event_type)
         if not active_event:
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"❌ **Error**: No active {event_type} event found.",
                 ephemeral=True)
             return
-        
-        # Get event info for the embed
+
+        # Celestial events: no lookup in HOURLY/DAILY_EVENTS; use event_name from active_event
+        if event_type in ("solar_eclipse", "blood_moon"):
+            display_name = active_event.get("event_name", event_type)
+            clear_event(active_event.get("event_id", ""))
+            for guild in bot.guilds:
+                try:
+                    await send_event_end_embed(guild, active_event)
+                except Exception as e:
+                    print(f"Error sending end embed to {guild.name}: {e}")
+            embed = discord.Embed(
+                title="✅ Event Ended Successfully",
+                description=f"**{display_name}**",
+                color=discord.Color.orange()
+            )
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+            print(f"Admin {interaction.user.name} ended {event_type} event: {display_name}")
+            return
+
+        # Hourly/daily: get event_info for emoji and name
         event_type_id = active_event.get("effects", {}).get("event_id")
         if not event_type_id:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: Could not find event information.", ephemeral=True)
             return
-        
+
         event_info = None
         if event_type == "hourly":
             event_info = next((e for e in HOURLY_EVENTS if e["id"] == event_type_id), None)
         elif event_type == "daily":
             event_info = next((e for e in DAILY_EVENTS if e["id"] == event_type_id), None)
-        
+
         if not event_info:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: Event info not found.", ephemeral=True)
             return
-        
-        # Clear the event from database
+
         clear_event(active_event.get("event_id", ""))
-        
-        # Send end message to all guilds
-        guilds_sent = 0
+
         for guild in bot.guilds:
             try:
                 await send_event_end_embed(guild, active_event)
-                guilds_sent += 1
             except Exception as e:
                 print(f"Error sending end embed to {guild.name}: {e}")
-        
+
         embed = discord.Embed(
-            title=f"✅ Event Ended Successfully",
+            title="✅ Event Ended Successfully",
             description=f"**{event_info['emoji']} {event_info['name']}**",
             color=discord.Color.orange()
         )
@@ -9499,6 +10456,107 @@ async def endevent(interaction: discord.Interaction, event_type: str):
         print(f"Admin {interaction.user.name} ended {event_type} event: {event_info['name']}")
     except Exception as e:
         print(f"Error in endevent command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+# Spawn command - Admin only: spawn any wild animal or boss in a chosen gather channel
+def _spawn_animal_choices():
+    choices = [app_commands.Choice(name=f"{a['emoji']} {a['name']}", value=a["name"].lower().replace(" ", "_")) for a in PVE_WILD_ANIMALS_SINGLE]
+    choices.append(app_commands.Choice(name="🐜 Bullet Ant Swarm", value="bullet_ant_swarm"))
+    return choices
+
+def _spawn_boss_choices():
+    non_twins = [b for b in PVE_BOSSES if b["id"] not in PVE_BOSSES_TWINS_IDS]
+    choices = [app_commands.Choice(name=f"{b['emoji']} {b['name']}", value=b["id"]) for b in non_twins]
+    choices.append(app_commands.Choice(name="👁️🔥 The Twins", value="twins"))
+    return choices
+
+@bot.tree.command(name="spawn", description="[ADMIN] Spawn a wild animal or boss in a gathering channel")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(animal="Animal or boss to spawn", channel="Gathering channel to spawn in")
+@app_commands.choices(animal=_spawn_animal_choices() + _spawn_boss_choices())
+@app_commands.choices(channel=[
+    app_commands.Choice(name="#forest", value="forest"),
+    app_commands.Choice(name="#grove", value="grove"),
+    app_commands.Choice(name="#marsh", value="marsh"),
+    app_commands.Choice(name="#bog", value="bog"),
+    app_commands.Choice(name="#mire", value="mire"),
+    app_commands.Choice(name="#underground-jungle", value="underground-jungle"),
+])
+async def spawn(interaction: discord.Interaction, animal: str, channel: str):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+
+        target = discord.utils.get(interaction.guild.text_channels, name=channel)
+        if not target:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ Channel **#{channel}** not found in this server.", ephemeral=True)
+            return
+
+        area = GATHERING_AREAS.get(channel)
+        if not area:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ **{channel}** is not a valid gathering channel.", ephemeral=True)
+            return
+        area_mult = area.get("multiplier", 1.0)
+
+        # The Twins (single choice spawns both Retinazer and Spazmatism as two boss embeds)
+        if animal == "twins":
+            await trigger_twins_boss_event(target, area_mult)
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"✅ Spawned **The Twins** in {target.mention}!", ephemeral=True)
+            return
+
+        # Boss spawn (single boss)
+        boss = next((b for b in PVE_BOSSES if b["id"] == animal), None)
+        if boss:
+            await trigger_boss_event(target, boss, area_mult)
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"✅ Spawned **{boss['name']}** in {target.mention}!", ephemeral=True)
+            return
+
+        # Bullet Ant Swarm
+        if animal == "bullet_ant_swarm":
+            await trigger_bullet_ant_swarm_event(target, area_mult)
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"✅ Spawned **Bullet Ant Swarm** in {target.mention}!", ephemeral=True)
+            return
+
+        # Single wild animal (match by name normalized to value form)
+        animal_key = animal.replace("_", " ").title()
+        if animal_key == "Homeless Man On Fent":
+            animal_key = "Homeless Man on Fent"
+        chosen = next((a for a in PVE_WILD_ANIMALS_SINGLE if a["name"] == animal_key), None)
+        if not chosen:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ Unknown animal **{animal}**.", ephemeral=True)
+            return
+
+        if target.id in active_pve_events:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ There is already an active PvE event in {target.mention}. Defeat it first.", ephemeral=True)
+            return
+
+        hp = random.randint(*chosen["hp_range"])
+        active_pve_events[target.id] = {"animal": chosen, "hp": hp, "start_time": time.time()}
+        embed = discord.Embed(
+            title=f"🚨 {chosen['emoji']} Wild {chosen['name']} Appeared! 🚨",
+            description=chosen["description"],
+            color=chosen["color"])
+        embed.add_field(name="HP", value=f"**{hp}** / **{hp}**\n{'🟥' * 20}", inline=False)
+        embed.add_field(name="⚔️ How to Fight", value="Press **Attack**! Each hit deals **1 damage** and earns **1 plant**!", inline=False)
+        embed.set_footer(text="All gathering commands are BLOCKED until the wild animal is defeated")
+        view = WildAnimalView(animal=chosen, hp=hp, channel_id=target.id, area_multiplier=area_mult)
+        await target.send(embed=embed, view=view)
+        await safe_interaction_response(interaction, interaction.followup.send,
+            f"✅ Spawned **{chosen['name']}** in {target.mention}!", ephemeral=True)
+    except Exception as e:
+        print(f"Error in spawn command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
@@ -11754,6 +12812,34 @@ async def send_event_start_embed(guild: discord.Guild, event: dict, duration_min
         print(f"ERROR: Bot does not have permission to send messages in #events channel in {guild.name}")
         return False
     
+    # Celestial events: Solar Eclipse and Blood Moon (custom embeds)
+    if event["event_type"] == "solar_eclipse":
+        embed = discord.Embed(
+            title=SOLAR_ECLIPSE_TITLE,
+            description=SOLAR_ECLIPSE_DESCRIPTION,
+            color=SOLAR_ECLIPSE_COLOR
+        )
+        embed.set_footer(text=SOLAR_ECLIPSE_FOOTER)
+        try:
+            await events_channel.send("@here", embed=embed)
+            return True
+        except Exception as e:
+            print(f"ERROR sending Solar Eclipse start embed in {guild.name}: {e}")
+            return False
+    if event["event_type"] == "blood_moon":
+        embed = discord.Embed(
+            title=BLOOD_MOON_TITLE,
+            description=BLOOD_MOON_DESCRIPTION,
+            color=BLOOD_MOON_COLOR
+        )
+        embed.set_footer(text=BLOOD_MOON_FOOTER)
+        try:
+            await events_channel.send("@here", embed=embed)
+            return True
+        except Exception as e:
+            print(f"ERROR sending Blood Moon start embed in {guild.name}: {e}")
+            return False
+    
     event_info = None
     if event["event_type"] == "hourly":
         event_info = next((e for e in HOURLY_EVENTS if e["id"] == event["event_id"]), None)
@@ -11817,6 +12903,30 @@ async def send_event_end_embed(guild: discord.Guild, event: dict):
     if not events_channel.permissions_for(guild.me).send_messages:
         print(f"ERROR: Bot does not have permission to send messages in #events channel in {guild.name}")
         return False
+    
+    # Celestial events: Solar Eclipse and Blood Moon (custom end embeds)
+    if event["event_type"] == "solar_eclipse":
+        embed = discord.Embed(
+            title=f"{SOLAR_ECLIPSE_TITLE} Event Ended",
+            description="Conditions are back to normal. Stay tuned for any future events...",
+            color=SOLAR_ECLIPSE_COLOR
+        )
+        try:
+            await events_channel.send(embed=embed)
+        except Exception as e:
+            print(f"Error sending Solar Eclipse end embed in {guild.name}: {e}")
+        return
+    if event["event_type"] == "blood_moon":
+        embed = discord.Embed(
+            title=f"{BLOOD_MOON_TITLE} Event Ended",
+            description="Conditions are back to normal. Stay tuned for any future events...",
+            color=BLOOD_MOON_COLOR
+        )
+        try:
+            await events_channel.send(embed=embed)
+        except Exception as e:
+            print(f"Error sending Blood Moon end embed in {guild.name}: {e}")
+        return
     
     # Get the actual event ID from effects (not the database event_id)
     event_type_id = event.get("effects", {}).get("event_id")
@@ -11955,7 +13065,9 @@ async def hourly_event_check():
                     clear_event(existing_hourly.get("event_id", ""))
                     existing_hourly = None
             
-            if not existing_hourly:
+            # Do not start hourly events during Solar Eclipse or Blood Moon
+            celestial_active = get_active_event_by_type("solar_eclipse") or get_active_event_by_type("blood_moon")
+            if not existing_hourly and not celestial_active:
                 # 50% chance to trigger an event
                 if random.random() < 0.5:
                     # Select random hourly event
@@ -12074,7 +13186,9 @@ async def daily_event_check():
                     clear_event(existing_daily.get("event_id", ""))
                     existing_daily = None
             
-            if not existing_daily:
+            # Do not start daily events during Solar Eclipse or Blood Moon
+            celestial_active = get_active_event_by_type("solar_eclipse") or get_active_event_by_type("blood_moon")
+            if not existing_daily and not celestial_active:
                 # 10% chance to trigger an event
                 if random.random() < 0.10:
                     # Select random daily event
@@ -12171,6 +13285,114 @@ async def event_cleanup_task():
             await asyncio.sleep(60)  # Check every minute
         except Exception as e:
             print(f"Error in event_cleanup_task: {e}")
+            await asyncio.sleep(60)
+
+
+async def _end_active_event_for_all_guilds(event: dict):
+    """Send event end embed to #events in all guilds and clear the event from DB."""
+    for guild in bot.guilds:
+        try:
+            await send_event_end_embed(guild, event)
+        except Exception as e:
+            print(f"Error sending event end embed to {guild.name}: {e}")
+    clear_event(event.get("event_id", ""))
+
+
+async def celestial_event_check():
+    """At 4:30 UTC roll 50% for Solar Eclipse (until 19:30). At 19:30 UTC roll 50% for Blood Moon (until 4:30 next day). Start/end embeds in #events."""
+    await bot.wait_until_ready()
+    await asyncio.sleep(15)
+    last_solar_trigger_date = None  # (year, month, day)
+    last_blood_trigger_date = None
+    while not bot.is_closed():
+        try:
+            clear_expired_events()
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            now_ts = now_utc.timestamp()
+            today = (now_utc.year, now_utc.month, now_utc.day)
+
+            # End expired celestial events (send end embed, then clear)
+            se = get_active_event_by_type("solar_eclipse")
+            if se and now_ts >= se.get("end_time", 0):
+                await _end_active_event_for_all_guilds(se)
+                print("Solar Eclipse ended (time expired).")
+            bm = get_active_event_by_type("blood_moon")
+            if bm and now_ts >= bm.get("end_time", 0):
+                await _end_active_event_for_all_guilds(bm)
+                print("Blood Moon ended (time expired).")
+
+            # At 4:30 UTC: 50% chance to start Solar Eclipse (day: 4:30 -> 19:30)
+            if (now_utc.hour, now_utc.minute) == CELESTIAL_DAY_START_UTC and today != last_solar_trigger_date:
+                last_solar_trigger_date = today
+                if not get_active_event_by_type("solar_eclipse") and random.random() < CELESTIAL_TRIGGER_CHANCE:
+                    # End any active hourly and daily (send their end embeds, then clear)
+                    for ev_type in ("hourly", "daily"):
+                        existing = get_active_event_by_type(ev_type)
+                        if existing:
+                            await _end_active_event_for_all_guilds(existing)
+                            print(f"Ended active {ev_type} event for Solar Eclipse start.")
+                    end_dt = now_utc.replace(hour=CELESTIAL_NIGHT_START_UTC[0], minute=CELESTIAL_NIGHT_START_UTC[1], second=0, microsecond=0)
+                    end_ts = end_dt.timestamp()
+                    event_id = f"solar_eclipse_{int(now_ts)}"
+                    set_active_event(
+                        event_id=event_id,
+                        event_type="solar_eclipse",
+                        event_name=SOLAR_ECLIPSE_TITLE,
+                        start_time=now_ts,
+                        end_time=end_ts,
+                        effects={"event_id": "solar_eclipse"}
+                    )
+                    for guild in bot.guilds:
+                        try:
+                            await send_event_start_embed(guild, {
+                                "event_type": "solar_eclipse",
+                                "event_id": "solar_eclipse",
+                                "event_name": SOLAR_ECLIPSE_TITLE,
+                                "effects": {"event_id": "solar_eclipse"}
+                            }, 0)
+                        except Exception as e:
+                            print(f"Error sending Solar Eclipse start to {guild.name}: {e}")
+                    print("Started Solar Eclipse (50% roll at 4:30 UTC).")
+
+            # At 19:30 UTC: 50% chance to start Blood Moon (night: 19:30 -> 4:30 next day)
+            if (now_utc.hour, now_utc.minute) == CELESTIAL_NIGHT_START_UTC and today != last_blood_trigger_date:
+                last_blood_trigger_date = today
+                if not get_active_event_by_type("blood_moon") and random.random() < CELESTIAL_TRIGGER_CHANCE:
+                    for ev_type in ("hourly", "daily"):
+                        existing = get_active_event_by_type(ev_type)
+                        if existing:
+                            await _end_active_event_for_all_guilds(existing)
+                            print(f"Ended active {ev_type} event for Blood Moon start.")
+                    next_day = now_utc.date() + datetime.timedelta(days=1)
+                    end_dt = now_utc.replace(year=next_day.year, month=next_day.month, day=next_day.day,
+                                             hour=CELESTIAL_DAY_START_UTC[0], minute=CELESTIAL_DAY_START_UTC[1], second=0, microsecond=0)
+                    end_ts = end_dt.timestamp()
+                    event_id = f"blood_moon_{int(now_ts)}"
+                    set_active_event(
+                        event_id=event_id,
+                        event_type="blood_moon",
+                        event_name=BLOOD_MOON_TITLE,
+                        start_time=now_ts,
+                        end_time=end_ts,
+                        effects={"event_id": "blood_moon"}
+                    )
+                    for guild in bot.guilds:
+                        try:
+                            await send_event_start_embed(guild, {
+                                "event_type": "blood_moon",
+                                "event_id": "blood_moon",
+                                "event_name": BLOOD_MOON_TITLE,
+                                "effects": {"event_id": "blood_moon"}
+                            }, 0)
+                        except Exception as e:
+                            print(f"Error sending Blood Moon start to {guild.name}: {e}")
+                    print("Started Blood Moon (50% roll at 19:30 UTC).")
+
+            await asyncio.sleep(60)
+        except Exception as e:
+            print(f"Error in celestial_event_check: {e}")
+            import traceback
+            traceback.print_exc()
             await asyncio.sleep(60)
 
 

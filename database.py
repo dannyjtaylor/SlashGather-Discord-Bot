@@ -110,6 +110,8 @@ def _ensure_user_document(user_id: int) -> None:
         "tree_rings": 0,
         "bloom_count": 0,
         "bloom_cycle_plants": 0,
+        "pve_defeated": [],
+        "total_pve_defeats": 0,
         "last_water_time": 0.0,
         "consecutive_water_days": 0,
         "water_count": 0,
@@ -122,6 +124,7 @@ def _ensure_user_document(user_id: int) -> None:
             "water_streak": 0,
             "blooming": 0,
             "russian_roulette": 0,
+            "slayer": 0,
             "hidden_achievements_discovered": 0,
             "hidden_achievements": {
                 "john_rockefeller": False,
@@ -133,7 +136,22 @@ def _ensure_user_document(user_id: int) -> None:
                 "almost_got_it": False,
                 "maxed_out": False,
                 "social_butterfly": False,
-                "high_reroller": False
+                "high_reroller": False,
+                "no_monkey_business": False,
+                "grizzly_victory": False,
+                "black_bear_blues": False,
+                "polar_power": False,
+                "tiger_tamer": False,
+                "panther_pounce": False,
+                "homeless_hero": False,
+                "bullet_ant_squasher": False,
+                "skunkape_slayer": False,
+                "godzilla_king": False,
+                "mothron_masher": False,
+                "plantera_crusher": False,
+                "retinazer_retired": False,
+                "spazmatism_silenced": False,
+                "pve_master": False,
             },
             "areas_unlocked": 0
         },
@@ -1535,6 +1553,7 @@ def wipe_user_all(user_id: int) -> None:
                 "water_streak": 0,
                 "blooming": 0,
                 "russian_roulette": 0,
+                "slayer": 0,
                 "hidden_achievements_discovered": 0,
                 "hidden_achievements": {
                     "john_rockefeller": False,
@@ -1546,10 +1565,27 @@ def wipe_user_all(user_id: int) -> None:
                     "almost_got_it": False,
                     "maxed_out": False,
                     "social_butterfly": False,
-                    "high_reroller": False
+                    "high_reroller": False,
+                    "no_monkey_business": False,
+                    "grizzly_victory": False,
+                    "black_bear_blues": False,
+                    "polar_power": False,
+                    "tiger_tamer": False,
+                    "panther_pounce": False,
+                    "homeless_hero": False,
+                    "bullet_ant_squasher": False,
+                    "skunkape_slayer": False,
+                    "godzilla_king": False,
+                    "mothron_masher": False,
+                    "plantera_crusher": False,
+                    "retinazer_retired": False,
+                    "spazmatism_silenced": False,
+                    "pve_master": False,
                 },
                 "areas_unlocked": 0
             },
+            "pve_defeated": [],
+            "total_pve_defeats": 0,
             "coinflip_count": 0,
             "coinflip_win_streak": 0,
             "gather_command_count": 0,
@@ -1682,6 +1718,40 @@ def unlock_hidden_achievement(user_id: int, achievement_name: str) -> bool:
         upsert=True,
     )
     return True
+
+
+def add_pve_defeat(user_id: int, enemy_id: str) -> None:
+    """Record that the user participated in defeating an enemy (animal or boss). Adds enemy_id to pve_defeated if new, increments total_pve_defeats."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    users.update_one(
+        {"_id": int(user_id)},
+        {
+            "$addToSet": {"pve_defeated": enemy_id},
+            "$inc": {"total_pve_defeats": 1},
+        },
+        upsert=True,
+    )
+
+
+def get_user_pve_defeated(user_id: int) -> list:
+    """Get list of enemy ids the user has ever defeated (animals + bosses)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"pve_defeated": 1})
+    if not doc:
+        return []
+    return list(doc.get("pve_defeated", []))
+
+
+def get_user_total_pve_defeats(user_id: int) -> int:
+    """Get user's total number of PvE defeats (each animal/boss defeat counts once per event)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"total_pve_defeats": 1})
+    if not doc:
+        return 0
+    return int(doc.get("total_pve_defeats", 0))
 
 
 def get_user_coinflip_count(user_id: int) -> int:
