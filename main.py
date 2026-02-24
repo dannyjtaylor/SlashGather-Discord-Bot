@@ -6017,9 +6017,11 @@ async def _post_rares_plant(guild: discord.Guild, user: discord.Member, source: 
     lead_emoji = "✨" if label.startswith("GMO ") else "🌱"
     # Use get_item_display_emoji so Flowey/Raspberry (custom server emojis) display correctly in #rares
     item_emoji = get_item_display_emoji(item_name)
+    # Avoid double emoji when item name already includes it (e.g. "Daffodil 🌼")
+    item_display = f"{item_name} {item_emoji}" if item_emoji and item_emoji not in item_name else item_name
     # e.g. "🌱 @User caught a ONE IN A MILLION *Strawberry 🍓* in a GATHER worth $2,216,775.69! | **[FOREST]**"
     msg = (
-        f"{lead_emoji} {user.mention} caught a **{label}** *{item_name} {item_emoji}* "
+        f"{lead_emoji} {user.mention} caught a **{label}** *{item_display}* "
         f"in a **{source}** worth **${value:,.2f}**! | **{area_tag}**"
     )
     await _post_to_rares_channel(guild, msg)
