@@ -139,10 +139,15 @@ from database import (
     add_pve_defeat,
     get_user_pve_defeated,
     get_user_total_pve_defeats,
+    get_user_total_steals,
     get_user_coinflip_count,
     increment_user_coinflip_count,
     get_user_coinflip_win_streak,
     set_user_coinflip_win_streak,
+    get_user_slots_spin_count,
+    increment_user_slots_spin_count,
+    get_user_slots_win_streak,
+    set_user_slots_win_streak,
     get_user_gather_command_count,
     increment_user_gather_command_count,
     get_user_harvest_command_count,
@@ -1266,11 +1271,11 @@ GATHERING_AREAS = {
     "underground-jungle": {
         "display_name": "#underground-jungle",
         "emoji": "🌴",
-        "multiplier": 12.0,
+        "multiplier": 1.1,
         "gather_boost": 1.1,
         "required_planter_rank": "PLANTER II",
         "required_planter_level": 2,
-        "unlock_cost": 1_000_000_000,
+        "unlock_cost": 100_000,
         "unlocked_by_default": False,
         "previous_area": "mire",
         "order": 5
@@ -1279,13 +1284,15 @@ GATHERING_AREAS = {
 
 VALID_GATHERING_CHANNELS = set(GATHERING_AREAS.keys())
 
-# Day/Night (Terraria-style): Solar Eclipse = day (4:30 AM–7:29 PM UTC), Blood Moon = night (7:30 PM–4:29 AM UTC). Spawn boost during these.
+# Day/Night (Terraria-style): Solar Eclipse = day (4:30 AM–7:29 PM EST), Blood Moon = night (7:30 PM–4:29 AM EST). Spawn boost during these.
 def _is_solar_eclipse_or_blood_moon():
-    """Return (is_solar_eclipse, is_blood_moon) based on UTC hour. Day 4:30–19:29, Night 19:30–4:29."""
-    from datetime import datetime
-    now = datetime.utcnow()
-    h = now.hour + now.minute / 60.0 + now.second / 3600.0
-    is_day = 4.5 <= h < 19.5   # 4:30 AM – 7:29 PM
+    """Return (is_solar_eclipse, is_blood_moon) based on EST hour. Day 4:30–19:29 EST, Night 19:30–4:29 EST."""
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    now_utc = datetime.now(timezone.utc)
+    now_est = now_utc.astimezone(ZoneInfo("America/New_York"))
+    h = now_est.hour + now_est.minute / 60.0 + now_est.second / 3600.0
+    is_day = 4.5 <= h < 19.5   # 4:30 AM – 7:29 PM EST
     is_night = not is_day
     return is_day, is_night
 
@@ -1295,7 +1302,7 @@ def _pve_spawn_multiplier():
         return 2.5, 2.5
     return 1.0, 1.0
 
-# Solar Eclipse and Blood Moon: 50% chance at respective start times (4:30 UTC, 19:30 UTC). Display in #events with start/end embeds.
+# Solar Eclipse and Blood Moon: 50% chance at respective start times (4:30 EST, 19:30 EST). Display in #events with start/end embeds.
 SOLAR_ECLIPSE_TITLE = "A Solar Eclipse is happening!"
 SOLAR_ECLIPSE_DESCRIPTION = "A Solar Eclipse is happening!"
 SOLAR_ECLIPSE_FOOTER = "Wild animals and bosses are more common!"
@@ -1304,16 +1311,16 @@ BLOOD_MOON_DESCRIPTION = "The Blood Moon is rising..."
 BLOOD_MOON_FOOTER = "Wild animals and bosses are more common!"
 SOLAR_ECLIPSE_COLOR = 0xFF8C00   # bright orange
 BLOOD_MOON_COLOR = 0xDC143C      # bright red (crimson, distinct from discord red)
-CELESTIAL_DAY_START_UTC = (4, 30)   # 4:30 AM UTC
-CELESTIAL_NIGHT_START_UTC = (19, 30)  # 7:30 PM UTC
+CELESTIAL_DAY_START_EST = (4, 30)   # 4:30 AM EST (Solar Eclipse start)
+CELESTIAL_NIGHT_START_EST = (19, 30)  # 7:30 PM EST (Blood Moon start)
 CELESTIAL_TRIGGER_CHANCE = 0.5   # 50% at start time, Terraria-style
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PvE Wild Animal Event System
 # ═══════════════════════════════════════════════════════════════════════════════
 
-PVE_TRIGGER_CHANCE_GATHER = 0.02   # 2% per /gather (event: 5%)
-PVE_TRIGGER_CHANCE_HARVEST = 0.01  # 1% per /harvest (event: 2.5%)
+PVE_TRIGGER_CHANCE_GATHER = 0.08   # 8% per /gather for animals (event multiplies); animals much more common than bosses
+PVE_TRIGGER_CHANCE_HARVEST = 0.04  # 4% per /harvest for animals (event multiplies)
 
 # Steal: stealable chance per successful gather/harvest (no PvE when stealable; crit cannot be stolen)
 STEAL_CHANCE_GATHER = 0.01   # 1% per /gather
@@ -1409,7 +1416,7 @@ BULLET_ANT_ANIMAL = next(a for a in PVE_WILD_ANIMALS if a.get("is_swarm_ant"))
 active_pve_events: dict[int, dict] = {}
 
 # Bosses: block all gather channels in guild, @here on warning, rarer spawn. 1-min warning embed before spawn.
-PVE_BOSS_TRIGGER_CHANCE = 0.02  # 2% per gather/harvest (when no boss active); day/night multiplies this
+PVE_BOSS_TRIGGER_CHANCE = 0.006  # 0.6% per gather/harvest (when no boss active); day/night multiplies; rarer than animals
 PVE_BOSSES = [
     {
         "id": "skunkape",
@@ -1420,6 +1427,7 @@ PVE_BOSSES = [
         "description": "The ground is shaking... A Skunkape emerges from the wood, wearing a Winter Haven Technology Services polo!",
         "defeat_msg": "The Skunkape bellows one last time and lumbers into the mist, back to his desk!",
         "pre_spawn_text": "A foul stench fills the air…",
+        "server_defeat_msg": "The Skunkape has been defeated! Conditions return to normal.",
     },
     {
         "id": "godzilla",
@@ -1430,6 +1438,7 @@ PVE_BOSSES = [
         "description": "The king of the monsters is trampling everything!",
         "defeat_msg": "Godzilla roars in defeat and sinks beneath the waves. The gathering grounds are safe... for now...",
         "pre_spawn_text": "The ground trembles...",
+        "server_defeat_msg": "Godzilla has been defeated! Conditions return to normal.",
     },
     {
         "id": "mothron",
@@ -1440,6 +1449,7 @@ PVE_BOSSES = [
         "description": "The sky darkens as Mothron descends—a monstrous moth of nightmare! It's blocking all gathering channels; only a united effort can drive it off!",
         "defeat_msg": "Mothron shrieks and flees into the night!",
         "pre_spawn_text": "Wings blot out the Solar Eclipse...",
+        "server_defeat_msg": "Mothron has been defeated! Conditions return to normal.",
     },
     {
         "id": "plantera",
@@ -1450,6 +1460,18 @@ PVE_BOSSES = [
         "description": "Somebody broke a Plantera Bulb!",
         "defeat_msg": "Plantera crumples into a heap of vines and petals!",
         "pre_spawn_text": "The jungle grows restless...",
+        "server_defeat_msg": "Plantera has been defeated! Conditions return to normal.",
+    },
+    {
+        "id": "wither",
+        "name": "The Wither",
+        "emoji": "💀",
+        "hp_range": (300, 300),
+        "color": 0x1a0a1a,
+        "description": "Somebody summoned the Wither! It's blowing up all the gathering grounds!",
+        "defeat_msg": "The Wither has been slain.. It drops a Nether Star!",
+        "pre_spawn_text": "The air grows cold and heavy...",
+        "server_defeat_msg": "The Wither has been defeated! Conditions return to normal.",
     },
     {
         "id": "retinazer",
@@ -1460,6 +1482,7 @@ PVE_BOSSES = [
         "description": "It's hovering above all the gathering grounds, firing lasers at anything that moves!",
         "defeat_msg": "Retinazer explodes into Hallowed Bars and Souls of Sight!",
         "pre_spawn_text": "This is going to be a terrible night...",
+        "server_defeat_msg": "The Twins have been defeated! Conditions return to normal.",
         "twins_pair": "spazmatism",
     },
     {
@@ -1469,13 +1492,29 @@ PVE_BOSSES = [
         "hp_range": (350, 350),
         "color": 0x228b22,
         "description": "It's tearing through the area, lighting the forest on fire with Cursed Flame!",
-        "defeat_msg": "Spazmatism sputters out and falls, crashing into the ground and exploding into Hallowed Bars and Souls of Sight! With both Twins defeated, the gathering channels are finally clear!",
+        "defeat_msg": "Spazmatism sputters out and falls, crashing into the ground and exploding into Hallowed Bars and Souls of Sight!",
         "pre_spawn_text": "This is going to be a terrible night...",
+        "server_defeat_msg": "The Twins have been defeated! Conditions return to normal.",
         "twins_pair": "retinazer",
+    },
+    {
+        "id": "ender_dragon",
+        "name": "Ender Dragon",
+        "emoji": "🐉",
+        "hp_range": (500, 500),
+        "color": 0x4a0080,
+        "description": "The Ender Dragon appears!",
+        "defeat_msg": "The Ender Dragon lets out a final roar and dissolves into motes of light. The End has been conquered!",
+        "pre_spawn_text": "The void stirs… the fabric of the world tears. Something from the End is awakening…",
+        "server_defeat_msg": "The **Ender Dragon** has been defeated! The gathering grounds are safe once more.",
     },
 ]
 # Twins: spawn both Retinazer and Spazmatism together; both must be defeated to unblock channels.
 PVE_BOSSES_TWINS_IDS = {"retinazer", "spazmatism"}
+# Ender Dragon: spawns in trigger channel; other channels get Obsidian Towers (End Crystals). Dragon regens 2 HP/sec per standing tower.
+ENDER_DRAGON_ID = "ender_dragon"
+ENDER_DRAGON_TOWER_HP = 20
+ENDER_DRAGON_REGEN_PER_CRYSTAL = 2
 # Enemy id -> hidden achievement key (for first-time defeat)
 PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT = {
     "monkey": "no_monkey_business",
@@ -1490,17 +1529,27 @@ PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT = {
     "godzilla": "godzilla_king",
     "mothron": "mothron_masher",
     "plantera": "plantera_crusher",
+    "wither": "wither_slayer",
     "retinazer": "retinazer_retired",
     "spazmatism": "spazmatism_silenced",
+    "ender_dragon": "ender_dragon_slayer",
 }
 PVE_MASTER_REQUIRED_IDS = frozenset(PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT.keys())
-active_boss_events: dict[int, list] = {}  # guild_id -> list of {channel_id, boss, hp, max_hp, attackers, message_id?}
+active_boss_events: dict[int, list] = {}  # guild_id -> list of {channel_id, boss, hp, max_hp}
+# Ender Dragon: guild_id -> set of channel_ids that still have an active (not broken) Obsidian Tower
+ender_dragon_towers: dict[int, set[int]] = {}
+# Ender Dragon: guild_id -> {user_id: total_tower_hits} for plant rewards when dragon is defeated (towers are NOT counted as enemies defeated)
+ender_dragon_tower_attackers: dict[int, dict[int, int]] = {}
+# Ender Dragon regen task per guild (so we can cancel when dragon is defeated)
+ender_dragon_regen_tasks: dict[int, asyncio.Task] = {}
+# When a boss is defeated we append (boss, attackers); when all bosses in the event are dead we distribute and broadcast
+_pve_boss_defeated_pending: dict[int, list] = {}  # guild_id -> [(boss, attackers), ...]
 plantera_bulb_eligible_guilds: dict[int, float] = {}  # guild_id -> timestamp when last boss was defeated (for Plantera bulb chance)
 PLANTERA_BULB_CHANCE = 0.15
 PLANTERA_BULB_MAX_AGE_SEC = 86400  # 24h
-# #underground-jungle: higher wild animal spawn, slightly higher boss spawn
-UNDERGROUND_JUNGLE_ANIMAL_SPAWN_MULT = 1.5
-UNDERGROUND_JUNGLE_BOSS_SPAWN_MULT = 1.2
+# #underground-jungle: slightly higher wild animal and boss spawn
+UNDERGROUND_JUNGLE_ANIMAL_SPAWN_MULT = 1.15
+UNDERGROUND_JUNGLE_BOSS_SPAWN_MULT = 1.1
 
 # Channel name for auto-logging rare occurrences (e.g. One in a Million, Mikellion, netherite+ imbues)
 RARES_CHANNEL_NAME = "rares"
@@ -1549,8 +1598,12 @@ def check_area_access(member, channel_name: str, user_id: int) -> tuple[bool, st
     if not unlocked_areas.get(channel_name, False):
         return False, f"❌ You haven't unlocked **{area['display_name']}** yet! Use `/unlock {channel_name}` to unlock it for **${area['unlock_cost']:,}**."
 
-    # Check planter rank requirement
-    user_planter_level = get_user_planter_level(member)
+    # Check planter rank: use the higher of Discord role level and DB-derived level (bloom_cycle_plants)
+    # so e.g. PLANTER X who just leveled up can use mire even if role hasn't synced yet
+    role_level = get_user_planter_level(member)
+    cycle_plants = get_user_bloom_cycle_plants(user_id)
+    db_level = get_planter_level_from_total_items(cycle_plants)
+    user_planter_level = max(role_level, db_level)
     if user_planter_level < area["required_planter_level"]:
         return False, f"❌ You must be **{area['required_planter_rank']}** or above to gather in **{area['display_name']}**! You need to gather more plants to rank up."
 
@@ -2287,6 +2340,156 @@ ACHIEVEMENTS = {
                 "boost": 1.5  # 150%
             }
         ]
+    },
+    "slots": {
+        "name": "Slots Achievement Category",
+        "levels": [
+            {
+                "level": 0,
+                "name": "Lever? I Hardly Know Her",
+                "description": "You haven't spun the slots yet! Do /slots!",
+                "threshold": 0,
+                "boost": 0.0
+            },
+            {
+                "level": 1,
+                "name": "First Pull",
+                "description": "Spin /slots 1 time",
+                "threshold": 1,
+                "boost": 0.005  # 0.5%
+            },
+            {
+                "level": 2,
+                "name": "Gamble Addict",
+                "description": "Spin /slots 5 times",
+                "threshold": 5,
+                "boost": 0.01  # 1%
+            },
+            {
+                "level": 3,
+                "name": "I Love Reels",
+                "description": "Spin /slots 25 times",
+                "threshold": 25,
+                "boost": 0.03  # 3%
+            },
+            {
+                "level": 4,
+                "name": "House Favorite",
+                "description": "Spin /slots 100 times",
+                "threshold": 100,
+                "boost": 0.07  # 7%
+            },
+            {
+                "level": 5,
+                "name": "Slot Addict",
+                "description": "Spin /slots 500 times",
+                "threshold": 500,
+                "boost": 0.15  # 15%
+            },
+            {
+                "level": 6,
+                "name": "SURELY this one will be the jackpot, right?",
+                "description": "Spin /slots 1,000 times",
+                "threshold": 1000,
+                "boost": 0.25  # 25%
+            },
+            {
+                "level": 7,
+                "name": "Vegas Regular",
+                "description": "Spin /slots 5,000 times",
+                "threshold": 5000,
+                "boost": 0.40  # 40%
+            },
+            {
+                "level": 8,
+                "name": "I Prefer YouTube Shorts Instead Of Reels Anyway",
+                "description": "Spin /slots 10,000 times",
+                "threshold": 10000,
+                "boost": 0.60  # 60%
+            }
+        ]
+    },
+    "stealing": {
+        "name": "Stealing Achievement Category",
+        "levels": [
+            {
+                "level": 0,
+                "name": "Honest Gardener",
+                "description": "You haven't stolen any harvests or gathers yet!",
+                "threshold": 0,
+                "boost": 0.0
+            },
+            {
+                "level": 1,
+                "name": "Level 1 Crook",
+                "description": "Steal 1 gather or harvest",
+                "threshold": 1,
+                "boost": 0.02  # 2%
+            },
+            {
+                "level": 2,
+                "name": "Bandit",
+                "description": "Steal 5 gathers/harvests",
+                "threshold": 5,
+                "boost": 0.05  # 5%
+            },
+            {
+                "level": 3,
+                "name": "Highway Robbery",
+                "description": "Steal 15 gathers/harvests",
+                "threshold": 15,
+                "boost": 0.10  # 10%
+            },
+            {
+                "level": 4,
+                "name": "Pillager",
+                "description": "Steal 40 gathers/harvests",
+                "threshold": 40,
+                "boost": 0.20  # 20%
+            },
+            {
+                "level": 5,
+                "name": "Grand Theft Auto",
+                "description": "Steal 100 gathers/harvests",
+                "threshold": 100,
+                "boost": 0.40  # 40%
+            },
+            {
+                "level": 6,
+                "name": "Phantom Thief",
+                "description": "Steal 250 gathers/harvests",
+                "threshold": 250,
+                "boost": 0.70  # 70%
+            },
+            {
+                "level": 7,
+                "name": "They'll Never Know It Was Me",
+                "description": "Steal 500 gathers/harvests",
+                "threshold": 500,
+                "boost": 1.0  # 100%
+            },
+            {
+                "level": 8,
+                "name": "Pickpocket 100",
+                "description": "Steal 1,000 gathers/harvests",
+                "threshold": 1000,
+                "boost": 1.5  # 150%
+            },
+            {
+                "level": 9,
+                "name": "Untouchable",
+                "description": "Steal 2,500 gathers/harvests",
+                "threshold": 2500,
+                "boost": 2.0  # 200%
+            },
+            {
+                "level": 10,
+                "name": "Level 99 Mafia Boss",
+                "description": "Steal 5,000 gathers/harvests",
+                "threshold": 5000,
+                "boost": 3.0  # 300%
+            }
+        ]
     }
 }
 
@@ -2325,6 +2528,11 @@ HIDDEN_ACHIEVEMENTS = {
     "almost_got_it": {
         "name": "Almost Got It",
         "description": "Do a /gather when there's less than 1 second before the cooldown is up, but you're still on cooldown",
+        "boost": 0.20  # 20%
+    },
+    "almost_got_it_too": {
+        "name": "Almost Got It, Too",
+        "description": "Do a /harvest when there's 0 seconds remaining, but you're still on cooldown",
         "boost": 0.20  # 20%
     },
     "maxed_out": {
@@ -2402,6 +2610,11 @@ HIDDEN_ACHIEVEMENTS = {
         "description": "Defeat Plantera",
         "boost": 0.05  # 5%
     },
+    "wither_slayer": {
+        "name": "Witherfall",
+        "description": "Defeat The Wither",
+        "boost": 0.05  # 5%
+    },
     "retinazer_retired": {
         "name": "Ophthalmologist",
         "description": "Defeat Retinazer (The Twins)",
@@ -2416,11 +2629,21 @@ HIDDEN_ACHIEVEMENTS = {
         "name": "Master Mode",
         "description": "Defeat every type of animal and boss at least once",
         "boost": 0.25  # 25%
+    },
+    "one_in_a_mikellion": {
+        "name": "One in a Mikellion",
+        "description": "Gather or harvest a plant with Mikellion rarity",
+        "boost": 2.0  # 200%
+    },
+    "slots_three_in_a_row": {
+        "name": "777",
+        "description": "Win /slots 3 times in a row",
+        "boost": 0.20  # 20%
     }
 }
 
 # Total number of hidden achievements
-TOTAL_HIDDEN_ACHIEVEMENTS = 25
+TOTAL_HIDDEN_ACHIEVEMENTS = 28
 
 
 def check_maxed_out_achievement(user_id: int) -> bool:
@@ -2647,6 +2870,43 @@ def sync_beta_tester_from_member(member: discord.Member) -> None:
 def get_beta_tester_money_multiplier(user_id: int) -> float:
     """Return 1.3 if user has BETA TESTER role (cached in DB), else 1.0."""
     return BETA_TESTER_MONEY_MULTIPLIER if get_user_beta_tester(user_id) else 1.0
+
+
+NETHER_STAR_MONEY_MULTIPLIER = 1.15
+
+
+def get_nether_star_money_multiplier(user_id: int) -> float:
+    """Return 1.15 if user has Nether Star (shop item), else 1.0."""
+    return NETHER_STAR_MONEY_MULTIPLIER if has_shop_item(user_id, "nether_star") else 1.0
+
+
+PALACE_TREASURE_MONEY_MULTIPLIER = 1.5
+PALACE_TREASURE_STEAL_CHANCE_MULTIPLIER = 3.0
+
+
+def get_palace_treasure_money_multiplier(user_id: int) -> float:
+    """Return 1.5 if user has Palace Treasure (shop item), else 1.0."""
+    return PALACE_TREASURE_MONEY_MULTIPLIER if has_shop_item(user_id, "palace_treasure") else 1.0
+
+
+def get_steal_chance_multiplier(user_id: int) -> float:
+    """Return 3.0 if user (victim) has Palace Treasure, else 1.0. Used when rolling if gather/harvest is stealable."""
+    return PALACE_TREASURE_STEAL_CHANCE_MULTIPLIER if has_shop_item(user_id, "palace_treasure") else 1.0
+
+
+def get_pve_damage_multiplier(user_id: int, is_boss: bool = False) -> int:
+    """Return total damage per hit for PvE (wild animals and optionally bosses). Base 1, weapons stack additively.
+    Zenith +2, Split Soul Katana +1, Inverted Spear +1 (enemies and bosses), Diamond Sword +1."""
+    damage = 1
+    if has_shop_item(user_id, "zenith"):
+        damage += 2  # 1 -> 3
+    if has_shop_item(user_id, "split_soul_katana"):
+        damage += 1  # +1 for enemies
+    if has_shop_item(user_id, "inverted_spear_of_heaven"):
+        damage += 1  # +1 for enemies and bosses
+    if has_shop_item(user_id, "diamond_sword"):
+        damage += 1  # +1 for enemies
+    return damage
 
 
 def can_gather(user_id, user_data=None, active_events=None, full_data=None):
@@ -3005,6 +3265,20 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     final_value *= beta_tester_mult
     extra_money_from_beta_tester = final_value * (beta_tester_mult - 1.0) / beta_tester_mult if beta_tester_mult > 1.0 else 0.0
 
+    # Nether Star: 1.15x all money (shop item)
+    nether_star_mult = get_nether_star_money_multiplier(user_id)
+    final_value *= nether_star_mult
+    extra_money_from_nether_star = final_value * (nether_star_mult - 1.0) / nether_star_mult if nether_star_mult > 1.0 else 0.0
+
+    # Palace Treasure: 1.5x money (shop item)
+    final_value *= get_palace_treasure_money_multiplier(user_id)
+
+    # Alchemist's Pocketwatch: +5% money from /gather (shop item)
+    if full_data is not None and full_data.get("shop_inventory", {}).get("alchemists_pocketwatch", 0) >= 1:
+        final_value *= 1.05
+    elif full_data is None and has_shop_item(user_id, "alchemists_pocketwatch"):
+        final_value *= 1.05
+
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
     new_balance = current_balance + final_value
@@ -3044,6 +3318,8 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         "month_name": month_name,
         "beta_tester_multiplier": beta_tester_mult,
         "extra_money_from_beta_tester": extra_money_from_beta_tester,
+        "nether_star_multiplier": nether_star_mult,
+        "extra_money_from_nether_star": extra_money_from_nether_star,
         "seasonal_multiplier": seasonal_multiplier,
         "seasonal_label": seasonal_label,
         "tree_ring_awarded": tree_ring_awarded,
@@ -4727,7 +5003,7 @@ class GathemonLobbyView(discord.ui.View):
         await safe_interaction_response(interaction, interaction.response.edit_message, content="❌ Challenge declined.", view=None)
 
 
-GATHEMON_TURN_TIMEOUT_SEC = 120  # 2 minutes per turn (like Gathership)
+GATHEMON_TURN_TIMEOUT_SEC = 120  # 2 minutes per turn (like Mayflower)
 
 class GathemonBattleView(discord.ui.View):
     def __init__(self, game_id: str, current_turn_id: int, timeout: int = GATHEMON_TURN_TIMEOUT_SEC):
@@ -4745,7 +5021,7 @@ class GathemonBattleView(discord.ui.View):
         if self.game_id not in active_gathemon_battles:
             return
         battle = active_gathemon_battles[self.game_id]
-        # Only forfeit if it's still this player's turn (same as Gathership turn_sequence check)
+        # Only forfeit if it's still this player's turn (same as Mayflower turn_sequence check)
         if battle.current_turn_id != self.current_turn_id:
             return
         forfeiter_id = self.current_turn_id
@@ -4850,7 +5126,7 @@ class GathemonUseMoveButton(discord.ui.Button):
             await _gathemon_award_winner_gathers(winner_id, loser_id, num_plants_won, channel)
 
 
-# --- GATHERSHIP (PVP Battleship-style game) ---
+# --- MAYFLOWER (PVP Battleship-style game) ---
 GATHERSHIP_GRID_SIZE = 5
 SEA_EMOJI = "🌊"
 SHIP_EMOJI = "🚢"
@@ -4951,6 +5227,24 @@ def _gathership_grid_display(ships: set, cursor: tuple, show_ships: bool, shot_a
     return "\n".join(lines)
 
 
+def _gathership_dual_board_display(
+    my_ships: set, my_shot_at: set, enemy_ships: set, enemy_shot_at: set,
+    fire_cursor: tuple, enemy_mention: str
+) -> str:
+    """Build side-by-side: Your Board (left), Enemy's Board (right). No cursor on your board."""
+    your_lines = _gathership_grid_display(my_ships, (-1, -1), show_ships=True, shot_at=my_shot_at).split("\n")
+    enemy_lines = _gathership_grid_display(enemy_ships, fire_cursor, show_ships=False, shot_at=enemy_shot_at).split("\n")
+    spacer = "    "  # between the two 5-emoji columns
+    header_left = "**Your Board**"
+    header_right = f"**{enemy_mention}'s Board**"
+    # Fixed-width left column so both boards align
+    header = header_left + " " * (18 - len(header_left)) + header_right
+    rows = [header]
+    for i in range(len(your_lines)):
+        rows.append(your_lines[i] + spacer + enemy_lines[i])
+    return "\n".join(rows)
+
+
 async def _gathership_refund_and_cleanup(game_id: str, channel=None):
     if game_id not in active_gathership_games:
         return
@@ -4972,7 +5266,7 @@ async def _gathership_refund_and_cleanup(game_id: str, channel=None):
     del active_gathership_games[game_id]
     if channel:
         try:
-            await channel.send("❌ Gathership game cancelled. Bets have been refunded.")
+            await channel.send("❌ Mayflower game cancelled. Bets have been refunded.")
         except Exception:
             pass
 
@@ -4995,7 +5289,7 @@ async def end_gathership_game(channel, game_id: str, winner_id: int, loser_id: i
     winner_mention = f"<@{winner_id}>"
     loser_mention = f"<@{loser_id}>"
     embed = discord.Embed(
-        title="🏆 GATHERSHIP — GAME OVER 🏆",
+        title="🏆 MAYFLOWER — GAME OVER 🏆",
         description=f"{winner_mention} sank all of {loser_mention}'s ships and wins **${total_pot:.2f}**!",
         color=discord.Color.gold()
     )
@@ -5024,7 +5318,7 @@ class GathershipLobbyView(discord.ui.View):
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game already started!", ephemeral=True)
                 return
             if interaction.user.id in user_active_gathership:
-                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You're already in a Gathership game!", ephemeral=True)
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You're already in a Mayflower game!", ephemeral=True)
                 return
             bal = get_user_balance(interaction.user.id)
             if not can_afford_rounded(normalize_money(bal), game.bet):
@@ -5036,7 +5330,7 @@ class GathershipLobbyView(discord.ui.View):
             embed = interaction.message.embeds[0]
             host_mention = f"<@{game.host_id}>"
             opponent_mention = f"<@{game.opponent_id}>"
-            embed.description = f"{host_mention} is challenging {opponent_mention} to **GATHERSHIP**!\n\n✅ {opponent_mention} has joined! Host can start the game."
+            embed.description = f"{host_mention} is challenging {opponent_mention} to **MAYFLOWER**!\n\n✅ {opponent_mention} has joined! Host can start the game."
             embed.set_field_at(0, name="💰 Bet", value=f"${game.bet:.2f}", inline=True)
             # Reset 5-minute timeout when opponent joins (backend only; no UI mention)
             fresh_view = GathershipLobbyView(self.game_id, self.host_id, self.opponent_id, timeout=300)
@@ -5087,7 +5381,7 @@ class GathershipLobbyView(discord.ui.View):
                 return
             channel = bot.get_channel(game.channel_id)
             await _gathership_refund_and_cleanup(self.game_id, channel)
-            await safe_interaction_response(interaction, interaction.response.edit_message, content="❌ Gathership challenge cancelled. Bets refunded.", embed=None, view=None)
+            await safe_interaction_response(interaction, interaction.response.edit_message, content="❌ Mayflower challenge cancelled. Bets refunded.", embed=None, view=None)
         except Exception as e:
             print(f"Gathership cancel: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
@@ -5103,7 +5397,7 @@ class GathershipLobbyView(discord.ui.View):
         try:
             msg = self.message
             if msg:
-                await msg.edit(content="⏰ Gathership challenge timed out. Bets have been refunded.", embed=None, view=None)
+                await msg.edit(content="⏰ Mayflower challenge timed out. Bets have been refunded.", embed=None, view=None)
         except Exception:
             pass
 
@@ -5227,7 +5521,7 @@ class GathershipSetupView(discord.ui.View):
                 # Prefer game channel; fallback to interaction.channel (get_channel can be None if not cached)
                 channel = bot.get_channel(game.channel_id) or interaction.channel
                 game.phase = "battle"
-                await channel.send("🔥 **All ships placed! GATHERSHIP STARTS!**")
+                await channel.send("🔥 **All ships placed! MAYFLOWER STARTS!**")
                 await _gathership_send_turn_message(channel, self.game_id)
         except Exception as e:
             print(f"Gathership place_ship: {e}")
@@ -5238,11 +5532,11 @@ async def _gathership_send_turn_message(channel, game_id: str):
     if game_id not in active_gathership_games:
         return
     game = active_gathership_games[game_id]
-    # Reset fire cursor to top-left (1,1) so each player starts their turn from a consistent position
-    game.fire_cursor = (0, 0)
+    # Reset fire cursor to center (2,2) so each player starts their turn from a consistent position
+    game.fire_cursor = (2, 2)
     current_name = game.get_current_turn_name()
     view = GathershipTurnView(game_id, game.turn_sequence, timeout=120)
-    # Always post in the game channel (gathership-1 / gathership-2); never DM
+    # Always post in the game channel (mayflower-1 / mayflower-2); never DM
     await channel.send(f"🎯 **{current_name}**'s turn! Click **Take Shot** below (2 min).", view=view)
 
 
@@ -5262,16 +5556,19 @@ class GathershipTurnView(discord.ui.View):
             if interaction.user.id != game.current_turn_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ It's not your turn!", ephemeral=True)
                 return
-            # Attacker views ENEMY board: so we show enemy's board with hit/miss (shot_at on enemy's board)
-            at_host_board = game.current_turn_id == game.opponent_id  # opponent fires at host's board
+            # Attacker sees both boards: their own (left) and enemy's (right)
+            at_host_board = game.current_turn_id == game.opponent_id
+            my_ships = game.host_ships if game.current_turn_id == game.host_id else game.opponent_ships
+            my_shot_at = game.host_shot_at if game.current_turn_id == game.host_id else game.opponent_shot_at
             enemy_ships = game.host_ships if at_host_board else game.opponent_ships
-            shot_at = game.host_shot_at if at_host_board else game.opponent_shot_at
-            cursor = game.fire_cursor
-            grid = _gathership_grid_display(enemy_ships, cursor, show_ships=False, shot_at=shot_at)
+            enemy_shot_at = game.host_shot_at if at_host_board else game.opponent_shot_at
+            enemy_id = game.opponent_id if game.current_turn_id == game.host_id else game.host_id
+            enemy_mention = f"<@{enemy_id}>"
+            dual = _gathership_dual_board_display(my_ships, my_shot_at, enemy_ships, enemy_shot_at, game.fire_cursor, enemy_mention)
             embed = discord.Embed(
                 title="🔥 Fire at Enemy Fleet",
-                description=f"Move cursor then press **Fire!**\n\n{grid}",
-                 color=discord.Color.dark_red()
+                description=f"Move cursor on the right board, then press **Fire!**\n\n{dual}",
+                color=discord.Color.dark_red()
             )
             view = GathershipFireView(self.game_id, timeout=120)
             await safe_interaction_response(interaction, interaction.response.send_message, embed=embed, view=view, ephemeral=True)
@@ -5302,12 +5599,16 @@ class GathershipFireView(discord.ui.View):
 
     def _build_embed(self, game: GathershipGame) -> discord.Embed:
         at_host_board = game.current_turn_id == game.opponent_id
+        my_ships = game.host_ships if game.current_turn_id == game.host_id else game.opponent_ships
+        my_shot_at = game.host_shot_at if game.current_turn_id == game.host_id else game.opponent_shot_at
         enemy_ships = game.host_ships if at_host_board else game.opponent_ships
-        shot_at = game.host_shot_at if at_host_board else game.opponent_shot_at
-        grid = _gathership_grid_display(enemy_ships, game.fire_cursor, show_ships=False, shot_at=shot_at)
+        enemy_shot_at = game.host_shot_at if at_host_board else game.opponent_shot_at
+        enemy_id = game.opponent_id if game.current_turn_id == game.host_id else game.host_id
+        enemy_mention = f"<@{enemy_id}>"
+        dual = _gathership_dual_board_display(my_ships, my_shot_at, enemy_ships, enemy_shot_at, game.fire_cursor, enemy_mention)
         return discord.Embed(
-            title="🔥 Fire at enemy fleet",
-            description=f"Move cursor then press **Fire!**\n\n{grid}",
+            title="🔥 Fire at Enemy Fleet",
+            description=f"Move cursor on the right board, then press **Fire!**\n\n{dual}",
             color=discord.Color.dark_red()
         )
 
@@ -5377,8 +5678,10 @@ class GathershipFireView(discord.ui.View):
                 winner_id = game.host_id if loser_id == game.opponent_id else game.opponent_id
                 await end_gathership_game(channel, self.game_id, winner_id, loser_id)
                 return
-            game.current_turn_id = game.opponent_id if game.current_turn_id == game.host_id else game.host_id
-            game.turn_sequence += 1  # so old turn view's on_timeout won't forfeit the new player
+            # Hit = same player shoots again (Battleship rules); miss = switch turn
+            if not hit:
+                game.current_turn_id = game.opponent_id if game.current_turn_id == game.host_id else game.host_id
+                game.turn_sequence += 1  # so old turn view's on_timeout won't forfeit the new player
             await _gathership_send_turn_message(channel, self.game_id)
         except Exception as e:
             print(f"Gathership fire: {e}")
@@ -5736,6 +6039,25 @@ class SlotsView(discord.ui.View):
             update_user_balance(self.user_id, new_bal)
         curr_balance = get_user_balance(self.user_id)
         curr_balance = normalize_money(curr_balance)
+
+        # Slots achievements: spin count + win streak (hidden 777 = 3 wins in a row)
+        increment_user_slots_spin_count(self.user_id)
+        achievements_unlocked = []
+        if won:
+            current_streak = get_user_slots_win_streak(self.user_id)
+            new_streak = current_streak + 1
+            set_user_slots_win_streak(self.user_id, new_streak)
+            if new_streak >= 3 and unlock_hidden_achievement(self.user_id, "slots_three_in_a_row"):
+                achievements_unlocked.append(("hidden", "slots_three_in_a_row"))
+        else:
+            set_user_slots_win_streak(self.user_id, 0)
+        spin_count = get_user_slots_spin_count(self.user_id)
+        new_slots_level = get_achievement_level_for_stat("slots", spin_count)
+        current_slots_level = get_user_achievement_level(self.user_id, "slots")
+        if new_slots_level > current_slots_level:
+            set_user_achievement_level(self.user_id, "slots", new_slots_level)
+            achievements_unlocked.append(("slots", new_slots_level))
+
         title = "🎰 SLOTS - RESULT 🎰"
         result_embed = discord.Embed(
             title=title,
@@ -5763,6 +6085,13 @@ class SlotsView(discord.ui.View):
             if getattr(c, "custom_id", "") != "slots_spin":
                 c.disabled = False
         await interaction.message.edit(embed=result_embed, view=self)
+
+        for item in achievements_unlocked:
+            if item[0] == "hidden":
+                await send_hidden_achievement_notification(interaction, item[1])
+            else:
+                await send_achievement_notification(interaction, item[0], item[1])
+            await asyncio.sleep(0.5)
 
     @discord.ui.button(label="Bet 0.1%", style=discord.ButtonStyle.secondary, custom_id="slots_01pct", row=0)
     async def bet_01pct(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -6060,6 +6389,9 @@ def _gather_critical_path(user_id: int, channel_name: str, area_mult: float,
     active_events = get_active_events_cached()
 
     # --- area access check (no DB call, uses pre-fetched unlocked_areas) ---
+    # Use effective planter level: max of passed-in (Discord role) and DB level from bloom_cycle_plants
+    bloom_cycle = full_data.get("bloom_cycle_plants", 0)
+    effective_planter_level = max(user_planter_level, get_planter_level_from_total_items(bloom_cycle))
     if not area.get("unlocked_by_default", False):
         unlocked = full_data.get("unlocked_areas", {})
         prev = area.get("previous_area")
@@ -6068,7 +6400,7 @@ def _gather_critical_path(user_id: int, channel_name: str, area_mult: float,
             return {"area_error": f"❌ You must unlock **{prev_display}** before accessing **{area['display_name']}**!"}
         if not unlocked.get(channel_name, False):
             return {"area_error": f"❌ You haven't unlocked **{area['display_name']}** yet! Use `/unlock {channel_name}` to unlock it for **${area['unlock_cost']:,}**."}
-        if user_planter_level < area.get("required_planter_level", 0):
+        if effective_planter_level < area.get("required_planter_level", 0):
             return {"area_error": f"❌ You must be **{area['required_planter_rank']}** or above to gather in **{area['display_name']}**! You need to gather more plants to rank up."}
 
     # --- cooldown check (pure computation on pre-fetched data) ---
@@ -6104,9 +6436,10 @@ def _gather_critical_path(user_id: int, channel_name: str, area_mult: float,
     if chain_triggered:
         update_user_last_gather_time(user_id, 0)
 
-    # --- stealable roll: 1% for gather; cannot steal critical; stealable = no PvE ---
+    # --- stealable roll: 1% for gather (× Palace Treasure mult for victim); cannot steal critical; stealable = no PvE ---
     is_crit = gather_result.get("is_critical_gather", False)
-    stealable = not is_crit and random.random() < STEAL_CHANCE_GATHER
+    steal_chance = STEAL_CHANCE_GATHER * get_steal_chance_multiplier(user_id)
+    stealable = not is_crit and random.random() < steal_chance
     steal_payload = None
     if stealable:
         steal_payload = {
@@ -6191,6 +6524,10 @@ async def _gather_post_response(interaction: discord.Interaction, user_id: int,
             await send_achievement_notification(interaction, "planter", planter_up)
         if gatherer_up:
             await send_achievement_notification(interaction, "gatherer", gatherer_up)
+
+        # Hidden achievement: One in a Mikellion (gather a plant with Mikellion rarity)
+        if gather_result.get("ripeness") == "Mikellion" and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
+            await send_hidden_achievement_notification(interaction, "one_in_a_mikellion")
     except Exception as e:
         print(f"Error in gather post-response: {e}")
 
@@ -6278,6 +6615,18 @@ class StealView(discord.ui.View):
 
         await asyncio.to_thread(_do_steal)
 
+        # Check stealing achievement (total steals just incremented in DB)
+        def _check_stealing_achievement():
+            total_steals = get_user_total_steals(stealer_id)
+            new_level = get_achievement_level_for_stat("stealing", total_steals)
+            cur_level = get_user_achievement_level(stealer_id, "stealing")
+            if new_level > cur_level:
+                set_user_achievement_level(stealer_id, "stealing", new_level)
+                return new_level
+            return None
+
+        stealing_level_up = await asyncio.to_thread(_check_stealing_achievement)
+
         for child in self.children:
             child.disabled = True
 
@@ -6309,7 +6658,14 @@ class StealView(discord.ui.View):
                 )
             await safe_interaction_response(
                 interaction, interaction.response.edit_message, embed=embed, view=self)
+            if stealing_level_up is not None:
+                await send_achievement_notification(interaction, "stealing", stealing_level_up)
         except Exception:
+            if stealing_level_up is not None:
+                try:
+                    await send_achievement_notification(interaction, "stealing", stealing_level_up)
+                except Exception:
+                    pass
             await safe_interaction_response(
                 interaction, interaction.response.send_message,
                 f"🔴 Stolen by **{stealer_name}**!", ephemeral=False)
@@ -6352,8 +6708,9 @@ class WildAnimalView(discord.ui.View):
                     f"The **{self.animal['name']}** has already been defeated!", ephemeral=True)
                 return
 
-            self.hp -= 1
-            self.attackers[interaction.user.id] = self.attackers.get(interaction.user.id, 0) + 1
+            damage = get_pve_damage_multiplier(interaction.user.id)
+            self.hp -= damage
+            self.attackers[interaction.user.id] = self.attackers.get(interaction.user.id, 0) + damage
 
             if self.hp <= 0:
                 self.defeated = True
@@ -6370,10 +6727,10 @@ class WildAnimalView(discord.ui.View):
 
                 participants_lines = []
                 sorted_attackers = sorted(self.attackers.items(), key=lambda x: -x[1])
-                for uid, hits in sorted_attackers:
+                for uid, dmg in sorted_attackers:
                     member = interaction.guild.get_member(uid)
                     name = member.display_name if member else f"User {uid}"
-                    participants_lines.append(f"**{name}** — {hits} hit{'s' if hits != 1 else ''}")
+                    participants_lines.append(f"**{name}** — {dmg} damage")
                 participants_text = "\n".join(participants_lines) if participants_lines else "No participants"
                 if len(participants_text) > 1024:
                     participants_text = participants_text[:1020] + " …"
@@ -6441,8 +6798,9 @@ class BulletAntView(discord.ui.View):
                     "This ant is already squashed!", ephemeral=True)
                 return
 
-            self.hp -= 1
-            self.swarm_state["attackers"][interaction.user.id] = self.swarm_state["attackers"].get(interaction.user.id, 0) + 1
+            damage = get_pve_damage_multiplier(interaction.user.id)
+            self.hp -= damage
+            self.swarm_state["attackers"][interaction.user.id] = self.swarm_state["attackers"].get(interaction.user.id, 0) + damage
 
             if self.hp <= 0:
                 self.defeated = True
@@ -6477,7 +6835,8 @@ class BulletAntView(discord.ui.View):
                         _pve_distribute_rewards(
                             interaction, BULLET_ANT_SWARM_REWARD_ANIMAL,
                             dict(self.swarm_state["attackers"]), self.channel_id,
-                            self.swarm_state["area_multiplier"]))
+                            self.swarm_state["area_multiplier"],
+                            achievements_ephemeral=True))
                 return
 
             progress_embed = discord.Embed(
@@ -6499,6 +6858,44 @@ def _get_guild_gather_channels(guild: discord.Guild) -> list[discord.TextChannel
         if name in VALID_GATHERING_CHANNELS:
             out.append(ch)
     return out
+
+
+# Nether Star (Wither drop): custom animated emoji for claim button and shop
+NETHER_STAR_EMOJI = "<a:netherstar:1476237557221163210>"
+NETHER_STAR_EMOJI_PARTIAL = discord.PartialEmoji(name="netherstar", id=1476237557221163210, animated=True)
+
+
+class NetherStarClaimView(discord.ui.View):
+    """One-time claim button after Wither defeat. First user without a Nether Star gets it; button locks after claim."""
+
+    def __init__(self, claimed_ref: list):
+        super().__init__(timeout=None)
+        self.claimed_ref = claimed_ref  # [None] or [user_id] after claim
+
+    @discord.ui.button(label="Claim Nether Star!", style=discord.ButtonStyle.success, emoji=NETHER_STAR_EMOJI_PARTIAL, custom_id="wither_nether_star_claim")
+    async def claim_nether_star(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = interaction.user.id
+        if self.claimed_ref[0] is not None:
+            await safe_interaction_response(
+                interaction, interaction.response.send_message,
+                "❌ Someone else already claimed the Nether Star!", ephemeral=True)
+            return
+        if has_shop_item(user_id, "nether_star"):
+            await safe_interaction_response(
+                interaction, interaction.response.send_message,
+                "❌ You already have a Nether Star! You can't claim a second one.", ephemeral=True)
+            return
+        self.claimed_ref[0] = user_id
+        add_shop_item_to_user(user_id, "nether_star", 1)
+        button.disabled = True
+        button.label = "Claimed!"
+        embed = interaction.message.embeds[0].copy() if interaction.message.embeds else discord.Embed(title="Wither Defeated", color=discord.Color.gold())
+        embed.add_field(name=f"{NETHER_STAR_EMOJI} Nether Star", value=f"**Claimed by {interaction.user.mention}!**", inline=False)
+        embed.set_footer(text="1.15x all Money buff active!")
+        await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+        await interaction.followup.send(
+            f"{NETHER_STAR_EMOJI} You claimed the **Nether Star**! You now have **1.15x all Money**!",
+            ephemeral=True)
 
 
 class BossView(discord.ui.View):
@@ -6531,8 +6928,9 @@ class BossView(discord.ui.View):
                     f"The **{self.boss['name']}** has already been defeated!", ephemeral=True)
                 return
 
-            self.hp -= 1
-            self.attackers[interaction.user.id] = self.attackers.get(interaction.user.id, 0) + 1
+            damage = get_pve_damage_multiplier(interaction.user.id)
+            self.hp -= damage
+            self.attackers[interaction.user.id] = self.attackers.get(interaction.user.id, 0) + damage
 
             if self.hp <= 0:
                 self.defeated = True
@@ -6546,26 +6944,62 @@ class BossView(discord.ui.View):
                     color=discord.Color.gold())
                 victory_embed.add_field(name="HP", value=f"**0** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
                 participants_lines = []
-                for uid, hits in sorted(self.attackers.items(), key=lambda x: -x[1]):
+                for uid, dmg in sorted(self.attackers.items(), key=lambda x: -x[1]):
                     member = interaction.guild.get_member(uid)
                     name = member.display_name if member else f"User {uid}"
-                    participants_lines.append(f"**{name}** — {hits} hit{'s' if hits != 1 else ''}")
+                    participants_lines.append(f"**{name}** — {dmg} damage")
                 victory_embed.add_field(name="🏆 Contributors", value="\n".join(participants_lines) or "No participants", inline=False)
                 victory_embed.set_footer(text="Rewards are being distributed…")
-                await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
+                if self.boss["id"] == "wither":
+                    nether_claimed_ref = [None]
+                    claim_view = NetherStarClaimView(claimed_ref=nether_claimed_ref)
+                    await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=claim_view)
+                else:
+                    await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
 
-                # Remove this boss entry from active_boss_events[guild_id]
+                # Accumulate this boss's defeat for deferred rewards (single boss: 1 entry; Twins: 2 entries)
+                _pve_boss_defeated_pending.setdefault(self.guild_id, []).append((self.boss, dict(self.attackers)))
                 boss_list = active_boss_events.get(self.guild_id, [])
                 if self.boss_state_ref in boss_list:
-                    boss_list.remove(self.boss_state_ref)
-                if not boss_list:
-                    active_boss_events.pop(self.guild_id, None)
+                    boss_list = [e for e in boss_list if e is not self.boss_state_ref]
+                    if not boss_list:
+                        active_boss_events.pop(self.guild_id, None)
+                    else:
+                        active_boss_events[self.guild_id] = boss_list
 
                 # Mark guild eligible for Plantera bulb (any boss defeat)
                 plantera_bulb_eligible_guilds[self.guild_id] = time.time()
 
-                asyncio.create_task(
-                    _pve_distribute_rewards(interaction, self.boss, dict(self.attackers), self.channel_id, self.area_multiplier))
+                # When all bosses in this event are defeated: broadcast to all channels and distribute rewards
+                if self.guild_id not in active_boss_events:
+                    pending = _pve_boss_defeated_pending.pop(self.guild_id, [])
+                    guild = interaction.guild
+                    channels = _get_guild_gather_channels(guild)
+                    if len(pending) == 1:
+                        boss, _ = pending[0]
+                        broadcast_desc = boss.get("server_defeat_msg", boss["defeat_msg"])
+                        broadcast_embed = discord.Embed(
+                            title=f"☠️ {boss['emoji']} {boss['name']} Defeated! ☠️",
+                            description=broadcast_desc,
+                            color=discord.Color.gold())
+                    else:
+                        broadcast_embed = discord.Embed(
+                            title="☠️ The Twins Defeated! ☠️",
+                            description="The Twins have been defeated! Conditions return to normal.",
+                            color=discord.Color.gold())
+                    broadcast_embed.set_footer(text="Gathering channels are now unblocked.")
+                    for ch in channels:
+                        try:
+                            if ch.permissions_for(guild.me).send_messages:
+                                await ch.send(embed=broadcast_embed)
+                        except Exception as e:
+                            print(f"Boss defeat broadcast failed in {ch.name}: {e}")
+                    # Distribute rewards for each defeated boss (Twins = 2 calls); use ephemeral achievements for multi-boss
+                    multi_boss = len(pending) > 1
+                    for boss, attackers in pending:
+                        asyncio.create_task(_pve_distribute_rewards(
+                            interaction, boss, attackers, self.channel_id, self.area_multiplier,
+                            achievements_ephemeral=multi_boss))
                 return
 
             progress_embed = discord.Embed(
@@ -6583,7 +7017,7 @@ async def _send_boss_warning_embed(guild: discord.Guild, boss: dict):
     channels = _get_guild_gather_channels(guild)
     text = boss.get("pre_spawn_text", "Something terrible is approaching...")
     embed = discord.Embed(
-        title=f"⚠️ Boss Incoming! ⚠️",
+        title="Something's coming...",
         description=text,
         color=discord.Color.dark_red())
     for ch in channels:
@@ -6608,7 +7042,7 @@ async def trigger_boss_event(channel: discord.TextChannel, boss: dict, area_mult
         description=boss["description"],
         color=boss["color"])
     embed.add_field(name="HP", value=f"**{hp}** / **{hp}**\n{'🟥' * 20}", inline=False)
-    embed.add_field(name="⚔️ How to Fight", value="Press **Attack**! Each hit deals **1 damage** and earns **1 plant**!", inline=False)
+    embed.add_field(name="⚔️ How to Fight", value="Press **Attack**! Damage per hit (and plants earned) depends on your Daily Shop weapons!", inline=False)
     embed.set_footer(text="All gathering channels are BLOCKED until this boss is defeated!")
     view = BossView(boss=boss, hp=hp, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_multiplier, boss_state_ref=entry)
     await channel.send(embed=embed, view=view)
@@ -6639,12 +7073,296 @@ async def trigger_twins_boss_event(channel: discord.TextChannel, area_multiplier
         await channel.send(embed=embed, view=view)
 
 
+# --- Ender Dragon: dragon in trigger channel, Obsidian Towers (End Crystals) in other gather channels ---
+
+def _tower_hp_bar(hp: int, max_hp: int = ENDER_DRAGON_TOWER_HP) -> str:
+    filled = max(0, round((hp / max_hp) * 20))
+    empty = 20 - filled
+    return f"{'🟥' * filled}{'⬛' * empty}"
+
+
+class ObsidianTowerView(discord.ui.View):
+    """Obsidian Tower (End Crystal) in non-trigger channels during Ender Dragon. 20 HP; when 0, Break End Crystal to defeat."""
+
+    def __init__(self, channel_id: int, guild_id: int):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+        self.guild_id = guild_id
+        self.tower_hp = ENDER_DRAGON_TOWER_HP
+        self.defeated = False
+        self._lock = asyncio.Lock()
+
+    def _embed(self, last_hit: str | None = None) -> discord.Embed:
+        if self.defeated:
+            embed = discord.Embed(
+                title="🖤 Obsidian Tower 🖤",
+                description="This tower's End Crystal has been broken.",
+                color=0x1a1a2e)
+            embed.add_field(name="HP", value=f"**0** / **{ENDER_DRAGON_TOWER_HP}**\n{_tower_hp_bar(0)}", inline=False)
+            embed.add_field(name="Status", value="☠️ **End Crystal Broken!**", inline=False)
+            embed.set_footer(text="The tower has no effect!")
+        else:
+            embed = discord.Embed(
+                title="🖤 Obsidian Tower 🖤",
+                description="An **End Crystal** powers this tower. Damage the tower, then **Break End Crystal** to stop the Ender Dragon's regeneration!",
+                color=0x1a1a2e)
+            embed.add_field(name="HP", value=f"**{self.tower_hp}** / **{ENDER_DRAGON_TOWER_HP}**\n{_tower_hp_bar(self.tower_hp)}", inline=False)
+            if last_hit:
+                embed.add_field(name="⚔️ Last Hit", value=f"**{last_hit}**!", inline=False)
+            embed.set_footer(text="Break all End Crystals in every channel, then defeat the Ender Dragon!")
+        return embed
+
+    @discord.ui.button(label="⚔️ Attack", style=discord.ButtonStyle.danger, custom_id="obsidian_tower_attack")
+    async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self._lock:
+            if self.defeated:
+                await safe_interaction_response(interaction, interaction.response.send_message,
+                    "This tower's End Crystal has already been broken!", ephemeral=True)
+                return
+            damage = get_pve_damage_multiplier(interaction.user.id)
+            self.tower_hp = max(0, self.tower_hp - damage)
+            # Track tower damage for plant rewards when Ender Dragon is defeated (no achievement / enemy defeat)
+            ender_dragon_tower_attackers.setdefault(self.guild_id, {})[interaction.user.id] = (
+                ender_dragon_tower_attackers[self.guild_id].get(interaction.user.id, 0) + damage)
+            if self.tower_hp <= 0:
+                self.children[1].disabled = False
+                self.children[1].style = discord.ButtonStyle.primary
+            progress_embed = self._embed(interaction.user.display_name)
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+
+    @discord.ui.button(label="Break End Crystal", style=discord.ButtonStyle.secondary, custom_id="obsidian_tower_break_crystal", disabled=True)
+    async def break_crystal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self._lock:
+            if self.defeated:
+                await safe_interaction_response(interaction, interaction.response.send_message,
+                    "This End Crystal has already been broken!", ephemeral=True)
+                return
+            if self.tower_hp > 0:
+                await safe_interaction_response(interaction, interaction.response.send_message,
+                    "Reduce the tower's HP to 0 first!", ephemeral=True)
+                return
+            self.defeated = True
+            button.disabled = True
+            button.label = "☠️ Crystal Broken!"
+            if self.guild_id in ender_dragon_towers:
+                ender_dragon_towers[self.guild_id].discard(self.channel_id)
+            victory_embed = self._embed()
+            victory_embed.set_footer(text="The tower has no effect!")
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
+
+
+class EnderDragonView(discord.ui.View):
+    """Ender Dragon boss: HP stored in entry for regen task. Regen 10 HP/sec while any Obsidian Tower stands."""
+
+    def __init__(self, boss: dict, entry: dict, channel_id: int, guild_id: int, area_multiplier: float):
+        super().__init__(timeout=None)
+        self.boss = boss
+        self.entry = entry  # shared ref: hp, max_hp, message_id
+        self.channel_id = channel_id
+        self.guild_id = guild_id
+        self.area_multiplier = area_multiplier
+        self.attackers: dict[int, int] = {}
+        self.defeated = False
+        self._lock = asyncio.Lock()
+
+    def _hp_bar(self) -> str:
+        hp, max_hp = self.entry["hp"], self.entry["max_hp"]
+        filled = max(0, round((hp / max_hp) * 20))
+        empty = 20 - filled
+        return f"{'🟥' * filled}{'⬛' * empty}"
+
+    def _embed(self, last_hit: str | None = None) -> discord.Embed:
+        hp, max_hp = self.entry["hp"], self.entry["max_hp"]
+        towers_up = len(ender_dragon_towers.get(self.guild_id, set()))
+        embed = discord.Embed(
+            title=f"🚨 {self.boss['emoji']} {self.boss['name']} 🚨",
+            description=self.boss["description"],
+            color=self.boss["color"])
+        embed.add_field(name="HP", value=f"**{hp}** / **{max_hp}**\n{self._hp_bar()}", inline=False)
+        if towers_up > 0:
+            embed.add_field(name="❤️ Regeneration", value=f"**{towers_up}** End Crystal(s) still power the dragon. It recovers **{towers_up * ENDER_DRAGON_REGEN_PER_CRYSTAL}** HP/sec!", inline=False)
+        if last_hit:
+            embed.add_field(name="⚔️ Last Hit", value=f"**{last_hit}**!", inline=False)
+        embed.set_footer(text="All gathering channels are BLOCKED until the Ender Dragon is defeated!")
+        return embed
+
+    @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_ender_dragon_attack")
+    async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self._lock:
+            if self.defeated:
+                await safe_interaction_response(interaction, interaction.response.send_message,
+                    f"The **{self.boss['name']}** has already been defeated!", ephemeral=True)
+                return
+            damage = get_pve_damage_multiplier(interaction.user.id)
+            self.entry["hp"] = max(0, self.entry["hp"] - damage)
+            self.attackers[interaction.user.id] = self.attackers.get(interaction.user.id, 0) + damage
+
+            if self.entry["hp"] <= 0:
+                self.defeated = True
+                button.disabled = True
+                button.label = "☠️ Defeated!"
+                button.style = discord.ButtonStyle.secondary
+                victory_embed = discord.Embed(
+                    title=f"☠️ {self.boss['emoji']} {self.boss['name']} Defeated! ☠️",
+                    description=self.boss["defeat_msg"],
+                    color=discord.Color.gold())
+                victory_embed.add_field(name="HP", value=f"**0** / **{self.entry['max_hp']}**\n{self._hp_bar()}", inline=False)
+                participants_lines = []
+                for uid, dmg in sorted(self.attackers.items(), key=lambda x: -x[1]):
+                    member = interaction.guild.get_member(uid)
+                    name = member.display_name if member else f"User {uid}"
+                    participants_lines.append(f"**{name}** — {dmg} damage")
+                victory_embed.add_field(name="🏆 Contributors", value="\n".join(participants_lines) or "No participants", inline=False)
+                victory_embed.set_footer(text="Rewards are being distributed…")
+                await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
+
+                _pve_boss_defeated_pending.setdefault(self.guild_id, []).append((self.boss, dict(self.attackers)))
+                boss_list = active_boss_events.get(self.guild_id, [])
+                if self.entry in boss_list:
+                    boss_list = [e for e in boss_list if e is not self.entry]
+                    if not boss_list:
+                        active_boss_events.pop(self.guild_id, None)
+                    else:
+                        active_boss_events[self.guild_id] = boss_list
+                ender_dragon_towers.pop(self.guild_id, None)
+                task = ender_dragon_regen_tasks.pop(self.guild_id, None)
+                if task and not task.done():
+                    task.cancel()
+                plantera_bulb_eligible_guilds[self.guild_id] = time.time()
+
+                if self.guild_id not in active_boss_events:
+                    pending = _pve_boss_defeated_pending.pop(self.guild_id, [])
+                    guild = interaction.guild
+                    channels = _get_guild_gather_channels(guild)
+                    boss, _ = pending[0]
+                    broadcast_desc = boss.get("server_defeat_msg", boss["defeat_msg"])
+                    broadcast_embed = discord.Embed(
+                        title=f"☠️ {boss['emoji']} {boss['name']} Defeated! ☠️",
+                        description=broadcast_desc,
+                        color=discord.Color.gold())
+                    broadcast_embed.set_footer(text="Gathering channels are now unblocked.")
+                    for ch in channels:
+                        try:
+                            if ch.permissions_for(guild.me).send_messages:
+                                await ch.send(embed=broadcast_embed)
+                        except Exception as e:
+                            print(f"Boss defeat broadcast failed in {ch.name}: {e}")
+                    # Merge dragon + tower hits so users get plants for both (one reward, Ender Dragon only counts for achievement)
+                    tower_attackers = ender_dragon_tower_attackers.pop(self.guild_id, {})
+                    all_user_ids = set(self.attackers.keys()) | set(tower_attackers.keys())
+                    combined_attackers = {uid: self.attackers.get(uid, 0) + tower_attackers.get(uid, 0) for uid in all_user_ids}
+                    asyncio.create_task(_pve_distribute_rewards(
+                        interaction, self.boss, combined_attackers, self.channel_id, self.area_multiplier))
+                return
+
+            progress_embed = self._embed(interaction.user.display_name)
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+
+
+def _ender_dragon_embed_from_entry(entry: dict, boss: dict, guild_id: int) -> discord.Embed:
+    """Build the Ender Dragon embed from entry state (for regen loop; no view ref)."""
+    hp, max_hp = entry["hp"], entry["max_hp"]
+    filled = max(0, round((hp / max_hp) * 20))
+    empty = 20 - filled
+    bar = f"{'🟥' * filled}{'⬛' * empty}"
+    towers_up = len(ender_dragon_towers.get(guild_id, set()))
+    embed = discord.Embed(
+        title=f"🚨 {boss['emoji']} {boss['name']} 🚨",
+        description=boss["description"],
+        color=boss["color"])
+    embed.add_field(name="HP", value=f"**{hp}** / **{max_hp}**\n{bar}", inline=False)
+    if towers_up > 0:
+        embed.add_field(name="❤️ Regeneration", value=f"**{towers_up}** End Crystal(s) still power the dragon. It recovers **{towers_up * ENDER_DRAGON_REGEN_PER_CRYSTAL}** HP/sec!", inline=False)
+    embed.set_footer(text="All gathering channels are BLOCKED until the Ender Dragon is defeated!")
+    return embed
+
+
+async def _ender_dragon_regen_loop(guild_id: int):
+    """Every second, for each standing Obsidian Tower (End Crystal), heal the Ender Dragon by ENDER_DRAGON_REGEN_PER_CRYSTAL (capped at max_hp)."""
+    while True:
+        try:
+            await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            break
+        if guild_id not in active_boss_events:
+            break
+        events = active_boss_events[guild_id]
+        if not events or events[0]["boss"]["id"] != ENDER_DRAGON_ID:
+            break
+        towers_up = len(ender_dragon_towers.get(guild_id, set()))
+        if towers_up == 0:
+            continue
+        entry = events[0]
+        regen = towers_up * ENDER_DRAGON_REGEN_PER_CRYSTAL
+        entry["hp"] = min(entry["max_hp"], entry["hp"] + regen)
+        message_id = entry.get("message_id")
+        if not message_id:
+            continue
+        try:
+            guild = bot.get_guild(guild_id)
+            if not guild:
+                continue
+            channel = guild.get_channel(entry["channel_id"])
+            if not channel or not isinstance(channel, discord.TextChannel):
+                continue
+            message = await channel.fetch_message(message_id)
+            boss = entry["boss"]
+            embed = _ender_dragon_embed_from_entry(entry, boss, guild_id)
+            await message.edit(embed=embed)
+        except Exception as e:
+            print(f"Ender Dragon regen embed update failed: {e}")
+
+
+async def trigger_ender_dragon_event(channel: discord.TextChannel, area_multiplier: float):
+    """Spawn Ender Dragon in the trigger channel and Obsidian Towers in all other gather channels."""
+    guild = channel.guild
+    guild_id = guild.id
+    if guild_id in active_boss_events:
+        return
+    boss = next(b for b in PVE_BOSSES if b["id"] == ENDER_DRAGON_ID)
+    hp = boss["hp_range"][0]
+    entry = {"channel_id": channel.id, "boss": boss, "hp": hp, "max_hp": hp}
+    active_boss_events[guild_id] = [entry]
+
+    channels = _get_guild_gather_channels(guild)
+    other_channels = [ch for ch in channels if ch.id != channel.id]
+    ender_dragon_towers[guild_id] = {ch.id for ch in other_channels}
+    ender_dragon_tower_attackers[guild_id] = {}
+
+    embed = discord.Embed(
+        title=f"🚨 {boss['emoji']} {boss['name']} 🚨",
+        description=boss["description"],
+        color=boss["color"])
+    embed.add_field(name="HP", value=f"**{hp}** / **{hp}**\n{'🟥' * 20}", inline=False)
+    embed.add_field(name="❤️ Regeneration", value="Destroy the **End Crystals** on Obsidian Towers in other channels to stop the dragon's regeneration!", inline=False)
+    embed.add_field(name="⚔️ How to Fight", value="Press **Attack**! Damage per hit (and plants earned) depends on your Daily Shop weapons!", inline=False)
+    embed.set_footer(text="All gathering channels are BLOCKED until the Ender Dragon is defeated!")
+    view = EnderDragonView(boss=boss, entry=entry, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_multiplier)
+    msg = await channel.send(embed=embed, view=view)
+    entry["message_id"] = msg.id
+
+    for ch in other_channels:
+        try:
+            if ch.permissions_for(guild.me).send_messages:
+                tower_view = ObsidianTowerView(channel_id=ch.id, guild_id=guild_id)
+                tower_embed = tower_view._embed()
+                await ch.send(embed=tower_embed, view=tower_view)
+        except Exception as e:
+            print(f"Obsidian Tower spawn failed in {ch.name}: {e}")
+            ender_dragon_towers[guild_id].discard(ch.id)
+
+    task = asyncio.create_task(_ender_dragon_regen_loop(guild_id))
+    ender_dragon_regen_tasks[guild_id] = task
+
+
 async def _delayed_boss_spawn(guild: discord.Guild, channel: discord.TextChannel, boss: dict, area_multiplier: float, delay: float = 60.0):
     await asyncio.sleep(delay)
     if guild.id not in active_boss_events:
         try:
             if boss["id"] in PVE_BOSSES_TWINS_IDS:
                 await trigger_twins_boss_event(channel, area_multiplier)
+            elif boss["id"] == ENDER_DRAGON_ID:
+                await trigger_ender_dragon_event(channel, area_multiplier)
             else:
                 await trigger_boss_event(channel, boss, area_multiplier)
         except Exception as e:
@@ -6822,6 +7540,8 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
 
         # BETA TESTER: same 1.3x as /gather
         fv *= get_beta_tester_money_multiplier(user_id)
+        fv *= get_nether_star_money_multiplier(user_id)
+        fv *= get_palace_treasure_money_multiplier(user_id)
 
         total_balance += fv
         name = item["name"]
@@ -6849,20 +7569,21 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
 
 async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict,
                                    attackers: dict[int, int], channel_id: int,
-                                   area_multiplier: float):
-    """Award plants to every participant. Record defeats, update PLANTER role, unlock achievements."""
+                                   area_multiplier: float, *, achievements_ephemeral: bool = False):
+    """Award plants to every participant. Record defeats, update PLANTER role, unlock achievements.
+    If achievements_ephemeral is True (e.g. Twins, Bullet Ant swarm), send achievement notifications via DM to avoid spamming the channel."""
     channel = interaction.guild.get_channel(channel_id)
     enemy_id = animal.get("id")
     guild = interaction.guild
     try:
-        for user_id, hits in attackers.items():
+        for user_id, total_damage in attackers.items():
             try:
                 member = guild.get_member(user_id)
                 if not member:
                     continue
 
                 results, total_value = await asyncio.to_thread(
-                    _pve_roll_items_and_batch_write, user_id, hits, area_multiplier)
+                    _pve_roll_items_and_batch_write, user_id, total_damage, area_multiplier)
 
                 # Record PvE defeat and update PLANTER role (plants from PvE count toward rank)
                 if enemy_id:
@@ -6872,11 +7593,14 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
                 except Exception as e:
                     print(f"Error assigning gatherer role after PvE for user {user_id}: {e}")
 
-                # Unlock per-enemy hidden achievement if first time
+                # Unlock per-enemy hidden achievement if first time (ephemeral = DM to user)
                 if enemy_id:
                     ach_key = PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT.get(enemy_id)
-                    if ach_key and unlock_hidden_achievement(user_id, ach_key) and channel:
-                        await send_hidden_achievement_notification_async(channel, member.mention, ach_key)
+                    if ach_key and unlock_hidden_achievement(user_id, ach_key):
+                        if achievements_ephemeral:
+                            await send_hidden_achievement_notification_dm(user_id, ach_key)
+                        elif channel:
+                            await send_hidden_achievement_notification_async(channel, member.mention, ach_key)
 
                 # Slayer achievement category (total defeats)
                 total_defeats = get_user_total_pve_defeats(user_id)
@@ -6884,19 +7608,24 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
                 cur_slayer = get_user_achievement_level(user_id, "slayer")
                 if new_slayer_level > cur_slayer:
                     set_user_achievement_level(user_id, "slayer", new_slayer_level)
-                    if channel:
+                    if achievements_ephemeral:
+                        await send_achievement_notification_dm(user_id, "slayer", new_slayer_level)
+                    elif channel:
                         await send_achievement_notification_async(channel, member.mention, "slayer", new_slayer_level)
 
                 # PvE Master: defeat every type at least once
                 if PVE_MASTER_REQUIRED_IDS.issubset(set(get_user_pve_defeated(user_id))):
-                    if unlock_hidden_achievement(user_id, "pve_master") and channel:
-                        await send_hidden_achievement_notification_async(channel, member.mention, "pve_master")
+                    if unlock_hidden_achievement(user_id, "pve_master"):
+                        if achievements_ephemeral:
+                            await send_hidden_achievement_notification_dm(user_id, "pve_master")
+                        elif channel:
+                            await send_hidden_achievement_notification_async(channel, member.mention, "pve_master")
 
                 plant_emojis = [get_item_display_emoji(r["name"]) for r in results]
                 emoji_display = " ".join(plant_emojis)
                 header = (
-                    f"You landed **{hits}** hit{'s' if hits != 1 else ''} "
-                    f"and gathered **{hits}** plant{'s' if hits != 1 else ''}!\n\n")
+                    f"You dealt **{total_damage}** damage "
+                    f"and gathered **{total_damage}** plant{'s' if total_damage != 1 else ''}!\n\n")
                 max_emoji_len = 4000 - len(header)
                 if len(emoji_display) > max_emoji_len:
                     emoji_display = emoji_display[:max_emoji_len - 5] + " …"
@@ -6985,7 +7714,7 @@ async def trigger_pve_event(channel: discord.TextChannel, area_multiplier: float
         embed.add_field(name="HP", value=f"**{hp}** / **{hp}**\n{hp_bar_filled}", inline=False)
         embed.add_field(
             name="⚔️ How to Fight",
-            value="Press the **Attack** button below! Each hit deals **1 damage** and earns you **1 plant**!",
+            value="Press the **Attack** button below! Damage per hit (and plants earned) depends on your Daily Shop weapons!",
             inline=False)
         embed.set_footer(text="All gathering commands are BLOCKED until the wild animal is defeated")
 
@@ -7117,6 +7846,9 @@ async def gather(interaction: discord.Interaction):
             if gather_result.get('extra_money_from_beta_tester', 0) > 0:
                 embed.add_field(name="🧪 Beta Tester!",
                     value=f"{gather_result['beta_tester_multiplier']:.2f}x - **+${gather_result['extra_money_from_beta_tester']:.2f}**", inline=False)
+            if gather_result.get('extra_money_from_nether_star', 0) > 0:
+                embed.add_field(name=f"{NETHER_STAR_EMOJI} Nether Star",
+                    value=f"{gather_result['nether_star_multiplier']:.2f}x - **+${gather_result['extra_money_from_nether_star']:.2f}**", inline=False)
             month_name = gather_result.get("month_name", "—")
             embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
             embed.add_field(name="\U0001f4b0 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
@@ -7154,6 +7886,9 @@ async def gather(interaction: discord.Interaction):
             if gather_result.get('extra_money_from_beta_tester', 0) > 0:
                 embed.add_field(name="🧪 Beta Tester!",
                     value=f"{gather_result['beta_tester_multiplier']:.2f}x - **+${gather_result['extra_money_from_beta_tester']:.2f}**", inline=False)
+            if gather_result.get('extra_money_from_nether_star', 0) > 0:
+                embed.add_field(name=f"{NETHER_STAR_EMOJI} Nether Star",
+                    value=f"{gather_result['nether_star_multiplier']:.2f}x - **+${gather_result['extra_money_from_nether_star']:.2f}**", inline=False)
 
             hoe_enc = gather_result.get('hoe_enchant')
             if hoe_enc:
@@ -7610,6 +8345,14 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     total_value *= beta_tester_mult
     extra_money_from_beta_tester = total_value * (beta_tester_mult - 1.0) / beta_tester_mult if beta_tester_mult > 1.0 else 0.0
 
+    # Nether Star: 1.15x all money
+    nether_star_mult = get_nether_star_money_multiplier(user_id)
+    total_value *= nether_star_mult
+    extra_money_from_nether_star = total_value * (nether_star_mult - 1.0) / nether_star_mult if nether_star_mult > 1.0 else 0.0
+
+    # Palace Treasure: 1.5x money
+    total_value *= get_palace_treasure_money_multiplier(user_id)
+
     # ----- single batch write: items + ripeness + balance + counts + tree rings + cooldown -----
     num_items = total_items_to_harvest
     tree_rings_to_award = perform_harvest_batch_update(
@@ -7648,6 +8391,8 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         "num_items": total_items_to_harvest,
         "beta_tester_multiplier": beta_tester_mult,
         "extra_money_from_beta_tester": extra_money_from_beta_tester,
+        "nether_star_multiplier": nether_star_mult,
+        "extra_money_from_nether_star": extra_money_from_nether_star,
     }
 
 async def perform_harvest_for_user(user_id: int, allow_chain: bool = True,
@@ -7674,7 +8419,9 @@ def _harvest_critical_path(user_id: int, channel_name: str, area_mult: float,
     """
     full_data = get_user_harvest_full_data(user_id)
 
-    # --- area access check (no DB, uses pre-fetched unlocked_areas) ---
+    # --- area access check: use effective planter level (max of role and DB from bloom_cycle_plants) ---
+    bloom_cycle = full_data.get("bloom_cycle_plants", 0)
+    effective_planter_level = max(user_planter_level, get_planter_level_from_total_items(bloom_cycle))
     if not area.get("unlocked_by_default", False):
         unlocked = full_data.get("unlocked_areas", {})
         prev = area.get("previous_area")
@@ -7683,13 +8430,16 @@ def _harvest_critical_path(user_id: int, channel_name: str, area_mult: float,
             return {"area_error": f"❌ You must unlock **{prev_display}** before accessing **{area['display_name']}**!"}
         if not unlocked.get(channel_name, False):
             return {"area_error": f"❌ You haven't unlocked **{area['display_name']}** yet! Use `/unlock {channel_name}` to unlock it for **${area['unlock_cost']:,}**."}
-        if user_planter_level < area.get("required_planter_level", 0):
+        if effective_planter_level < area.get("required_planter_level", 0):
             return {"area_error": f"❌ You must be **{area['required_planter_rank']}** or above to gather in **{area['display_name']}**! You need to gather more plants to rank up."}
 
     # --- cooldown check (pure computation) ---
     can_user, time_left, is_roulette = can_harvest(user_id, full_data=full_data)
     if not can_user:
-        return {"on_cooldown": True, "time_left": time_left, "is_roulette": is_roulette}
+        almost_unlocked_too = False
+        if time_left == 0 and not is_roulette:
+            almost_unlocked_too = unlock_hidden_achievement(user_id, "almost_got_it_too")
+        return {"on_cooldown": True, "time_left": time_left, "is_roulette": is_roulette, "almost_unlocked_too": almost_unlocked_too}
 
     # --- perform harvest + cooldown + command-count in ONE batch write ---
     result = _perform_harvest_for_user_sync(
@@ -7702,8 +8452,9 @@ def _harvest_critical_path(user_id: int, channel_name: str, area_mult: float,
     if chain_triggered:
         update_user_last_harvest_time(user_id, 0)
 
-    # --- stealable roll: 0.5% for harvest; stealable = no PvE ---
-    stealable = random.random() < STEAL_CHANCE_HARVEST
+    # --- stealable roll: 0.5% for harvest (× Palace Treasure mult for victim); stealable = no PvE ---
+    steal_chance = STEAL_CHANCE_HARVEST * get_steal_chance_multiplier(user_id)
+    stealable = random.random() < steal_chance
     steal_payload = None
     if stealable:
         steal_payload = {
@@ -7789,6 +8540,11 @@ async def _harvest_post_response(interaction: discord.Interaction, user_id: int,
         if harvesting_up:
             await send_achievement_notification(interaction, "harvesting", harvesting_up)
 
+        # Hidden achievement: One in a Mikellion (harvest a plant with Mikellion rarity)
+        has_mikellion = any(item.get("ripeness") == "Mikellion" for item in result.get("gathered_items", []))
+        if has_mikellion and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
+            await send_hidden_achievement_notification(interaction, "one_in_a_mikellion")
+
         if result.get('achievement_unlocked'):
             ach_name, ach_level = result['achievement_unlocked']
             await send_achievement_notification(interaction, ach_name, ach_level)
@@ -7858,6 +8614,10 @@ async def harvest(interaction: discord.Interaction):
             if crit["is_roulette"]:
                 await safe_interaction_response(interaction, interaction.followup.send,
                     f"Sorry, {interaction.user.name}, you're dead. You cannot /harvest for {time_left // 60} minute(s)", ephemeral=True)
+            elif crit.get("almost_unlocked_too"):
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"You must wait {time_left} seconds before harvesting again, {interaction.user.name}.", ephemeral=True)
+                await send_hidden_achievement_notification(interaction, "almost_got_it_too")
             else:
                 await safe_interaction_response(interaction, interaction.followup.send,
                     f"You must wait {time_left // 60} minutes and {time_left % 60} seconds before harvesting again, {interaction.user.name}.", ephemeral=True)
@@ -7932,6 +8692,9 @@ async def harvest(interaction: discord.Interaction):
         if result.get("extra_money_from_beta_tester", 0) > 0:
             embed.add_field(name="🧪 Beta Tester!",
                 value=f"{result['beta_tester_multiplier']:.2f}x - **+${result['extra_money_from_beta_tester']:.2f}**", inline=False)
+        if result.get("extra_money_from_nether_star", 0) > 0:
+            embed.add_field(name=f"{NETHER_STAR_EMOJI} Nether Star",
+                value=f"{result['nether_star_multiplier']:.2f}x - **+${result['extra_money_from_nether_star']:.2f}**", inline=False)
 
         tractor_enc = result.get("tractor_enchant")
         if tractor_enc:
@@ -8248,7 +9011,7 @@ async def bloom(interaction: discord.Interaction):
     app_commands.Choice(name="Marsh ($5,000,000 & PLANTER V)", value="marsh"),
     app_commands.Choice(name="Bog ($75,000,000 & PLANTER VII)", value="bog"),
     app_commands.Choice(name="Mire ($300,000,000 & PLANTER IX)", value="mire"),
-    app_commands.Choice(name="Underground Jungle ($1,000,000,000 & PLANTER II)", value="underground-jungle"),
+    app_commands.Choice(name="Underground Jungle ($100,000 & PLANTER II)", value="underground-jungle"),
 ])
 async def unlock(interaction: discord.Interaction, area: app_commands.Choice[str]):
     try:
@@ -8282,9 +9045,11 @@ async def unlock(interaction: discord.Interaction, area: app_commands.Choice[str
                     ephemeral=True)
                 return
         
-        # Check planter rank requirement
-        user_planter_level = get_user_planter_level(interaction.user)
-        if user_planter_level < area_data["required_planter_level"]:
+        # Check planter rank: use max of Discord role and DB level (bloom_cycle_plants)
+        role_level = get_user_planter_level(interaction.user)
+        cycle_plants = get_user_bloom_cycle_plants(user_id)
+        effective_planter_level = max(role_level, get_planter_level_from_total_items(cycle_plants))
+        if effective_planter_level < area_data["required_planter_level"]:
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"❌ You must be **{area_data['required_planter_rank']}** or above to unlock **{area_data['display_name']}**, {interaction.user.name}! Keep gathering to rank up!",
                 ephemeral=True)
@@ -8411,15 +9176,59 @@ DAILY_SHOP_ITEMS = {
         "cost": 1000,
         "effect": "Doubles the money gain from each area!",
     },
+    "nether_star": {
+        "name": "Nether Star",
+        "description": "Let's make a Beacon!",
+        "cost": 500,
+        "effect": "1.15x all Money",
+        "emoji": NETHER_STAR_EMOJI,
+    },
+    "zenith": {
+        "name": "Zenith",
+        "description": "The culmination of a journey forged into the ultimate sword.",
+        "cost": 400,
+        "effect": "PvE: deal 3 damage per hit (instead of 1). Stacks with other weapons!",
+    },
+    "alchemists_pocketwatch": {
+        "name": "Alchemist's Pocketwatch",
+        "description": "Written on it is \"Don't forget\", dated October 3rd, year 11.",
+        "cost": 25,
+        "effect": "+5% money from /gather.",
+    },
+    "split_soul_katana": {
+        "name": "Split Soul Katana",
+        "description": "No cursed energy required!",
+        "cost": 150,
+        "effect": "PvE: deal 2 damage per hit to enemies. Stacks with other weapons!",
+    },
+    "inverted_spear_of_heaven": {
+        "name": "Inverted Spear of Heaven",
+        "description": "Your name's not Zenin? That makes me glad.",
+        "cost": 200,
+        "effect": "PvE: deal 2 damage per hit to enemies and bosses. Stacks with other weapons!",
+    },
+    "diamond_sword": {
+        "name": "Diamond Sword",
+        "description": "Do you like it?",
+        "cost": 100,
+        "effect": "PvE: deal 2 damage per hit to enemies. Stacks with other weapons!",
+    },
+    "palace_treasure": {
+        "name": "Palace Treasure",
+        "description": "Looking cool, Joker!",
+        "cost": 350,
+        "effect": "1.5x money gain, but your gathers and harvests are 3x more likely to be stealable!",
+    },
 }
 DAILY_SHOP_ITEM_IDS = list(DAILY_SHOP_ITEMS.keys())
 MAX_DAILY_SHOP_PURCHASES = 3
 
 
 def get_daily_shop_offerings(date_est: str, user_id: int = None) -> list:
-    """Return up to 3 random item ids for the given EST date (YYYY-MM-DD). Deterministic per date.
+    """Return up to 3 random item ids for the given EST date (YYYY-MM-DD). Deterministic per user per date (each person sees different items).
     If user_id is provided, only returns items the user does not already own (one per item ever)."""
-    rng = random.Random(date_est)
+    seed = f"{date_est}_{user_id}" if user_id is not None else date_est
+    rng = random.Random(seed)
     all_ids = list(DAILY_SHOP_ITEMS.keys())
     if user_id is not None:
         all_ids = [i for i in all_ids if not has_shop_item(user_id, i)]
@@ -8464,15 +9273,17 @@ def _build_daily_shop_embed_and_view(offerings: list, date_est: str):
         description="Welcome to the Daily Shop! Purchase special items with **<:TreeRing:1474244868288282817> Tree Rings**. Stock refreshes daily at midnight EST!",
         color=discord.Color.green()
     )
+    tree_ring_emoji = "<:TreeRing:1474244868288282817>"
     for item_id in offerings:
         info = DAILY_SHOP_ITEMS[item_id]
+        item_emoji = info.get("emoji", tree_ring_emoji)
         embed.add_field(
-            name=f"<:TreeRing:1474244868288282817> {info['name']}",
-            value=f"{info['description']}\n*{info['effect']}*\nPrice: **{info['cost']}** <:TreeRing:1474244868288282817> Tree Rings",
+            name=f"{item_emoji} {info['name']}",
+            value=f"{info['description']}\n*{info['effect']}*\nPrice: **{info['cost']}** {tree_ring_emoji} Tree Rings",
             inline=False
         )
     embed.set_footer(text=f"Shop refreshes in {_format_refresh_countdown()}")
-    view = DailyShopView(item_ids=offerings)
+    view = DailyShopView(item_ids=offerings, date_est=date_est)
     return embed, view
 
 
@@ -8597,10 +9408,11 @@ async def inviteawards(interaction: discord.Interaction, action: app_commands.Ch
 
 
 class DailyShopView(discord.ui.View):
-    """View with Buy buttons for each of today's 3 items, plus Inventory."""
+    """View with Buy buttons for each of today's 3 items, plus Inventory. Stores date_est so buy validation uses the same day the shop was shown."""
 
-    def __init__(self, item_ids: list, timeout: float = 180):
+    def __init__(self, item_ids: list, date_est: str = None, timeout: float = 180):
         super().__init__(timeout=timeout)
+        self.date_est = date_est or _get_date_est()
         for item_id in item_ids:
             info = DAILY_SHOP_ITEMS.get(item_id, {})
             label = f"Buy {info.get('name', item_id)}"
@@ -8625,7 +9437,8 @@ class DailyShopBuyButton(discord.ui.Button):
                 "❌ That item is no longer available.", ephemeral=True)
             return
         user_id = interaction.user.id
-        date_est = _get_date_est()
+        # Use the date when this shop was opened (stored on the view), not "now" - so buying works even across midnight EST or from an open message
+        date_est = getattr(self.view, "date_est", None) or _get_date_est()
         if has_shop_item(user_id, item_id):
             await safe_interaction_response(interaction, interaction.response.send_message,
                 f"❌ You already own **{DAILY_SHOP_ITEMS[item_id]['name']}**.", ephemeral=True)
@@ -8972,13 +9785,13 @@ class BasketUpgradeView(discord.ui.View):
             inline=False
         )
         
-        # Path 4: Soil (GMO Chance)
+        # Path 4: Soil (GMO Chance) — round % to avoid float display
         soil_tier = upgrades["soil"]
         current_soil = "Regular Soil" if soil_tier == 0 else SOIL_UPGRADES[soil_tier - 1]["name"]
-        current_gmo = 0 if soil_tier == 0 else SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] * 100
+        current_gmo = 0 if soil_tier == 0 else round(SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] * 100, 1)
         if soil_tier < 10:
             next_soil = SOIL_UPGRADES[soil_tier]["name"]
-            next_gmo = SOIL_UPGRADES[soil_tier]["gmo_boost"] * 100
+            next_gmo = round(SOIL_UPGRADES[soil_tier]["gmo_boost"] * 100, 1)
             next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[soil_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
             soil_text = f"**Upgrade {soil_tier + 1}/10**\n**Current:** {current_soil} (+{current_gmo}% GMO chance)\n**Next:** {next_soil} (+{next_gmo}% GMO chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
@@ -9136,13 +9949,13 @@ class HarvestUpgradeView(discord.ui.View):
             inline=False
         )
         
-        # Path 2: Chain Chance (Season)
+        # Path 2: Chain Chance (Season) — round % to avoid float display
         chain_tier = upgrades["chain"]
         current_season = "No Season" if chain_tier == 0 else HARVEST_CHAIN_UPGRADES[chain_tier - 1]["name"]
-        current_chain = 0 if chain_tier == 0 else HARVEST_CHAIN_UPGRADES[chain_tier - 1]["chain_chance"] * 100
+        current_chain = 0 if chain_tier == 0 else round(HARVEST_CHAIN_UPGRADES[chain_tier - 1]["chain_chance"] * 100, 1)
         if chain_tier < 10:
             next_season = HARVEST_CHAIN_UPGRADES[chain_tier]["name"]
-            next_chain = HARVEST_CHAIN_UPGRADES[chain_tier]["chain_chance"] * 100
+            next_chain = round(HARVEST_CHAIN_UPGRADES[chain_tier]["chain_chance"] * 100, 1)
             next_cost = bloom_scaled_price(self.user_id, HARVEST_CHAIN_PRICES[chain_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
             chain_text = f"**Upgrade {chain_tier + 1}/10**\n**Current:** {current_season} ({current_chain}% chain chance)\n**Next:** {next_season} ({next_chain}% chain chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
@@ -9155,13 +9968,13 @@ class HarvestUpgradeView(discord.ui.View):
             inline=False
         )
         
-        # Path 3: Fertilizer (Money Multiplier)
+        # Path 3: Fertilizer (Money Multiplier) — round % to avoid float display
         fertilizer_tier = upgrades["fertilizer"]
         current_fertilizer = "No Fertilizer" if fertilizer_tier == 0 else HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["name"]
-        current_multiplier = 0 if fertilizer_tier == 0 else HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["multiplier"] * 100
+        current_multiplier = 0 if fertilizer_tier == 0 else round(HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["multiplier"] * 100, 1)
         if fertilizer_tier < 10:
             next_fertilizer = HARVEST_FERTILIZER_UPGRADES[fertilizer_tier]["name"]
-            next_multiplier = HARVEST_FERTILIZER_UPGRADES[fertilizer_tier]["multiplier"] * 100
+            next_multiplier = round(HARVEST_FERTILIZER_UPGRADES[fertilizer_tier]["multiplier"] * 100, 1)
             next_cost = bloom_scaled_price(self.user_id, HARVEST_FERTILIZER_PRICES[fertilizer_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
             fertilizer_text = f"**Upgrade {fertilizer_tier + 1}/10**\n**Current:** {current_fertilizer} (+{current_multiplier}% money)\n**Next:** {next_fertilizer} (+{next_multiplier}% money)\n**Cost:** ${next_cost:,.2f} {can_afford}"
@@ -9650,7 +10463,7 @@ class HireView(discord.ui.View):
             total_money = gardener.get("total_money_earned", 0.0)
             has_tool = gardener.get("has_tool", False)
             tool_info = GARDENER_TOOLS.get(slot_id, {"name": "Tool", "cost": 0, "chance": 0})
-            tool_chance_pct = tool_info["chance"] * 100
+            tool_chance_pct = round(tool_info["chance"] * 100, 1)  # avoid float display like 14.000000000002
             
             embed.add_field(
                 name="Status",
@@ -9670,13 +10483,13 @@ class HireView(discord.ui.View):
             if has_tool:
                 embed.add_field(
                     name="Tool",
-                    value=f"**{tool_info['name']}** ✅ — **{tool_chance_pct}%** chance to auto harvest",
+                    value=f"**{tool_info['name']}** ✅ for a **{tool_chance_pct:.0f}%** chance to auto harvest",
                     inline=False
                 )
             else:
                 embed.add_field(
                     name="Tool",
-                    value=f"Buy **{tool_info['name']}** for **${tool_info['cost']:,.0f}** — **{tool_chance_pct}%** chance to auto harvest",
+                    value=f"Buy **{tool_info['name']}** for a **{tool_chance_pct:.0f}%** chance to auto harvest",
                     inline=False
                 )
         else:
@@ -9921,7 +10734,7 @@ class HireView(discord.ui.View):
             # Check for Maxed Out achievement
             achievement_unlocked = check_maxed_out_achievement(self.user_id)
             
-            chance_pct = tool_info["chance"] * 100
+            chance_pct = round(tool_info["chance"] * 100, 1)
             await safe_interaction_response(interaction, interaction.response.send_message,
                 f"✅ **{tool_info['name']}** purchased for ${tool_cost:,.2f}! This gardener's auto gather now has a **{chance_pct}%** chance to upgrade to a full harvest!", ephemeral=True)
             
@@ -10517,9 +11330,14 @@ async def spawn(interaction: discord.Interaction, animal: str, channel: str):
         # Boss spawn (single boss)
         boss = next((b for b in PVE_BOSSES if b["id"] == animal), None)
         if boss:
-            await trigger_boss_event(target, boss, area_mult)
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"✅ Spawned **{boss['name']}** in {target.mention}!", ephemeral=True)
+            if boss["id"] == ENDER_DRAGON_ID:
+                await trigger_ender_dragon_event(target, area_mult)
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"✅ Spawned **{boss['name']}** in {target.mention} (and Obsidian Towers in other channels)!", ephemeral=True)
+            else:
+                await trigger_boss_event(target, boss, area_mult)
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"✅ Spawned **{boss['name']}** in {target.mention}!", ephemeral=True)
             return
 
         # Bullet Ant Swarm
@@ -11017,6 +11835,13 @@ async def _giveaway_imbue_name_autocomplete(
     app_commands.Choice(name="Gambler's Revolver", value="gamblers_revolver"),
     app_commands.Choice(name="Commoner's Respite", value="commoners_respite"),
     app_commands.Choice(name="Atlas", value="atlas"),
+    app_commands.Choice(name="Nether Star", value="nether_star"),
+    app_commands.Choice(name="Zenith", value="zenith"),
+    app_commands.Choice(name="Alchemist's Pocketwatch", value="alchemists_pocketwatch"),
+    app_commands.Choice(name="Split Soul Katana", value="split_soul_katana"),
+    app_commands.Choice(name="Inverted Spear of Heaven", value="inverted_spear_of_heaven"),
+    app_commands.Choice(name="Diamond Sword", value="diamond_sword"),
+    app_commands.Choice(name="Palace Treasure", value="palace_treasure"),
 ])
 @app_commands.choices(tool_type=[
     app_commands.Choice(name="Hoe (Gather)", value="hoe"),
@@ -12578,6 +13403,10 @@ async def gardener_background_task():
                                                 embed.add_field(name="💰 Total Value", value=f"**${total_value:,.2f}**", inline=True)
                                                 embed.add_field(name="💵 New Balance", value=f"**${current_balance:,.2f}**", inline=True)
                                                 await lawn_channel.send(embed=embed)
+                                                # Hidden achievement: One in a Mikellion (gardener harvest included Mikellion)
+                                                has_mikellion = any(item.get("ripeness") == "Mikellion" for item in harvest_result.get("gathered_items", []))
+                                                if has_mikellion and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
+                                                    await send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion")
                                                 break
                                             except Exception as e:
                                                 print(f"Error sending gardener harvest-upgrade notification to #lawn in {guild.name} for user {user_id}: {e}")
@@ -12611,6 +13440,9 @@ async def gardener_background_task():
                                                     embed.add_field(name="Ripeness", value=gather_result['ripeness'], inline=True)
                                                     embed.add_field(name="GMO?", value="Yes ✨" if gather_result['is_gmo'] else "No", inline=False)
                                                     await lawn_channel.send(embed=embed)
+                                                    # Hidden achievement: One in a Mikellion (gardener gathered Mikellion)
+                                                    if gather_result.get("ripeness") == "Mikellion" and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
+                                                        await send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion")
                                                     break
                                             except Exception as e:
                                                 print(f"Error sending gardener notification to #lawn channel in {guild.name} for user {user_id}: {e}")
@@ -12670,6 +13502,10 @@ async def secret_gardener_background_task():
                                             embed.add_field(name="\U0001f4b0 Total Value", value=f"**${total_value:,.2f}**", inline=True)
                                             embed.add_field(name="\U0001f4b5 New Balance", value=f"**${harvest_result['current_balance']:,.2f}**", inline=True)
                                             await lawn_channel.send(embed=embed)
+                                            # Hidden achievement: One in a Mikellion (secret gardener harvest included Mikellion)
+                                            has_mikellion = any(item.get("ripeness") == "Mikellion" for item in harvest_result.get("gathered_items", []))
+                                            if has_mikellion and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
+                                                await send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion")
                                         except Exception as e:
                                             print(f"Error sending secret gardener harvest notification: {e}")
                                     break
@@ -12694,6 +13530,9 @@ async def secret_gardener_background_task():
                                             embed.add_field(name="Ripeness", value=gather_result['ripeness'], inline=True)
                                             embed.add_field(name="GMO?", value="Yes \u2728" if gather_result['is_gmo'] else "No", inline=False)
                                             await lawn_channel.send(embed=embed)
+                                            # Hidden achievement: One in a Mikellion (secret gardener gathered Mikellion)
+                                            if gather_result.get("ripeness") == "Mikellion" and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
+                                                await send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion")
                                         except Exception as e:
                                             print(f"Error sending secret gardener notification: {e}")
                                     break
@@ -13301,17 +14140,20 @@ async def _end_active_event_for_all_guilds(event: dict):
 
 
 async def celestial_event_check():
-    """At 4:30 UTC roll 50% for Solar Eclipse (until 19:30). At 19:30 UTC roll 50% for Blood Moon (until 4:30 next day). Start/end embeds in #events."""
+    """At 4:30 EST roll 50% for Solar Eclipse (until 19:30 EST). At 19:30 EST roll 50% for Blood Moon (until 4:30 EST next day). Start/end embeds in #events."""
+    from zoneinfo import ZoneInfo
     await bot.wait_until_ready()
     await asyncio.sleep(15)
-    last_solar_trigger_date = None  # (year, month, day)
+    last_solar_trigger_date = None  # (year, month, day) in EST
     last_blood_trigger_date = None
+    est = ZoneInfo("America/New_York")
     while not bot.is_closed():
         try:
             clear_expired_events()
             now_utc = datetime.datetime.now(datetime.timezone.utc)
+            now_est = now_utc.astimezone(est)
             now_ts = now_utc.timestamp()
-            today = (now_utc.year, now_utc.month, now_utc.day)
+            today_est = (now_est.year, now_est.month, now_est.day)
 
             # End expired celestial events (send end embed, then clear)
             se = get_active_event_by_type("solar_eclipse")
@@ -13323,9 +14165,9 @@ async def celestial_event_check():
                 await _end_active_event_for_all_guilds(bm)
                 print("Blood Moon ended (time expired).")
 
-            # At 4:30 UTC: 50% chance to start Solar Eclipse (day: 4:30 -> 19:30)
-            if (now_utc.hour, now_utc.minute) == CELESTIAL_DAY_START_UTC and today != last_solar_trigger_date:
-                last_solar_trigger_date = today
+            # At 4:30 EST: 50% chance to start Solar Eclipse (day: 4:30 -> 19:30 EST)
+            if (now_est.hour, now_est.minute) == CELESTIAL_DAY_START_EST and today_est != last_solar_trigger_date:
+                last_solar_trigger_date = today_est
                 if not get_active_event_by_type("solar_eclipse") and random.random() < CELESTIAL_TRIGGER_CHANCE:
                     # End any active hourly and daily (send their end embeds, then clear)
                     for ev_type in ("hourly", "daily"):
@@ -13333,8 +14175,8 @@ async def celestial_event_check():
                         if existing:
                             await _end_active_event_for_all_guilds(existing)
                             print(f"Ended active {ev_type} event for Solar Eclipse start.")
-                    end_dt = now_utc.replace(hour=CELESTIAL_NIGHT_START_UTC[0], minute=CELESTIAL_NIGHT_START_UTC[1], second=0, microsecond=0)
-                    end_ts = end_dt.timestamp()
+                    end_est = now_est.replace(hour=CELESTIAL_NIGHT_START_EST[0], minute=CELESTIAL_NIGHT_START_EST[1], second=0, microsecond=0)
+                    end_ts = end_est.timestamp()
                     event_id = f"solar_eclipse_{int(now_ts)}"
                     set_active_event(
                         event_id=event_id,
@@ -13354,21 +14196,21 @@ async def celestial_event_check():
                             }, 0)
                         except Exception as e:
                             print(f"Error sending Solar Eclipse start to {guild.name}: {e}")
-                    print("Started Solar Eclipse (50% roll at 4:30 UTC).")
+                    print("Started Solar Eclipse (50% roll at 4:30 EST).")
 
-            # At 19:30 UTC: 50% chance to start Blood Moon (night: 19:30 -> 4:30 next day)
-            if (now_utc.hour, now_utc.minute) == CELESTIAL_NIGHT_START_UTC and today != last_blood_trigger_date:
-                last_blood_trigger_date = today
+            # At 19:30 EST: 50% chance to start Blood Moon (night: 19:30 -> 4:30 EST next day)
+            if (now_est.hour, now_est.minute) == CELESTIAL_NIGHT_START_EST and today_est != last_blood_trigger_date:
+                last_blood_trigger_date = today_est
                 if not get_active_event_by_type("blood_moon") and random.random() < CELESTIAL_TRIGGER_CHANCE:
                     for ev_type in ("hourly", "daily"):
                         existing = get_active_event_by_type(ev_type)
                         if existing:
                             await _end_active_event_for_all_guilds(existing)
                             print(f"Ended active {ev_type} event for Blood Moon start.")
-                    next_day = now_utc.date() + datetime.timedelta(days=1)
-                    end_dt = now_utc.replace(year=next_day.year, month=next_day.month, day=next_day.day,
-                                             hour=CELESTIAL_DAY_START_UTC[0], minute=CELESTIAL_DAY_START_UTC[1], second=0, microsecond=0)
-                    end_ts = end_dt.timestamp()
+                    next_day = now_est.date() + datetime.timedelta(days=1)
+                    end_est = now_est.replace(year=next_day.year, month=next_day.month, day=next_day.day,
+                                             hour=CELESTIAL_DAY_START_EST[0], minute=CELESTIAL_DAY_START_EST[1], second=0, microsecond=0)
+                    end_ts = end_est.timestamp()
                     event_id = f"blood_moon_{int(now_ts)}"
                     set_active_event(
                         event_id=event_id,
@@ -13388,7 +14230,7 @@ async def celestial_event_check():
                             }, 0)
                         except Exception as e:
                             print(f"Error sending Blood Moon start to {guild.name}: {e}")
-                    print("Started Blood Moon (50% roll at 19:30 UTC).")
+                    print("Started Blood Moon (50% roll at 19:30 EST).")
 
             await asyncio.sleep(60)
         except Exception as e:
@@ -13849,6 +14691,7 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             extra_from_rank = subtotal * (rank_perma_buff_multiplier - 1.0)
             total_sale_value = subtotal + extra_from_rank
             total_sale_value *= get_beta_tester_money_multiplier(user_id)
+            total_sale_value *= get_nether_star_money_multiplier(user_id)
             
             # Add money to balance (with boosts)
             current_balance = get_user_balance(user_id)
@@ -13903,6 +14746,13 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
                 embed.add_field(
                     name="🧪 Beta Tester!",
                     value=f"{BETA_TESTER_MONEY_MULTIPLIER:.2f}x - **+${extra_beta:.2f}**",
+                    inline=False
+                )
+            if has_shop_item(user_id, "nether_star"):
+                extra_ns = total_sale_value * (NETHER_STAR_MONEY_MULTIPLIER - 1.0) / NETHER_STAR_MONEY_MULTIPLIER
+                embed.add_field(
+                    name=f"{NETHER_STAR_EMOJI} Nether Star",
+                    value=f"{NETHER_STAR_MONEY_MULTIPLIER:.2f}x - **+${extra_ns:.2f}**",
                     inline=False
                 )
             
@@ -13964,6 +14814,7 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         extra_from_rank = subtotal * (rank_perma_buff_multiplier - 1.0)
         sale_value = subtotal + extra_from_rank
         sale_value *= get_beta_tester_money_multiplier(user_id)
+        sale_value *= get_nether_star_money_multiplier(user_id)
         
         # Update holdings (subtract)
         update_user_crypto_holdings(user_id, coin, -amount)
@@ -14020,6 +14871,13 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             embed.add_field(
                 name="🧪 Beta Tester!",
                 value=f"{BETA_TESTER_MONEY_MULTIPLIER:.2f}x - **+${extra_beta:.2f}**",
+                inline=False
+            )
+        if has_shop_item(user_id, "nether_star"):
+            extra_ns = sale_value * (NETHER_STAR_MONEY_MULTIPLIER - 1.0) / NETHER_STAR_MONEY_MULTIPLIER
+            embed.add_field(
+                name=f"{NETHER_STAR_EMOJI} Nether Star",
+                value=f"{NETHER_STAR_MONEY_MULTIPLIER:.2f}x - **+${extra_ns:.2f}**",
                 inline=False
             )
         
@@ -14570,9 +15428,9 @@ async def gathemon(interaction: discord.Interaction, user: discord.Member, plant
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=False)
 
 
-@bot.tree.command(name="gathership", description="Challenge someone to GATHERSHIP!")
+@bot.tree.command(name="mayflower", description="Challenge someone to MAYFLOWER!")
 @app_commands.describe(
-    user="The user you challenge to Gathership",
+    user="The user you challenge to Mayflower",
     bet="Amount to bet",
     ships="Number of ships to place (1–5)"
 )
@@ -14586,9 +15444,9 @@ async def gathership(interaction: discord.Interaction, user: discord.Member, bet
         opponent_name = user.name
         channel_id = interaction.channel.id
         channel_name = (interaction.channel.name or "").lower()
-        if channel_name not in ("gathership-1", "gathership-2"):
+        if channel_name not in ("mayflower-1", "mayflower-2"):
             await safe_interaction_response(interaction, interaction.followup.send,
-                "❌ Gathership can only be played in **#gathership-1** or **#gathership-2**!", ephemeral=True)
+                "❌ Mayflower can only be played in **#mayflower-1** or **#mayflower-2**!", ephemeral=True)
             return
 
         if opponent_id == host_id:
@@ -14613,12 +15471,12 @@ async def gathership(interaction: discord.Interaction, user: discord.Member, bet
             await safe_interaction_response(interaction, interaction.followup.send, "❌ You don't have enough balance for that bet!", ephemeral=True)
             return
 
-        # One game per channel (gathership-1 and gathership-2 can each have one game running at once)
+        # One game per channel (mayflower-1 and mayflower-2 can each have one game running at once)
         if channel_id in channel_gathership and channel_gathership[channel_id] in active_gathership_games:
-            await safe_interaction_response(interaction, interaction.followup.send, "❌ There's already a Gathership game in this channel!", ephemeral=True)
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ There's already a Mayflower game in this channel!", ephemeral=True)
             return
         if host_id in user_active_gathership or opponent_id in user_active_gathership:
-            await safe_interaction_response(interaction, interaction.followup.send, "❌ You or your opponent is already in a Gathership game!", ephemeral=True)
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ You or your opponent is already in a Mayflower game!", ephemeral=True)
             return
 
         game_id = str(uuid.uuid4())[:8]
@@ -14631,8 +15489,8 @@ async def gathership(interaction: discord.Interaction, user: discord.Member, bet
         update_user_balance(host_id, new_balance)
 
         embed = discord.Embed(
-            title="⚓ GATHERSHIP ⚓",
-            description=f"{interaction.user.mention} is challenging {user.mention} to **GATHERSHIP**!\n\n{user.mention}, click **Join Game** to accept. Host can **Start Game** when ready.",
+            title="⚓ MAYFLOWER ⚓",
+            description=f"{interaction.user.mention} is challenging {user.mention} to **MAYFLOWER**!\n\n{user.mention}, click **Join Game** to accept. Host can **Start Game** when ready.",
             color=discord.Color.blue()
         )
         embed.add_field(name="💰 Bet", value=f"${bet:.2f} each", inline=True)
@@ -14641,7 +15499,7 @@ async def gathership(interaction: discord.Interaction, user: discord.Member, bet
         view = GathershipLobbyView(game_id, host_id, opponent_id, timeout=300)
         await safe_interaction_response(interaction, interaction.followup.send, content=user.mention, embed=embed, view=view)
     except Exception as e:
-        print(f"Error in gathership command: {e}")
+        print(f"Error in mayflower command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 

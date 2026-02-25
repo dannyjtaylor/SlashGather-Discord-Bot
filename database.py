@@ -125,6 +125,7 @@ def _ensure_user_document(user_id: int) -> None:
             "blooming": 0,
             "russian_roulette": 0,
             "slayer": 0,
+            "stealing": 0,
             "hidden_achievements_discovered": 0,
             "hidden_achievements": {
                 "john_rockefeller": False,
@@ -152,11 +153,15 @@ def _ensure_user_document(user_id: int) -> None:
                 "retinazer_retired": False,
                 "spazmatism_silenced": False,
                 "pve_master": False,
+                "slots_three_in_a_row": False,
             },
-            "areas_unlocked": 0
+            "areas_unlocked": 0,
+            "slots": 0
         },
         "coinflip_count": 0,
         "coinflip_win_streak": 0,
+        "slots_spin_count": 0,
+        "slots_win_streak": 0,
         "gather_command_count": 0,
         "harvest_command_count": 0,
         "invite_stats": {
@@ -177,7 +182,9 @@ def _ensure_user_document(user_id: int) -> None:
         },
         "shop_inventory": {},
         "daily_shop_purchases_count": 0,
-        "daily_shop_last_date_est": ""
+        "daily_shop_last_date_est": "",
+        "gathers_stolen": 0,
+        "harvests_stolen": 0,
     }
     users.update_one(
         {"_id": int(user_id)},
@@ -1554,6 +1561,7 @@ def wipe_user_all(user_id: int) -> None:
                 "blooming": 0,
                 "russian_roulette": 0,
                 "slayer": 0,
+                "stealing": 0,
                 "hidden_achievements_discovered": 0,
                 "hidden_achievements": {
                     "john_rockefeller": False,
@@ -1581,13 +1589,17 @@ def wipe_user_all(user_id: int) -> None:
                     "retinazer_retired": False,
                     "spazmatism_silenced": False,
                     "pve_master": False,
+                    "slots_three_in_a_row": False,
                 },
-                "areas_unlocked": 0
+                "areas_unlocked": 0,
+                "slots": 0
             },
             "pve_defeated": [],
             "total_pve_defeats": 0,
             "coinflip_count": 0,
             "coinflip_win_streak": 0,
+            "slots_spin_count": 0,
+            "slots_win_streak": 0,
             "gather_command_count": 0,
             "harvest_command_count": 0,
             "consecutive_water_days": 0,
@@ -1623,7 +1635,9 @@ def wipe_user_all(user_id: int) -> None:
             # Reset daily shop
             "shop_inventory": {},
             "daily_shop_purchases_count": 0,
-            "daily_shop_last_date_est": ""
+            "daily_shop_last_date_est": "",
+            "gathers_stolen": 0,
+            "harvests_stolen": 0,
         }},
         upsert=True,
     )
@@ -1744,6 +1758,18 @@ def get_user_pve_defeated(user_id: int) -> list:
     return list(doc.get("pve_defeated", []))
 
 
+def get_user_total_steals(user_id: int) -> int:
+    """Return total steals (gathers_stolen + harvests_stolen) for achievement tracking."""
+    users = _get_users_collection()
+    doc = users.find_one(
+        {"_id": int(user_id)},
+        {"gathers_stolen": 1, "harvests_stolen": 1},
+    )
+    if not doc:
+        return 0
+    return int(doc.get("gathers_stolen", 0)) + int(doc.get("harvests_stolen", 0))
+
+
 def get_user_total_pve_defeats(user_id: int) -> int:
     """Get user's total number of PvE defeats (each animal/boss defeat counts once per event)."""
     users = _get_users_collection()
@@ -1790,6 +1816,46 @@ def set_user_coinflip_win_streak(user_id: int, streak: int) -> None:
     users.update_one(
         {"_id": int(user_id)},
         {"$set": {"coinflip_win_streak": int(streak)}},
+        upsert=True,
+    )
+
+
+def get_user_slots_spin_count(user_id: int) -> int:
+    """Get user's total slots spin count."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"slots_spin_count": 1})
+    if not doc:
+        return 0
+    return int(doc.get("slots_spin_count", 0))
+
+
+def increment_user_slots_spin_count(user_id: int) -> None:
+    """Increment user's slots spin count by 1."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$inc": {"slots_spin_count": 1}},
+        upsert=True,
+    )
+
+
+def get_user_slots_win_streak(user_id: int) -> int:
+    """Get user's current slots win streak."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"slots_win_streak": 1})
+    if not doc:
+        return 0
+    return int(doc.get("slots_win_streak", 0))
+
+
+def set_user_slots_win_streak(user_id: int, streak: int) -> None:
+    """Set user's slots win streak."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"slots_win_streak": int(streak)}},
         upsert=True,
     )
 
@@ -2122,8 +2188,10 @@ def set_user_tractor_attunement(user_id: int, attunement: Optional[Dict]) -> Non
 
 
 # BLOOMING rank auto-unlock: CEDAR+ = grove, BIRCH+ = marsh, MAPLE+ = bog, OAK+ = mire (bloom_count 3,6,9,12)
+# All reads of unlocked_areas must go through get_user_unlocked_areas() or get_user_gather_full_data() /
+# get_user_harvest_full_data() so that this merge is applied. Never use raw doc["unlocked_areas"] for access checks.
 def _merge_bloom_auto_unlock(areas: Dict, bloom_count: int) -> Dict[str, bool]:
-    """Merge raw unlocked_areas with BLOOMING rank auto-unlocks."""
+    """Merge raw unlocked_areas with BLOOMING rank auto-unlocks. CEDAR I+ (bloom_count>=3) unlocks grove, etc."""
     return {
         "grove": bool(areas.get("grove", False)) or bloom_count >= 3,
         "marsh": bool(areas.get("marsh", False)) or bloom_count >= 6,
@@ -2503,7 +2571,8 @@ def steal_apply_gather(
     category: str,
 ) -> bool:
     """Apply a stolen gather to the stealer. Returns True if tree ring was awarded."""
-    return perform_gather_update(
+    users = _get_users_collection()
+    result = perform_gather_update(
         stealer_id,
         balance_increment=value,
         item_name=item_name,
@@ -2512,6 +2581,12 @@ def steal_apply_gather(
         apply_cooldown=False,
         increment_command_count=False,
     )
+    users.update_one(
+        {"_id": int(stealer_id)},
+        {"$inc": {"gathers_stolen": 1}},
+        upsert=True,
+    )
+    return result
 
 
 def steal_revert_harvest(
@@ -2566,7 +2641,7 @@ def steal_apply_harvest(
     if doc:
         pre_total = int(doc.get("gather_stats", {}).get("total_items", 0))
         pre_bloom = int(doc.get("bloom_cycle_plants", 0))
-    return perform_harvest_batch_update(
+    tree_rings = perform_harvest_batch_update(
         stealer_id,
         items_inc=items_inc,
         ripeness_inc=ripeness_inc,
@@ -2577,3 +2652,9 @@ def steal_apply_harvest(
         set_cooldown=False,
         increment_command_count=False,
     )
+    users.update_one(
+        {"_id": int(stealer_id)},
+        {"$inc": {"harvests_stolen": 1}},
+        upsert=True,
+    )
+    return tree_rings
