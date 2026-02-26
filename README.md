@@ -14,7 +14,7 @@ Invite Link:
 
 The Pi can update itself whenever you push from your PC or laptop. Two options:
 
-### Option A: Pi checks for updates every 5 minutes (simplest, no ports)
+### Option A: Pi checks for updates every minute (simplest, no ports)
 
 On the Pi, the repo must be a **git clone** (so it has `origin`). Then:
 
@@ -30,13 +30,13 @@ On the Pi, the repo must be a **git clone** (so it has `origin`). Then:
    ```bash
    crontab -e
    ```
-   Add this line (runs every 5 minutes):
+   Add this line (runs every minute):
    ```
-   */5 * * * * cd /home/slashgather/SlashGather-Discord-Bot && bash scripts/pull-and-restart.sh >> /home/slashgather/deploy.log 2>&1
+   * * * * * cd /home/slashgather/SlashGather-Discord-Bot && bash scripts/pull-and-restart.sh >> /home/slashgather/deploy.log 2>&1
    ```
    Use your actual username and path if different.
 
-After that, when you push to `main` from any machine, the Pi will pick up the change within 5 minutes and restart the bot.
+After that, when you push to `main` from any machine, the Pi will pick up the change within a minute and restart the bot.
 
 ### Option B: Deploy instantly via GitHub Actions (on every push)
 

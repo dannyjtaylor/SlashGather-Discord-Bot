@@ -5884,19 +5884,20 @@ class GathershipFireView(discord.ui.View):
 ])
 async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
     try:
-        if not await safe_defer(interaction, ephemeral=False):
-            return
         user_id = interaction.user.id
 
-        # 10-second cooldown after losing a coinflip
+        # 10-second cooldown after losing a coinflip — check before defer so we can reply ephemerally (only user sees it)
         last_loss_time = get_user_last_coinflip_loss_time(user_id)
         if last_loss_time > 0:
             now = time.time()
             elapsed = now - last_loss_time
             if elapsed < COINFLIP_LOSS_COOLDOWN:
                 wait_secs = int(COINFLIP_LOSS_COOLDOWN - elapsed)
-                await safe_interaction_response(interaction, interaction.followup.send, f"⏳ You lost your last coinflip. Wait **{wait_secs}** second{'s' if wait_secs != 1 else ''} before flipping again.", ephemeral=True)
+                await safe_interaction_response(interaction, interaction.response.send_message, f"⏳ Wait **{wait_secs}** second{'s' if wait_secs != 1 else ''} before flipping again.", ephemeral=True)
                 return
+
+        if not await safe_defer(interaction, ephemeral=False):
+            return
 
         # Validate bet amount is positive
         if bet <= 0:
