@@ -9556,7 +9556,7 @@ DAILY_SHOP_ITEMS = {
         "name": "Gambler's Revolver",
         "description": "A flashy pistol, engraved with \"KH\".",
         "cost": 475,
-        "effect": "*Russian Roulette death penalty reduces to 5 minutes!*",
+        "effect": "Russian Roulette death penalty reduces to 5 minutes!",
     },
     "commoners_respite": {
         "name": "Commoner's Respite",
@@ -9673,7 +9673,7 @@ def _build_daily_shop_embed_and_view(offerings: list, date_est: str):
         item_emoji = info.get("emoji", tree_ring_emoji)
         embed.add_field(
             name=f"{item_emoji} {info['name']}",
-            value=f"{info['description']}\n*{info['effect']}*\nPrice: **{info['cost']}** {tree_ring_emoji} Tree Rings",
+            value=f"{info['description']}\n***{info['effect']}***\nPrice: **{info['cost']}** {tree_ring_emoji} Tree Rings",
             inline=False
         )
     embed.set_footer(text=f"Shop refreshes in {_format_refresh_countdown()}")
@@ -12655,7 +12655,7 @@ async def giveaway(
                 description=f"**{info['name']}** has been given to {user.mention}!",
                 color=discord.Color.gold()
             )
-            embed.add_field(name="Effect", value=info["effect"], inline=False)
+            embed.add_field(name="Effect", value=f"***{info['effect']}***", inline=False)
             embed.set_footer(text=f"Given by {interaction.user.name}")
             print(f"Admin {interaction.user.name} used /giveaway shop_item to give {user.name} {info['name']}")
 
