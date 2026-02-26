@@ -2212,24 +2212,25 @@ def set_user_tractor_attunement(user_id: int, attunement: Optional[Dict]) -> Non
 # All reads of unlocked_areas must go through get_user_unlocked_areas() or get_user_gather_full_data() /
 # get_user_harvest_full_data() so that this merge is applied. Never use raw doc["unlocked_areas"] for access checks.
 def _merge_bloom_auto_unlock(areas: Dict, bloom_count: int) -> Dict[str, bool]:
-    """Merge raw unlocked_areas with BLOOMING rank auto-unlocks. CEDAR I+ (bloom_count>=3) unlocks grove, etc."""
-    return {
-        "grove": bool(areas.get("grove", False)) or bloom_count >= 3,
-        "marsh": bool(areas.get("marsh", False)) or bloom_count >= 6,
-        "bog": bool(areas.get("bog", False)) or bloom_count >= 9,
-        "mire": bool(areas.get("mire", False)) or bloom_count >= 12,
-    }
+    """Merge raw unlocked_areas with BLOOMING rank auto-unlocks. CEDAR I+ (bloom_count>=3) unlocks grove, etc.
+    Preserves all other keys (e.g. underground-jungle) from areas so manually unlocked areas work for gather/harvest."""
+    out = dict(areas)
+    out["grove"] = bool(areas.get("grove", False)) or bloom_count >= 3
+    out["marsh"] = bool(areas.get("marsh", False)) or bloom_count >= 6
+    out["bog"] = bool(areas.get("bog", False)) or bloom_count >= 9
+    out["mire"] = bool(areas.get("mire", False)) or bloom_count >= 12
+    return out
 
 
 # Area unlock functions
 def get_user_unlocked_areas(user_id: int) -> Dict[str, bool]:
     """Get user's unlocked areas. Returns dict with area names as keys and unlock status as values.
-    CEDAR+ auto-unlocks grove, BIRCH+ marsh, MAPLE+ bog, OAK+ mire."""
+    CEDAR+ auto-unlocks grove, BIRCH+ marsh, MAPLE+ bog, OAK+ mire. Preserves manually unlocked areas (e.g. underground-jungle)."""
     users = _get_users_collection()
     _ensure_user_document(user_id)
     doc = users.find_one({"_id": int(user_id)}, {"unlocked_areas": 1, "bloom_count": 1})
     if not doc:
-        return {"grove": False, "marsh": False, "bog": False, "mire": False}
+        return {}
     areas = doc.get("unlocked_areas", {})
     bloom_count = int(doc.get("bloom_count", 0))
     return _merge_bloom_auto_unlock(areas, bloom_count)
@@ -2254,7 +2255,8 @@ def reset_user_areas(user_id: int) -> None:
             "grove": False,
             "marsh": False,
             "bog": False,
-            "mire": False
+            "mire": False,
+            "underground-jungle": False,
         }}},
         upsert=True,
     )

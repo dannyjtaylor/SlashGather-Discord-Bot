@@ -6725,8 +6725,12 @@ async def _gather_post_response(interaction: discord.Interaction, user_id: int,
             return planter_up, gatherer_up
 
         planter_up, gatherer_up = await asyncio.to_thread(_check_achievements)
-        if planter_up:
-            await send_achievement_notification(interaction, "planter", planter_up)
+        # Planter achievement: only send when we just showed the rank-up (new_role), so rank-up always displays first
+        if new_role and new_role in PLANTER_RANK_ORDER:
+            level = PLANTER_RANK_ORDER[new_role]
+            cur_planter_ach = planter_up if planter_up else (await asyncio.to_thread(get_user_achievement_level, user_id, "planter"))
+            if cur_planter_ach >= level:
+                await send_achievement_notification(interaction, "planter", level)
         if gatherer_up:
             await send_achievement_notification(interaction, "gatherer", gatherer_up)
 
@@ -8949,8 +8953,12 @@ async def _harvest_post_response(interaction: discord.Interaction, user_id: int,
             return planter_up, harvesting_up
 
         planter_up, harvesting_up = await asyncio.to_thread(_check_achievements)
-        if planter_up:
-            await send_achievement_notification(interaction, "planter", planter_up)
+        # Planter achievement: only send when we just showed the rank-up (new_role), so rank-up always displays first
+        if new_role and new_role in PLANTER_RANK_ORDER:
+            level = PLANTER_RANK_ORDER[new_role]
+            cur_planter_ach = planter_up if planter_up else (await asyncio.to_thread(get_user_achievement_level, user_id, "planter"))
+            if cur_planter_ach >= level:
+                await send_achievement_notification(interaction, "planter", level)
         if harvesting_up:
             await send_achievement_notification(interaction, "harvesting", harvesting_up)
 
