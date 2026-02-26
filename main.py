@@ -1287,6 +1287,9 @@ GATHERING_AREAS = {
 
 VALID_GATHERING_CHANNELS = set(GATHERING_AREAS.keys())
 
+# Order of unlockable areas for areas_unlocked achievement (forest is default; jungle before grove)
+AREA_ORDER_FOR_ACHIEVEMENT = ["underground-jungle", "grove", "marsh", "bog", "mire"]
+
 # Day/Night (Terraria-style): Solar Eclipse = day (4:30 AM–7:29 PM EST), Blood Moon = night (7:30 PM–4:29 AM EST). Spawn boost during these.
 def _is_solar_eclipse_or_blood_moon():
     """Return (is_solar_eclipse, is_blood_moon) based on EST hour. Day 4:30–19:29 EST, Night 19:30–4:29 EST."""
@@ -1678,7 +1681,7 @@ ender_dragon_regen_tasks: dict[int, asyncio.Task] = {}
 # When a boss is defeated we append (boss, attackers); when all bosses in the event are dead we distribute and broadcast
 _pve_boss_defeated_pending: dict[int, list] = {}  # guild_id -> [(boss, attackers), ...]
 plantera_bulb_eligible_guilds: dict[int, float] = {}  # guild_id -> timestamp when last boss was defeated (for Plantera bulb chance)
-PLANTERA_BULB_CHANCE = 0.15
+PLANTERA_BULB_CHANCE = 0.02
 PLANTERA_BULB_MAX_AGE_SEC = 86400  # 24h
 # #underground-jungle: 2x wild animal and boss spawn
 UNDERGROUND_JUNGLE_ANIMAL_SPAWN_MULT = 2.0
@@ -2364,31 +2367,38 @@ ACHIEVEMENTS = {
             },
             {
                 "level": 1,
-                "name": "Treasure Grove",
-                "description": "Unlock the #grove.",
+                "name": "Mahogany",
+                "description": "Unlock the #underground-jungle",
                 "threshold": 1,
                 "boost": 0.02  # 2%
             },
             {
                 "level": 2,
-                "name": "Marshing On",
-                "description": "Unlock the #marsh",
+                "name": "Treasure Grove",
+                "description": "Unlock the #grove.",
                 "threshold": 2,
                 "boost": 0.10  # 10%
             },
             {
                 "level": 3,
-                "name": "Not To Be Confused With Bug",
-                "description": "Unlock the #bog",
+                "name": "Marshing On",
+                "description": "Unlock the #marsh",
                 "threshold": 3,
                 "boost": 0.30  # 30%
             },
             {
                 "level": 4,
-                "name": "But Not Loot Lake",
-                "description": "Unlock the #mire",
+                "name": "Not To Be Confused With Bug",
+                "description": "Unlock the #bog",
                 "threshold": 4,
                 "boost": 0.50  # 50%
+            },
+            {
+                "level": 5,
+                "name": "But Not Loot Lake",
+                "description": "Unlock the #mire",
+                "threshold": 5,
+                "boost": 0.75  # 75%
             }
         ]
     },
@@ -6378,7 +6388,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.10.4 TEST :3"
+            name="running /gather on V0.10.4 :3"
         )
     )
     try:
@@ -8354,8 +8364,10 @@ async def gather(interaction: discord.Interaction):
         # === Background: role assignment + achievements (user already has the response) ===
         asyncio.create_task(_gather_post_response(interaction, user_id, full_data, gather_result))
 
-        # === Plantera bulb chance (only in #underground-jungle after a recent boss defeat) ===
-        if (channel_name == "underground-jungle" and guild_id
+        # === PvE spawn: try Plantera (jungle only) -> boss -> wild animal, in order; at most one spawn per gather ===
+        pve_spawned = False
+        # 1. Plantera bulb (only in #underground-jungle after a recent boss defeat)
+        if (not pve_spawned and channel_name == "underground-jungle" and guild_id
                 and guild_id in plantera_bulb_eligible_guilds
                 and (time.time() - plantera_bulb_eligible_guilds[guild_id]) <= PLANTERA_BULB_MAX_AGE_SEC
                 and interaction.channel.id not in active_pve_events
@@ -8368,9 +8380,9 @@ async def gather(interaction: discord.Interaction):
                 color=0x2d5a1a)
             view = PlanteraBulbView(interaction.channel.id, guild_id, area_mult)
             asyncio.create_task(interaction.channel.send(embed=bulb_embed, view=view))
-
-        # === Boss spawn (rarer): no animal/boss when a boss is active; 1-min warning then boss in this channel ===
-        elif (channel_name in VALID_GATHERING_CHANNELS and guild_id and guild_id not in active_boss_events
+            pve_spawned = True
+        # 2. Boss spawn (rarer): 1-min warning then boss in this channel
+        if (not pve_spawned and channel_name in VALID_GATHERING_CHANNELS and guild_id and guild_id not in active_boss_events
                 and interaction.channel.id not in active_pve_events
                 and not result.get("stealable")):
             _, boss_mult = _pve_spawn_multiplier()
@@ -8382,9 +8394,9 @@ async def gather(interaction: discord.Interaction):
                 boss = random.choice(bosses_candidates)
                 await _send_boss_warning_embed(interaction.guild, boss)
                 asyncio.create_task(_delayed_boss_spawn(interaction.guild, interaction.channel, boss, area_mult, 60.0))
-
-        # === PvE wild animal: only if no boss active and this channel has no animal; spawns in this channel only ===
-        elif (channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
+                pve_spawned = True
+        # 3. PvE wild animal: only if no boss active and this channel has no PvE event
+        if (not pve_spawned and channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
                 and guild_id not in active_boss_events
                 and not result.get("stealable")):
             animal_mult, _ = _pve_spawn_multiplier()
@@ -9167,8 +9179,10 @@ async def harvest(interaction: discord.Interaction):
         # === Background: role assignment + achievements (user already has the response) ===
         asyncio.create_task(_harvest_post_response(interaction, user_id, full_data, result))
 
-        # === Plantera bulb chance (only in #underground-jungle after a recent boss defeat) ===
-        if (channel_name == "underground-jungle" and guild_id
+        # === PvE spawn: try Plantera (jungle only) -> boss -> wild animal, in order; at most one spawn per harvest ===
+        pve_spawned = False
+        # 1. Plantera bulb (only in #underground-jungle after a recent boss defeat)
+        if (not pve_spawned and channel_name == "underground-jungle" and guild_id
                 and guild_id in plantera_bulb_eligible_guilds
                 and (time.time() - plantera_bulb_eligible_guilds[guild_id]) <= PLANTERA_BULB_MAX_AGE_SEC
                 and interaction.channel.id not in active_pve_events
@@ -9181,9 +9195,9 @@ async def harvest(interaction: discord.Interaction):
                 color=0x2d5a1a)
             view = PlanteraBulbView(interaction.channel.id, guild_id, area_mult)
             asyncio.create_task(interaction.channel.send(embed=bulb_embed, view=view))
-
-        # === Boss spawn (rarer): no animal/boss when a boss is active ===
-        elif (channel_name in VALID_GATHERING_CHANNELS and guild_id and guild_id not in active_boss_events
+            pve_spawned = True
+        # 2. Boss spawn (rarer)
+        if (not pve_spawned and channel_name in VALID_GATHERING_CHANNELS and guild_id and guild_id not in active_boss_events
                 and interaction.channel.id not in active_pve_events
                 and not crit.get("stealable")):
             _, boss_mult = _pve_spawn_multiplier()
@@ -9195,9 +9209,9 @@ async def harvest(interaction: discord.Interaction):
                 boss = random.choice(bosses_candidates)
                 await _send_boss_warning_embed(interaction.guild, boss)
                 asyncio.create_task(_delayed_boss_spawn(interaction.guild, interaction.channel, boss, area_mult, 60.0))
-
-        # === PvE wild animal: only if no boss active and this channel has no animal ===
-        elif (channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
+                pve_spawned = True
+        # 3. PvE wild animal
+        if (not pve_spawned and channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
                 and guild_id not in active_boss_events
                 and not crit.get("stealable")):
             animal_mult, _ = _pve_spawn_multiplier()
@@ -9503,14 +9517,16 @@ async def unlock(interaction: discord.Interaction, area: app_commands.Choice[str
         
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
         
-        # Award areas_unlocked achievement
-        # Count how many areas the user now has unlocked
+        # Award areas_unlocked achievement (progression: jungle → grove → marsh → bog → mire)
         updated_unlocked = get_user_unlocked_areas(user_id)
-        areas_count = sum(1 for v in updated_unlocked.values() if v)
+        unlocked_levels = [
+            i + 1 for i, key in enumerate(AREA_ORDER_FOR_ACHIEVEMENT) if updated_unlocked.get(key)
+        ]
+        areas_achievement_level = max(unlocked_levels) if unlocked_levels else 0
         current_areas_achievement = get_user_achievement_level(user_id, "areas_unlocked")
-        if areas_count > current_areas_achievement:
-            set_user_achievement_level(user_id, "areas_unlocked", areas_count)
-            await send_achievement_notification(interaction, "areas_unlocked", areas_count)
+        if areas_achievement_level > current_areas_achievement:
+            set_user_achievement_level(user_id, "areas_unlocked", areas_achievement_level)
+            await send_achievement_notification(interaction, "areas_unlocked", areas_achievement_level)
     except Exception as e:
         print(f"Error in unlock command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
@@ -9609,7 +9625,7 @@ DAILY_SHOP_ITEMS = {
         "name": "Zenith",
         "description": "The culmination of a journey forged into the ultimate sword.",
         "cost": 275,
-        "effect": "PvE: deal 3 damage per hit (instead of 1). Stacks with other weapons!",
+        "effect": "Adds +2 ATK to Enemies",
     },
     "alchemists_pocketwatch": {
         "name": "Alchemist's Pocketwatch",
@@ -9621,19 +9637,19 @@ DAILY_SHOP_ITEMS = {
         "name": "Split Soul Katana",
         "description": "No cursed energy required!",
         "cost": 150,
-        "effect": "PvE: deal 2 damage per hit to enemies. Stacks with other weapons!",
+        "effect": "Adds +1 ATK to Enemies",
     },
     "inverted_spear_of_heaven": {
         "name": "Inverted Spear of Heaven",
         "description": "Your name's not Zenin? That makes me glad.",
         "cost": 200,
-        "effect": "PvE: deal 2 damage per hit to enemies and bosses. Stacks with other weapons!",
+        "effect": "Adds +1 ATK to Enemies",
     },
     "diamond_sword": {
         "name": "Diamond Sword",
         "description": "Do you like it?",
         "cost": 100,
-        "effect": "PvE: deal 2 damage per hit to enemies. Stacks with other weapons!",
+        "effect": "Adds +1 ATK to Enemies",
     },
     "palace_treasure": {
         "name": "Palace Treasure",
@@ -9927,8 +9943,14 @@ class DailyShopInventoryButton(discord.ui.Button):
         if not inv:
             embed.add_field(name="Items", value="*No items yet. Use the buttons above to buy!*", inline=False)
         else:
-            lines = [f"**{DAILY_SHOP_ITEMS.get(i, {}).get('name', i)}** × {c}" for i, c in sorted(inv.items(), key=lambda x: (-x[1], x[0]))]
-            embed.add_field(name="Items", value="\n".join(lines), inline=False)
+            lines = []
+            for i, c in sorted(inv.items(), key=lambda x: (-x[1], x[0])):
+                info = DAILY_SHOP_ITEMS.get(i, {})
+                name = info.get("name", i)
+                desc = info.get("description", "")
+                effect = info.get("effect", "")
+                lines.append(f"**{name}** × {c}\n*{desc}*\n**Buff:** {effect}")
+            embed.add_field(name="Items", value="\n\n".join(lines), inline=False)
         await safe_interaction_response(interaction, interaction.response.send_message, embed=embed, ephemeral=True)
 
 
@@ -9954,8 +9976,14 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
             if not inv:
                 embed.add_field(name="Items", value="*No items yet. Use /dailyshop to open the shop and buy!*", inline=False)
             else:
-                lines = [f"**{DAILY_SHOP_ITEMS.get(i, {}).get('name', i)}** × {c}" for i, c in sorted(inv.items(), key=lambda x: (-x[1], x[0]))]
-                embed.add_field(name="Items", value="\n".join(lines), inline=False)
+                lines = []
+                for i, c in sorted(inv.items(), key=lambda x: (-x[1], x[0])):
+                    info = DAILY_SHOP_ITEMS.get(i, {})
+                    name = info.get("name", i)
+                    desc = info.get("description", "")
+                    effect = info.get("effect", "")
+                    lines.append(f"**{name}** × {c}\n*{desc}*\n**Buff:** {effect}")
+                embed.add_field(name="Items", value="\n\n".join(lines), inline=False)
             embed.set_footer(text="Shop refreshes daily at midnight EST")
             await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
             return
