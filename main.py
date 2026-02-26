@@ -1616,7 +1616,7 @@ PVE_BOSSES = [
         "color": 0x4a0080,
         "description": "The Ender Dragon appears!",
         "defeat_msg": "The Ender Dragon lets out a final roar and dissolves into motes of light. The End has been conquered!",
-        "pre_spawn_text": "The void stirs… the fabric of the world tears. Something from the End is awakening…",
+        "pre_spawn_text": "The End Portal opens...",
         "server_defeat_msg": "The **Ender Dragon** has been defeated! The gathering grounds are safe once more.",
     },
     {
@@ -2748,6 +2748,11 @@ HIDDEN_ACHIEVEMENTS = {
         "description": "Defeat The Wither",
         "boost": 0.05  # 5%
     },
+    "ender_dragon_slayer": {
+        "name": "The End?",
+        "description": "Defeat the Ender Dragon",
+        "boost": 0.05  # 5%
+    },
     "retinazer_retired": {
         "name": "Ophthalmologist",
         "description": "Defeat Retinazer (The Twins)",
@@ -2831,7 +2836,7 @@ HIDDEN_ACHIEVEMENTS = {
 }
 
 # Total number of hidden achievements
-TOTAL_HIDDEN_ACHIEVEMENTS = 39
+TOTAL_HIDDEN_ACHIEVEMENTS = 40
 
 
 def check_maxed_out_achievement(user_id: int) -> bool:
