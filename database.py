@@ -79,6 +79,7 @@ def _ensure_user_document(user_id: int) -> None:
         "last_harvest_time": 0.0,
         "last_mine_time": 0.0,
         "last_roulette_elimination_time": 0.0,
+        "last_coinflip_loss_time": 0.0,
         "total_forage_count": 0,
         "items": {},
         "ripeness_stats": {},
@@ -515,6 +516,23 @@ def update_user_last_roulette_elimination_time(user_id: int, timestamp: float) -
     users.update_one(
         {"_id": int(user_id)},
         {"$set": {"last_roulette_elimination_time": float(timestamp)}},
+        upsert=True,
+    )
+
+
+def get_user_last_coinflip_loss_time(user_id: int) -> float:
+    """Get user's last coinflip loss time (for 10-second cooldown after losing)."""
+    users = _get_users_collection()
+    doc = users.find_one({"_id": int(user_id)}, {"last_coinflip_loss_time": 1})
+    return float(doc.get("last_coinflip_loss_time", 0.0)) if doc else 0.0
+
+
+def update_user_last_coinflip_loss_time(user_id: int, timestamp: float) -> None:
+    """Update user's last coinflip loss time (sets 10-second cooldown before next /coinflip)."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"last_coinflip_loss_time": float(timestamp)}},
         upsert=True,
     )
 
@@ -1441,6 +1459,7 @@ def reset_user_cooldowns(user_id: int) -> None:
             "last_harvest_time": 0.0,
             "last_mine_time": 0.0,
             "last_roulette_elimination_time": 0.0,
+            "last_coinflip_loss_time": 0.0,
             "last_water_time": 0.0,
             "consecutive_water_days": 0
         }},
@@ -1489,6 +1508,7 @@ def wipe_user_plants(user_id: int) -> None:
             "last_harvest_time": 0.0,
             "last_mine_time": 0.0,
             "last_roulette_elimination_time": 0.0,
+            "last_coinflip_loss_time": 0.0,
             "last_water_time": 0.0
         }},
         upsert=True,
@@ -1621,6 +1641,7 @@ def wipe_user_all(user_id: int) -> None:
             "last_harvest_time": 0.0,
             "last_mine_time": 0.0,
             "last_roulette_elimination_time": 0.0,
+            "last_coinflip_loss_time": 0.0,
             "last_water_time": 0.0,
             # Reset attunements
             "hoe_enchantment": None,

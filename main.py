@@ -144,6 +144,8 @@ from database import (
     increment_user_coinflip_count,
     get_user_coinflip_win_streak,
     set_user_coinflip_win_streak,
+    get_user_last_coinflip_loss_time,
+    update_user_last_coinflip_loss_time,
     get_user_slots_spin_count,
     increment_user_slots_spin_count,
     get_user_slots_win_streak,
@@ -481,6 +483,7 @@ GATHER_COOLDOWN = 60 #(seconds)
 HARVEST_COOLDOWN = 60 * 30 #(30 minutes)
 MINE_COOLDOWN = 60 * 60 #(1 hour)
 ROULETTE_ELIMINATION_COOLDOWN = 60 * 30 #(30 minutes)
+COINFLIP_LOSS_COOLDOWN = 10  # seconds before next /coinflip after losing
 
 # Event check intervals (for testing - adjust these values to change how often events are checked)
 # In production, these should be: HOURLY_EVENT_INTERVAL = 3600, DAILY_EVENT_INTERVAL = 86400
@@ -1313,7 +1316,7 @@ SOLAR_ECLIPSE_COLOR = 0xFF8C00   # bright orange
 BLOOD_MOON_COLOR = 0xDC143C      # bright red (crimson, distinct from discord red)
 CELESTIAL_DAY_START_EST = (4, 30)   # 4:30 AM EST (Solar Eclipse start)
 CELESTIAL_NIGHT_START_EST = (19, 30)  # 7:30 PM EST (Blood Moon start)
-CELESTIAL_TRIGGER_CHANCE = 0.5   # 50% at start time, Terraria-style
+CELESTIAL_TRIGGER_CHANCE = 0.1   # 10% at start time, Terraria-style
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PvE Wild Animal Event System
@@ -5884,7 +5887,17 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
         if not await safe_defer(interaction, ephemeral=False):
             return
         user_id = interaction.user.id
-        
+
+        # 10-second cooldown after losing a coinflip
+        last_loss_time = get_user_last_coinflip_loss_time(user_id)
+        if last_loss_time > 0:
+            now = time.time()
+            elapsed = now - last_loss_time
+            if elapsed < COINFLIP_LOSS_COOLDOWN:
+                wait_secs = int(COINFLIP_LOSS_COOLDOWN - elapsed)
+                await safe_interaction_response(interaction, interaction.followup.send, f"⏳ You lost your last coinflip. Wait **{wait_secs}** second{'s' if wait_secs != 1 else ''} before flipping again.", ephemeral=True)
+                return
+
         # Validate bet amount is positive
         if bet <= 0:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ Bet amount must be greater than $0.00!", ephemeral=True)
@@ -5934,9 +5947,10 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
                 set_user_achievement_level(user_id, "coinflip_win_streak", new_streak_level)
                 achievements_unlocked.append(("coinflip_win_streak", new_streak_level))
         else:
-            # They lose - reset streak to 0
+            # They lose - reset streak to 0 and set 10-second cooldown
             set_user_coinflip_win_streak(user_id, 0)
-        
+            update_user_last_coinflip_loss_time(user_id, time.time())
+
         # Check and update coinflip_total achievement
         coinflip_count = get_user_coinflip_count(user_id)
         new_total_level = get_achievement_level_for_stat("coinflip_total", coinflip_count)
@@ -6358,7 +6372,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.10.2 :3"
+            name="running /gather on V0.10.3 :3"
         )
     )
     try:
@@ -11668,7 +11682,7 @@ async def endevent(interaction: discord.Interaction, event_type: str):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
-# Spawn command - Admin only: spawn any wild animal or boss in a chosen gather channel
+# Spawn commands - Admin only. Split into spawn_animal and spawn_boss so each has ≤25 choices (Discord limit).
 def _spawn_animal_choices():
     choices = [app_commands.Choice(name=f"{a['emoji']} {a['name']}", value=a["name"].lower().replace(" ", "_")) for a in PVE_WILD_ANIMALS_SINGLE]
     choices.append(app_commands.Choice(name="🐜 Bullet Ant Swarm", value="bullet_ant_swarm"))
@@ -11682,19 +11696,35 @@ def _spawn_boss_choices():
     choices.append(app_commands.Choice(name="👁️🔥 The Twins", value="twins"))
     return choices
 
-@bot.tree.command(name="spawn", description="[ADMIN] Spawn a wild animal or boss in a gathering channel")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(animal="Animal or boss to spawn", channel="Gathering channel to spawn in")
-@app_commands.choices(animal=_spawn_animal_choices() + _spawn_boss_choices())
-@app_commands.choices(channel=[
+_SPAWN_CHANNEL_CHOICES = [
     app_commands.Choice(name="#forest", value="forest"),
     app_commands.Choice(name="#grove", value="grove"),
     app_commands.Choice(name="#marsh", value="marsh"),
     app_commands.Choice(name="#bog", value="bog"),
     app_commands.Choice(name="#mire", value="mire"),
     app_commands.Choice(name="#underground-jungle", value="underground-jungle"),
-])
-async def spawn(interaction: discord.Interaction, animal: str, channel: str):
+]
+
+async def _spawn_resolve_channel(interaction: discord.Interaction, channel: str):
+    """Returns (target, area_mult) or (None, None) after sending an error if invalid."""
+    target = discord.utils.get(interaction.guild.text_channels, name=channel)
+    if not target:
+        await safe_interaction_response(interaction, interaction.followup.send,
+            f"❌ Channel **#{channel}** not found in this server.", ephemeral=True)
+        return None, None
+    area = GATHERING_AREAS.get(channel)
+    if not area:
+        await safe_interaction_response(interaction, interaction.followup.send,
+            f"❌ **{channel}** is not a valid gathering channel.", ephemeral=True)
+        return None, None
+    return target, area.get("multiplier", 1.0)
+
+@bot.tree.command(name="spawn_animal", description="[ADMIN] Spawn a wild animal in a gathering channel")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(animal="Animal to spawn", channel="Gathering channel to spawn in")
+@app_commands.choices(animal=_spawn_animal_choices())
+@app_commands.choices(channel=_SPAWN_CHANNEL_CHOICES)
+async def spawn_animal(interaction: discord.Interaction, animal: str, channel: str):
     try:
         if not await safe_defer(interaction, ephemeral=True):
             return
@@ -11702,38 +11732,8 @@ async def spawn(interaction: discord.Interaction, animal: str, channel: str):
             await safe_interaction_response(interaction, interaction.followup.send,
                 "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
             return
-
-        target = discord.utils.get(interaction.guild.text_channels, name=channel)
-        if not target:
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"❌ Channel **#{channel}** not found in this server.", ephemeral=True)
-            return
-
-        area = GATHERING_AREAS.get(channel)
-        if not area:
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"❌ **{channel}** is not a valid gathering channel.", ephemeral=True)
-            return
-        area_mult = area.get("multiplier", 1.0)
-
-        # The Twins (single choice spawns both Retinazer and Spazmatism as two boss embeds)
-        if animal == "twins":
-            await trigger_twins_boss_event(target, area_mult)
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"✅ Spawned **The Twins** in {target.mention}!", ephemeral=True)
-            return
-
-        # Boss spawn (single boss)
-        boss = next((b for b in PVE_BOSSES if b["id"] == animal), None)
-        if boss:
-            if boss["id"] == ENDER_DRAGON_ID:
-                await trigger_ender_dragon_event(target, area_mult)
-                await safe_interaction_response(interaction, interaction.followup.send,
-                    f"✅ Spawned **{boss['name']}** in {target.mention} (and Obsidian Towers in other channels)!", ephemeral=True)
-            else:
-                await trigger_boss_event(target, boss, area_mult)
-                await safe_interaction_response(interaction, interaction.followup.send,
-                    f"✅ Spawned **{boss['name']}** in {target.mention}!", ephemeral=True)
+        target, area_mult = await _spawn_resolve_channel(interaction, channel)
+        if target is None:
             return
 
         # Bullet Ant Swarm
@@ -11803,7 +11803,50 @@ async def spawn(interaction: discord.Interaction, animal: str, channel: str):
         await safe_interaction_response(interaction, interaction.followup.send,
             f"✅ Spawned **{chosen['name']}** in {target.mention}!", ephemeral=True)
     except Exception as e:
-        print(f"Error in spawn command: {e}")
+        print(f"Error in spawn_animal command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+@bot.tree.command(name="spawn_boss", description="[ADMIN] Spawn a boss in a gathering channel")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(boss="Boss to spawn", channel="Gathering channel to spawn in")
+@app_commands.choices(boss=_spawn_boss_choices())
+@app_commands.choices(channel=_SPAWN_CHANNEL_CHOICES)
+async def spawn_boss(interaction: discord.Interaction, boss: str, channel: str):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+        target, area_mult = await _spawn_resolve_channel(interaction, channel)
+        if target is None:
+            return
+
+        # The Twins (single choice spawns both Retinazer and Spazmatism as two boss embeds)
+        if boss == "twins":
+            await trigger_twins_boss_event(target, area_mult)
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"✅ Spawned **The Twins** in {target.mention}!", ephemeral=True)
+            return
+
+        # Single boss
+        boss_obj = next((b for b in PVE_BOSSES if b["id"] == boss), None)
+        if boss_obj:
+            if boss_obj["id"] == ENDER_DRAGON_ID:
+                await trigger_ender_dragon_event(target, area_mult)
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"✅ Spawned **{boss_obj['name']}** in {target.mention} (and Obsidian Towers in other channels)!", ephemeral=True)
+            else:
+                await trigger_boss_event(target, boss_obj, area_mult)
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"✅ Spawned **{boss_obj['name']}** in {target.mention}!", ephemeral=True)
+            return
+
+        await safe_interaction_response(interaction, interaction.followup.send, f"❌ Unknown boss **{boss}**.", ephemeral=True)
+    except Exception as e:
+        print(f"Error in spawn_boss command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
