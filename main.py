@@ -1277,7 +1277,7 @@ GATHERING_AREAS = {
         "required_planter_level": 2,
         "unlock_cost": 100_000,
         "unlocked_by_default": False,
-        "previous_area": "mire",
+        "previous_area": None,  # Can be unlocked first (with grove); not required for marsh/bog/mire
         "order": 5
     }
 }
@@ -1412,6 +1412,114 @@ PVE_SWARM_TRIGGER_CHANCE = 0.125  # 1/8 chance to spawn swarm instead of single 
 PVE_WILD_ANIMALS_SINGLE = [a for a in PVE_WILD_ANIMALS if not a.get("is_swarm_ant")]
 BULLET_ANT_ANIMAL = next(a for a in PVE_WILD_ANIMALS if a.get("is_swarm_ant"))
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# PvE Wild Animals — UNDERGROUND JUNGLE ONLY (#underground-jungle channel only)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+PVE_WILD_ANIMALS_UNDERGROUND_JUNGLE = [
+    {
+        "id": "hornet",
+        "name": "Hornet",
+        "emoji": "🐝",
+        "hp_range": (30, 32),
+        "color": 0xFFD700,
+        "description": "A Hornet buzzes into your way, stinger aimed at anyone who tries to get close!",
+        "defeat_msg": "The Hornet flees!",
+    },
+    {
+        "id": "bee",
+        "name": "Bee",
+        "emoji": "🐝",
+        "hp_range": (1, 3),
+        "color": 0xFFC800,
+        "description": "A Bee from the swarm! Swat it!",
+        "defeat_msg": "The bee was killed!",
+        "is_swarm_bee": True,
+    },
+    {
+        "id": "angry_trapper",
+        "name": "Angry Trapper",
+        "emoji": "🪤",
+        "hp_range": (70, 77),
+        "color": 0x4A3728,
+        "description": "An Angry Trapper springs from the jungle floor, snapping its jaws at everyone!",
+        "defeat_msg": "The Angry Trapper wilts and collapses back into the soil!",
+    },
+    {
+        "id": "man_eater",
+        "name": "Man Eater",
+        "emoji": "🌿",
+        "hp_range": (60, 70),
+        "color": 0x228B22,
+        "description": "A Man Eater slithers through the vines, beckoning anyone to put a limb in its jaws!",
+        "defeat_msg": "The Man Eater retracts into the jungle, defeated!",
+    },
+    {
+        "id": "giant_tortoise",
+        "name": "Giant Tortoise",
+        "emoji": "🐢",
+        "hp_range": (110, 124),
+        "color": 0x3D5C3D,
+        "description": "A Giant Tortoise soars through the underground jungle, attempting to squash anyone that moves!",
+        "defeat_msg": "The Giant Tortoise retreats into its shell and jumps away!",
+    },
+    {
+        "id": "arapaima",
+        "name": "Arapaima",
+        "emoji": "🐟",
+        "hp_range": (25, 31),
+        "color": 0x8B7355,
+        "description": "An Arapaima has leapt from the Jungle water, thrashing around everywhere!",
+        "defeat_msg": "The Arapaima flops back into the water and disappears!",
+    },
+    {
+        "id": "piranha",
+        "name": "Piranha",
+        "emoji": "🐠",
+        "hp_range": (15, 18),
+        "color": 0xCD5C5C,
+        "description": "A Piranha has swam to the surface of the water, snapping its teeth at you!",
+        "defeat_msg": "The Piranha sinks beneath the surface, defeated!",
+    },
+    {
+        "id": "moth",
+        "name": "Moth",
+        "emoji": "🦋",
+        "hp_range": (100, 100),
+        "color": 0x2F1B2E,
+        "description": "A huge Moth flutters down from the canopy, mutated due to jungle toxins!",
+        "defeat_msg": "The Moth dissolves into Butterfly Dust!",
+        "spawn_weight": 0.25,  # rarer
+    },
+    {
+        "id": "spiked_jungle_slime",
+        "name": "Spiked Jungle Slime",
+        "emoji": "🟢",
+        "hp_range": (18, 22),
+        "color": 0x2D5A27,
+        "description": "A **Spiked Jungle Slime** oozes out of the mud, covered in sharp thorns!",
+        "defeat_msg": "The **Spiked Jungle Slime** bursts into goo and soaks into the ground!",
+    },
+    {
+        "id": "jungle_bat",
+        "name": "Jungle Bat",
+        "emoji": "🦇",
+        "hp_range": (10, 17),
+        "color": 0x1C1C1C,
+        "description": "A **Jungle Bat** swoops down from the cavern ceiling, screeching!",
+        "defeat_msg": "The **Jungle Bat** flutters away into the shadows!",
+    },
+]
+
+BEE_SWARM_INTRO = "A swarm of bees block the path! Take down each bee!"
+BEE_SWARM_DEFEAT = "The rest of the swarm disperses back into the jungle!"
+BEE_SWARM_COUNT_RANGE = (4, 6)
+BEE_SWARM_LARVA_CHANCE = 0.40  # 40% chance for Larva after defeating Bee Swarm
+LARVA_TIMEOUT_SEC = 10.0
+
+PVE_WILD_ANIMALS_UNDERGROUND_JUNGLE_SINGLE = [a for a in PVE_WILD_ANIMALS_UNDERGROUND_JUNGLE if not a.get("is_swarm_bee")]
+BEE_ANIMAL = next(a for a in PVE_WILD_ANIMALS_UNDERGROUND_JUNGLE if a.get("is_swarm_bee"))
+
 # Tracks active PvE events per channel: channel_id -> PvE event data
 active_pve_events: dict[int, dict] = {}
 
@@ -1508,6 +1616,17 @@ PVE_BOSSES = [
         "pre_spawn_text": "The void stirs… the fabric of the world tears. Something from the End is awakening…",
         "server_defeat_msg": "The **Ender Dragon** has been defeated! The gathering grounds are safe once more.",
     },
+    {
+        "id": "queen_bee",
+        "name": "Queen Bee",
+        "emoji": "👑🐝",
+        "hp_range": (220, 260),
+        "color": 0xFFD700,
+        "description": "You disturbed the bees.. Queen Bee is out to get everyone in the Underground Jungle!",
+        "defeat_msg": "The **Queen Bee** buzzes one last time and collapses. The hive is quiet again!",
+        "pre_spawn_text": "Queen Bee has awoken!",
+        "server_defeat_msg": "The **Queen Bee** has been defeated! The underground jungle is safe again.",
+    },
 ]
 # Twins: spawn both Retinazer and Spazmatism together; both must be defeated to unblock channels.
 PVE_BOSSES_TWINS_IDS = {"retinazer", "spazmatism"}
@@ -1533,6 +1652,17 @@ PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT = {
     "retinazer": "retinazer_retired",
     "spazmatism": "spazmatism_silenced",
     "ender_dragon": "ender_dragon_slayer",
+    "hornet": "hornet_hunter",
+    "bee": "bee_swarm_squasher",
+    "angry_trapper": "angry_trapper_crusher",
+    "man_eater": "man_eater_muncher",
+    "giant_tortoise": "giant_tortoise_tamer",
+    "arapaima": "arapaima_slayer",
+    "piranha": "piranha_predator",
+    "moth": "moth_masher",
+    "spiked_jungle_slime": "spiked_slime_squasher",
+    "jungle_bat": "jungle_bat_basher",
+    "queen_bee": "queen_bee_slayer",
 }
 PVE_MASTER_REQUIRED_IDS = frozenset(PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT.keys())
 active_boss_events: dict[int, list] = {}  # guild_id -> list of {channel_id, boss, hp, max_hp}
@@ -1547,9 +1677,9 @@ _pve_boss_defeated_pending: dict[int, list] = {}  # guild_id -> [(boss, attacker
 plantera_bulb_eligible_guilds: dict[int, float] = {}  # guild_id -> timestamp when last boss was defeated (for Plantera bulb chance)
 PLANTERA_BULB_CHANCE = 0.15
 PLANTERA_BULB_MAX_AGE_SEC = 86400  # 24h
-# #underground-jungle: slightly higher wild animal and boss spawn
-UNDERGROUND_JUNGLE_ANIMAL_SPAWN_MULT = 1.15
-UNDERGROUND_JUNGLE_BOSS_SPAWN_MULT = 1.1
+# #underground-jungle: 2x wild animal and boss spawn
+UNDERGROUND_JUNGLE_ANIMAL_SPAWN_MULT = 2.0
+UNDERGROUND_JUNGLE_BOSS_SPAWN_MULT = 2.0
 
 # Channel name for auto-logging rare occurrences (e.g. One in a Million, Mikellion, netherite+ imbues)
 RARES_CHANNEL_NAME = "rares"
@@ -2625,6 +2755,61 @@ HIDDEN_ACHIEVEMENTS = {
         "description": "Defeat Spazmatism (The Twins)",
         "boost": 0.05  # 5%
     },
+    "hornet_hunter": {
+        "name": "Hornet Hunter",
+        "description": "Defeat a Hornet (underground jungle)",
+        "boost": 0.05  # 5%
+    },
+    "bee_swarm_squasher": {
+        "name": "Hive Mind",
+        "description": "Defeat a Bee Swarm (underground jungle)",
+        "boost": 0.05  # 5%
+    },
+    "angry_trapper_crusher": {
+        "name": "Trapped",
+        "description": "Defeat an Angry Trapper (underground jungle)",
+        "boost": 0.05  # 5%
+    },
+    "man_eater_muncher": {
+        "name": "Man Eaten",
+        "description": "Defeat a Man Eater (underground jungle)",
+        "boost": 0.05  # 5%
+    },
+    "giant_tortoise_tamer": {
+        "name": "Shell Shock",
+        "description": "Defeat a Giant Tortoise (underground jungle)",
+        "boost": 0.05  # 5%
+    },
+    "arapaima_slayer": {
+        "name": "Easy as Arapai",
+        "description": "Defeat an Arapaima (underground jungle)",
+        "boost": 0.05  # 5%
+    },
+    "piranha_predator": {
+        "name": "I Prefer Tilapia",
+        "description": "Defeat a Piranha (underground jungle)",
+        "boost": 0.05  # 5%
+    },
+    "moth_masher": {
+        "name": "Into The Light",
+        "description": "Defeat the Moth (underground jungle)",
+        "boost": 0.05  # 5%
+    },
+    "spiked_slime_squasher": {
+        "name": "Slimed Out",
+        "description": "Defeat a Spiked Jungle Slime (underground jungle)",
+        "boost": 0.05  # 5%
+    },
+    "jungle_bat_basher": {
+        "name": "Battered",
+        "description": "Defeat a Jungle Bat (underground jungle)",
+        "boost": 0.05  # 5%
+    },
+    "queen_bee_slayer": {
+        "name": "Sting Operation",
+        "description": "Defeat the Queen Bee",
+        "boost": 0.05  # 5%
+    },
     "pve_master": {
         "name": "Master Mode",
         "description": "Defeat every type of animal and boss at least once",
@@ -2643,7 +2828,7 @@ HIDDEN_ACHIEVEMENTS = {
 }
 
 # Total number of hidden achievements
-TOTAL_HIDDEN_ACHIEVEMENTS = 28
+TOTAL_HIDDEN_ACHIEVEMENTS = 39
 
 
 def check_maxed_out_achievement(user_id: int) -> bool:
@@ -5234,11 +5419,11 @@ def _gathership_dual_board_display(
     """Build side-by-side: Your Board (left), Enemy's Board (right). No cursor on your board."""
     your_lines = _gathership_grid_display(my_ships, (-1, -1), show_ships=True, shot_at=my_shot_at).split("\n")
     enemy_lines = _gathership_grid_display(enemy_ships, fire_cursor, show_ships=False, shot_at=enemy_shot_at).split("\n")
-    spacer = "    "  # between the two 5-emoji columns
+    spacer = "\t\t\t\t\t"  # a few tabs between the two boards for clearer separation
     header_left = "**Your Board**"
     header_right = f"**{enemy_mention}'s Board**"
-    # Fixed-width left column so both boards align
-    header = header_left + " " * (18 - len(header_left)) + header_right
+    # Fixed-width left column so both boards align (padding accounts for spacer width)
+    header = header_left + " " * (33 - len(header_left)) + header_right
     rows = [header]
     for i in range(len(your_lines)):
         rows.append(your_lines[i] + spacer + enemy_lines[i])
@@ -6173,7 +6358,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.10.0 :3"
+            name="running /gather on V0.10.2 :3"
         )
     )
     try:
@@ -6850,6 +7035,160 @@ class BulletAntView(discord.ui.View):
                 interaction, interaction.response.edit_message, embed=progress_embed, view=self)
 
 
+# Bee Swarm (underground-jungle only): reward display and Larva chance after defeat
+BEE_SWARM_REWARD_ANIMAL = {
+    "id": "bee",
+    "name": "Bee Swarm",
+    "emoji": "🐝",
+    "description": BEE_SWARM_INTRO,
+    "defeat_msg": BEE_SWARM_DEFEAT,
+    "color": 0xFFC800,
+}
+
+
+class LarvaView(discord.ui.View):
+    """Break or Ignore the Larva. Break summons Queen Bee. Timeout 10s = auto-ignore."""
+
+    def __init__(self, channel_id: int, guild_id: int, area_multiplier: float):
+        super().__init__(timeout=LARVA_TIMEOUT_SEC)
+        self.channel_id = channel_id
+        self.guild_id = guild_id
+        self.area_multiplier = area_multiplier
+        self.resolved = False
+
+    async def on_timeout(self):
+        if self.resolved:
+            return
+        self.resolved = True
+        try:
+            for item in self.children:
+                item.disabled = True
+            if self.message:
+                await self.message.edit(
+                    content="The Larva is left alone.",
+                    view=self)
+        except Exception as e:
+            print(f"Larva timeout edit failed: {e}")
+
+    @discord.ui.button(label="Break", style=discord.ButtonStyle.danger, custom_id="larva_break")
+    async def break_larva(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.resolved:
+            await safe_interaction_response(interaction, interaction.response.send_message, "Someone already chose!", ephemeral=True)
+            return
+        self.resolved = True
+        self.stop()
+        queen_bee = next(b for b in PVE_BOSSES if b["id"] == "queen_bee")
+        await safe_interaction_response(interaction, interaction.response.edit_message,
+            content="Queen Bee has awoken!",
+            view=None)
+        channel = interaction.guild.get_channel(self.channel_id) or interaction.channel
+        try:
+            await trigger_boss_event(channel, queen_bee, self.area_multiplier)
+        except Exception as e:
+            print(f"Queen Bee spawn after Larva break failed: {e}")
+
+    @discord.ui.button(label="Ignore", style=discord.ButtonStyle.secondary, custom_id="larva_ignore")
+    async def ignore_larva(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.resolved:
+            await safe_interaction_response(interaction, interaction.response.send_message, "Someone already chose!", ephemeral=True)
+            return
+        self.resolved = True
+        self.stop()
+        await safe_interaction_response(interaction, interaction.response.edit_message,
+            content="The Larva is left alone.",
+            view=None)
+
+
+class BeeView(discord.ui.View):
+    """Single bee in a Bee Swarm. On defeat, decrements bees_remaining; when 0, edits intro, distributes rewards, then 40%% chance to spawn Larva (Break/Ignore → Queen Bee or ignore)."""
+
+    def __init__(self, bee_hp: int, channel_id: int, swarm_state: dict):
+        super().__init__(timeout=None)
+        self.max_hp = bee_hp
+        self.hp = bee_hp
+        self.channel_id = channel_id
+        self.swarm_state = swarm_state
+        self.defeated = False
+        self._lock = asyncio.Lock()
+
+    def _hp_bar(self) -> str:
+        filled = max(0, round((self.hp / self.max_hp) * 20))
+        empty = 20 - filled
+        return f"{'🟥' * filled}{'⬛' * empty}"
+
+    @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_bee_attack")
+    async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self._lock:
+            if self.defeated:
+                await safe_interaction_response(
+                    interaction, interaction.response.send_message,
+                    "This bee is already swatted!", ephemeral=True)
+                return
+
+            damage = get_pve_damage_multiplier(interaction.user.id)
+            self.hp -= damage
+            self.swarm_state["attackers"][interaction.user.id] = self.swarm_state["attackers"].get(interaction.user.id, 0) + damage
+
+            if self.hp <= 0:
+                self.defeated = True
+                button.disabled = True
+                button.label = "☠️"
+                button.style = discord.ButtonStyle.secondary
+
+                await safe_interaction_response(
+                    interaction, interaction.response.edit_message,
+                    embed=discord.Embed(
+                        title=f"☠️ {BEE_ANIMAL['emoji']} Bee swatted!",
+                        description=BEE_ANIMAL["defeat_msg"],
+                        color=discord.Color.gold()),
+                    view=self)
+
+                self.swarm_state["bees_remaining"] -= 1
+                if self.swarm_state["bees_remaining"] <= 0:
+                    channel = interaction.guild.get_channel(self.channel_id)
+                    intro_id = self.swarm_state.get("intro_message_id")
+                    active_pve_events.pop(self.channel_id, None)
+                    guild_id = interaction.guild.id if interaction.guild else 0
+                    area_mult = self.swarm_state.get("area_multiplier", 1.0)
+                    if channel and intro_id:
+                        try:
+                            intro_msg = await channel.fetch_message(intro_id)
+                            defeat_embed = discord.Embed(
+                                title=f"☠️ 🐝 Bee Swarm Defeated! ☠️",
+                                description=self.swarm_state["defeat_msg"],
+                                color=discord.Color.gold())
+                            await intro_msg.edit(embed=defeat_embed)
+                        except Exception as e:
+                            print(f"Bee Swarm intro edit failed: {e}")
+                    asyncio.create_task(
+                        _pve_distribute_rewards(
+                            interaction, BEE_SWARM_REWARD_ANIMAL,
+                            dict(self.swarm_state["attackers"]), self.channel_id,
+                            area_mult,
+                            achievements_ephemeral=True))
+                    # 40% chance: spawn Larva (Break → Queen Bee, Ignore or 10s → nothing)
+                    if channel and guild_id and random.random() < BEE_SWARM_LARVA_CHANCE:
+                        larva_embed = discord.Embed(
+                            title="🐝 A Larva has been revealed!",
+                            description="Break it to summon the **Queen Bee**, or ignore it. (Auto-ignored in 10 seconds.)",
+                            color=0xFFD700)
+                        larva_embed.set_footer(text="Break or Ignore — or wait 10 seconds to auto-ignore.")
+                        view_larva = LarvaView(channel_id=self.channel_id, guild_id=guild_id, area_multiplier=area_mult)
+                        larva_msg = await channel.send(embed=larva_embed, view=view_larva)
+                        view_larva.message = larva_msg
+                return
+
+            progress_embed = discord.Embed(
+                title=f"🚨 {BEE_ANIMAL['emoji']} Bee 🚨",
+                description=BEE_ANIMAL["description"],
+                color=BEE_ANIMAL["color"])
+            progress_embed.add_field(
+                name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
+            progress_embed.add_field(name="⚔️ Last Hit", value=f"**{interaction.user.display_name}**!", inline=False)
+            await safe_interaction_response(
+                interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+
+
 def _get_guild_gather_channels(guild: discord.Guild) -> list[discord.TextChannel]:
     """Return list of text channels in guild whose name is a valid gathering channel (forest, grove, marsh, bog, mire, underground-jungle)."""
     out = []
@@ -7369,10 +7708,11 @@ async def _delayed_boss_spawn(guild: discord.Guild, channel: discord.TextChannel
             print(f"Delayed boss spawn failed: {e}")
 
 
-# Bosses that can spawn randomly: excludes Plantera (bulb only); Mothron only when Solar Eclipse event is active in DB.
+# Bosses that can spawn randomly: excludes Plantera (bulb only); Mothron only when Solar Eclipse; Queen Bee only via Larva.
 def _get_random_spawn_bosses():
     is_solar_eclipse = get_active_event_by_type("solar_eclipse") is not None
-    return [b for b in PVE_BOSSES if b["id"] != "plantera" and (b["id"] != "mothron" or is_solar_eclipse)]
+    return [b for b in PVE_BOSSES if b["id"] != "plantera" and b["id"] != "queen_bee"
+            and (b["id"] != "mothron" or is_solar_eclipse)]
 
 
 class PlanteraBulbView(discord.ui.View):
@@ -7666,7 +8006,7 @@ async def trigger_bullet_ant_swarm_event(channel: discord.TextChannel, area_mult
         "area_multiplier": area_multiplier,
         "channel_id": channel.id,
     }
-    active_pve_events[channel.id] = {"swarm": True, "swarm_state": swarm_state, "start_time": time.time()}
+    active_pve_events[channel.id] = {"swarm": True, "swarm_type": "bullet_ant", "swarm_state": swarm_state, "start_time": time.time()}
 
     try:
         intro_embed = discord.Embed(
@@ -7691,16 +8031,70 @@ async def trigger_bullet_ant_swarm_event(channel: discord.TextChannel, area_mult
         raise
 
 
+async def trigger_bee_swarm_event(channel: discord.TextChannel, area_multiplier: float):
+    """Spawn a Bee Swarm (underground-jungle only): intro embed then 4–6 Bees (1–3 HP each). Defeat can spawn Larva → Queen Bee."""
+    if channel.id in active_pve_events:
+        return
+    n_bees = random.randint(*BEE_SWARM_COUNT_RANGE)
+    bee_hps = [random.randint(*BEE_ANIMAL["hp_range"]) for _ in range(n_bees)]
+    swarm_state = {
+        "intro_message_id": None,
+        "bees_remaining": n_bees,
+        "attackers": {},
+        "defeat_msg": BEE_SWARM_DEFEAT,
+        "area_multiplier": area_multiplier,
+        "channel_id": channel.id,
+    }
+    active_pve_events[channel.id] = {"swarm": True, "swarm_type": "bee", "swarm_state": swarm_state, "start_time": time.time()}
+
+    try:
+        intro_embed = discord.Embed(
+            title="🚨 🐝 Bee Swarm has appeared! 🚨",
+            description=BEE_SWARM_INTRO,
+            color=0xFFC800)
+        intro_embed.set_footer(text="Defeat each bee below! All gathering commands are BLOCKED until the swarm is defeated.")
+        intro_msg = await channel.send(embed=intro_embed)
+        swarm_state["intro_message_id"] = intro_msg.id
+
+        for bee_hp in bee_hps:
+            bee_embed = discord.Embed(
+                title=f"🚨 {BEE_ANIMAL['emoji']} Bee 🚨",
+                description=BEE_ANIMAL["description"],
+                color=BEE_ANIMAL["color"])
+            bee_embed.add_field(name="HP", value=f"**{bee_hp}** / **{bee_hp}**\n{'🟥' * 20}", inline=False)
+            view = BeeView(bee_hp=bee_hp, channel_id=channel.id, swarm_state=swarm_state)
+            await channel.send(embed=bee_embed, view=view)
+    except Exception:
+        active_pve_events.pop(channel.id, None)
+        raise
+
+
+def _weighted_choice_jungle():
+    """Pick one underground-jungle animal by spawn_weight (Moth rarer)."""
+    weights = [a.get("spawn_weight", 1.0) for a in PVE_WILD_ANIMALS_UNDERGROUND_JUNGLE_SINGLE]
+    return random.choices(PVE_WILD_ANIMALS_UNDERGROUND_JUNGLE_SINGLE, weights=weights, k=1)[0]
+
+
 async def trigger_pve_event(channel: discord.TextChannel, area_multiplier: float):
-    """Spawn a wild animal PvE event in the given channel and lock it from commands."""
+    """Spawn a wild animal PvE event in the given channel and lock it from commands.
+    In #underground-jungle only: use jungle-only animals and Bee Swarm. Other channels: normal animals and Bullet Ant Swarm."""
     if channel.id in active_pve_events:
         return
 
-    if random.random() < PVE_SWARM_TRIGGER_CHANCE:
-        await trigger_bullet_ant_swarm_event(channel, area_multiplier)
-        return
+    channel_name = (channel.name or "").lower().replace(" ", "-")
+    is_underground_jungle = channel_name == "underground-jungle"
 
-    animal = random.choice(PVE_WILD_ANIMALS_SINGLE)
+    if is_underground_jungle:
+        if random.random() < PVE_SWARM_TRIGGER_CHANCE:
+            await trigger_bee_swarm_event(channel, area_multiplier)
+            return
+        animal = _weighted_choice_jungle()
+    else:
+        if random.random() < PVE_SWARM_TRIGGER_CHANCE:
+            await trigger_bullet_ant_swarm_event(channel, area_multiplier)
+            return
+        animal = random.choice(PVE_WILD_ANIMALS_SINGLE)
+
     hp = random.randint(*animal["hp_range"])
 
     active_pve_events[channel.id] = {"animal": animal, "hp": hp, "start_time": time.time()}
@@ -7757,7 +8151,7 @@ async def gather(interaction: discord.Interaction):
         if interaction.channel.id in active_pve_events:
             pve_info = active_pve_events[interaction.channel.id]
             if pve_info.get("swarm"):
-                animal_name, animal_emoji = "Bullet Ant Swarm", "🐜"
+                animal_name, animal_emoji = ("Bee Swarm", "🐝") if pve_info.get("swarm_type") == "bee" else ("Bullet Ant Swarm", "🐜")
             else:
                 animal_name = pve_info["animal"]["name"]
                 animal_emoji = pve_info["animal"]["emoji"]
@@ -8085,8 +8479,8 @@ async def water(interaction: discord.Interaction):
         update_user_last_water_time(user_id, current_time)
         increment_user_water_count(user_id)
         
-        # Calculate money reward: $7,500 per day (day 1 = $7.5k, day 2 = $15k, etc.)
-        money_reward = consecutive_days * 7500.0
+        # Calculate money reward: $5,000 per day (day 1 = $5k, day 2 = $10k, etc.)
+        money_reward = consecutive_days * 5000.0
         money_reward = normalize_money(money_reward)
         
         # Update user balance with reward
@@ -8583,7 +8977,7 @@ async def harvest(interaction: discord.Interaction):
         if interaction.channel.id in active_pve_events:
             pve_info = active_pve_events[interaction.channel.id]
             if pve_info.get("swarm"):
-                animal_name, animal_emoji = "Bullet Ant Swarm", "🐜"
+                animal_name, animal_emoji = ("Bee Swarm", "🐝") if pve_info.get("swarm_type") == "bee" else ("Bullet Ant Swarm", "🐜")
             else:
                 animal_name = pve_info["animal"]["name"]
                 animal_emoji = pve_info["animal"]["emoji"]
@@ -9007,11 +9401,11 @@ async def bloom(interaction: discord.Interaction):
 @bot.tree.command(name="unlock", description="Unlock a new gathering area!")
 @app_commands.describe(area="The area to unlock")
 @app_commands.choices(area=[
+    app_commands.Choice(name="Underground Jungle ($100,000 & PLANTER II)", value="underground-jungle"),
     app_commands.Choice(name="Grove ($250,000 & PLANTER III)", value="grove"),
     app_commands.Choice(name="Marsh ($5,000,000 & PLANTER V)", value="marsh"),
     app_commands.Choice(name="Bog ($75,000,000 & PLANTER VII)", value="bog"),
     app_commands.Choice(name="Mire ($300,000,000 & PLANTER IX)", value="mire"),
-    app_commands.Choice(name="Underground Jungle ($100,000 & PLANTER II)", value="underground-jungle"),
 ])
 async def unlock(interaction: discord.Interaction, area: app_commands.Choice[str]):
     try:
@@ -9137,7 +9531,7 @@ DAILY_SHOP_ITEMS = {
     "scarecrow": {
         "name": "Scarecrow",
         "description": "Scare those pesky crows away!",
-        "cost": 15,
+        "cost": 50,
         "effect": "+10% money gain from /gather!",
     },
     "cryptobro_shadow": {
@@ -9149,44 +9543,44 @@ DAILY_SHOP_ITEMS = {
     "bloomstone": {
         "name": "Bloomstone",
         "description": "An ancient gem, shining with light.",
-        "cost": 500,
+        "cost": 300,
         "effect": "All flowers triple in worth!",
     },
     "irrigation_system": {
         "name": "Irrigation System",
         "description": "It's got electrolytes!",
-        "cost": 2250,
+        "cost": 410,
         "effect": "Auto-/waters for you!",
     },
     "gamblers_revolver": {
         "name": "Gambler's Revolver",
         "description": "A flashy pistol, engraved with \"KH\".",
-        "cost": 2000,
+        "cost": 475,
         "effect": "*Russian Roulette death penalty reduces to 5 minutes!*",
     },
     "commoners_respite": {
         "name": "Commoner's Respite",
         "description": "Say goodbye to those common imbues!",
-        "cost": 3000,
+        "cost": 600,
         "effect": "You cannot roll a common imbue when doing /imbue!",
     },
     "atlas": {
         "name": "Atlas",
         "description": "Not to be confused with the browser.",
-        "cost": 1000,
+        "cost": 500,
         "effect": "Doubles the money gain from each area!",
     },
     "nether_star": {
         "name": "Nether Star",
         "description": "Let's make a Beacon!",
-        "cost": 500,
+        "cost": 250,
         "effect": "1.15x all Money",
         "emoji": NETHER_STAR_EMOJI,
     },
     "zenith": {
         "name": "Zenith",
         "description": "The culmination of a journey forged into the ultimate sword.",
-        "cost": 400,
+        "cost": 275,
         "effect": "PvE: deal 3 damage per hit (instead of 1). Stacks with other weapons!",
     },
     "alchemists_pocketwatch": {
@@ -9216,7 +9610,7 @@ DAILY_SHOP_ITEMS = {
     "palace_treasure": {
         "name": "Palace Treasure",
         "description": "Looking cool, Joker!",
-        "cost": 350,
+        "cost": 250,
         "effect": "1.5x money gain, but your gathers and harvests are 3x more likely to be stealable!",
     },
 }
@@ -11278,6 +11672,8 @@ async def endevent(interaction: discord.Interaction, event_type: str):
 def _spawn_animal_choices():
     choices = [app_commands.Choice(name=f"{a['emoji']} {a['name']}", value=a["name"].lower().replace(" ", "_")) for a in PVE_WILD_ANIMALS_SINGLE]
     choices.append(app_commands.Choice(name="🐜 Bullet Ant Swarm", value="bullet_ant_swarm"))
+    choices.extend([app_commands.Choice(name=f"{a['emoji']} {a['name']} (Jungle)", value="jungle_" + a["id"]) for a in PVE_WILD_ANIMALS_UNDERGROUND_JUNGLE_SINGLE])
+    choices.append(app_commands.Choice(name="🐝 Bee Swarm (Jungle)", value="bee_swarm"))
     return choices
 
 def _spawn_boss_choices():
@@ -11347,6 +11743,37 @@ async def spawn(interaction: discord.Interaction, animal: str, channel: str):
                 f"✅ Spawned **Bullet Ant Swarm** in {target.mention}!", ephemeral=True)
             return
 
+        # Bee Swarm (underground-jungle animal)
+        if animal == "bee_swarm":
+            await trigger_bee_swarm_event(target, area_mult)
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"✅ Spawned **Bee Swarm** in {target.mention}!", ephemeral=True)
+            return
+
+        # Jungle-only single animal (admin spawn by jungle_<id>)
+        if animal.startswith("jungle_"):
+            jungle_id = animal[7:]
+            chosen = next((a for a in PVE_WILD_ANIMALS_UNDERGROUND_JUNGLE_SINGLE if a["id"] == jungle_id), None)
+            if chosen:
+                if target.id in active_pve_events:
+                    await safe_interaction_response(interaction, interaction.followup.send,
+                        f"❌ There is already an active PvE event in {target.mention}. Defeat it first.", ephemeral=True)
+                    return
+                hp = random.randint(*chosen["hp_range"])
+                active_pve_events[target.id] = {"animal": chosen, "hp": hp, "start_time": time.time()}
+                embed = discord.Embed(
+                    title=f"🚨 {chosen['emoji']} Wild {chosen['name']} Appeared! 🚨",
+                    description=chosen["description"],
+                    color=chosen["color"])
+                embed.add_field(name="HP", value=f"**{hp}** / **{hp}**\n{'🟥' * 20}", inline=False)
+                embed.add_field(name="⚔️ How to Fight", value="Press **Attack**! Each hit deals **1 damage** and earns **1 plant**!", inline=False)
+                embed.set_footer(text="All gathering commands are BLOCKED until the wild animal is defeated")
+                view = WildAnimalView(animal=chosen, hp=hp, channel_id=target.id, area_multiplier=area_mult)
+                await target.send(embed=embed, view=view)
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"✅ Spawned **{chosen['name']}** in {target.mention}!", ephemeral=True)
+                return
+
         # Single wild animal (match by name normalized to value form)
         animal_key = animal.replace("_", " ").title()
         if animal_key == "Homeless Man On Fent":
@@ -11377,6 +11804,207 @@ async def spawn(interaction: discord.Interaction, animal: str, channel: str):
             f"✅ Spawned **{chosen['name']}** in {target.mention}!", ephemeral=True)
     except Exception as e:
         print(f"Error in spawn command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+# User admin command - full dossier: userstats, items, achievements, hidden achievements, and Wild Animals spawn reference
+@bot.tree.command(name="user", description="[ADMIN] View everything about a user: stats, items, achievements, hidden achievements")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(member="The user to inspect")
+async def user_admin(interaction: discord.Interaction, member: discord.Member):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+
+        user_id = member.id
+        display_name = member.display_name or member.name
+
+        # ── 1. Userstats ──
+        user_balance = get_user_balance(user_id)
+        total_items = get_user_total_items(user_id)
+        cycle_plants = get_user_bloom_cycle_plants(user_id)
+        items_needed = None
+        next_rank = None
+        if cycle_plants < 50:
+            items_needed = 50 - cycle_plants
+            next_rank = "PLANTER II"
+        elif cycle_plants < 150:
+            items_needed = 150 - cycle_plants
+            next_rank = "PLANTER III"
+        elif cycle_plants < 300:
+            items_needed = 300 - cycle_plants
+            next_rank = "PLANTER IV"
+        elif cycle_plants < 500:
+            items_needed = 500 - cycle_plants
+            next_rank = "PLANTER V"
+        elif cycle_plants < 1000:
+            items_needed = 1000 - cycle_plants
+            next_rank = "PLANTER VI"
+        elif cycle_plants < 2000:
+            items_needed = 2000 - cycle_plants
+            next_rank = "PLANTER VII"
+        elif cycle_plants < 4000:
+            items_needed = 4000 - cycle_plants
+            next_rank = "PLANTER VIII"
+        elif cycle_plants < 10000:
+            items_needed = 10000 - cycle_plants
+            next_rank = "PLANTER IX"
+        elif cycle_plants < 15000:
+            items_needed = 15000 - cycle_plants
+            next_rank = "PLANTER X"
+        else:
+            items_needed = 0
+            next_rank = "MAX RANK"
+
+        embed_stats = discord.Embed(
+            title=f"📊 {display_name}'s Stats (userstats)",
+            color=discord.Color.blue()
+        )
+        embed_stats.add_field(name="💰 Balance", value=f"**${user_balance:.2f}**", inline=True)
+        embed_stats.add_field(name="🌱 Plants Gathered (Total)", value=f"**{total_items}** plants", inline=True)
+        embed_stats.add_field(name="🌿 Plants Gathered (This Bloom)", value=f"**{cycle_plants}** plants", inline=True)
+        bloom_rank = get_bloom_rank(user_id)
+        tree_rings = get_user_tree_rings(user_id)
+        bloom_multiplier = get_bloom_multiplier(user_id)
+        embed_stats.add_field(name="🌲 Bloom Rank", value=f"**{bloom_rank}**", inline=True)
+        embed_stats.add_field(name="<:TreeRing:1474244868288282817> Tree Rings", value=f"**{tree_rings}** ({bloom_multiplier:.2f}x)", inline=True)
+        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
+        if bloom_rank != "PINE I":
+            embed_stats.add_field(name="⭐ Rank Boost", value=f"**{rank_perma_buff_multiplier:.2f}x**", inline=True)
+        water_streak = get_user_consecutive_water_days(user_id)
+        daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
+        day_text = "day" if water_streak == 1 else "days"
+        embed_stats.add_field(name="💧 Water Streak", value=f"**{water_streak}** {day_text} ({daily_bonus_multiplier:.2f}x)", inline=True)
+        hoe_attunement = get_user_hoe_attunement(user_id)
+        if hoe_attunement:
+            hoe_name = hoe_attunement.get("name", "Unknown")
+            hoe_rarity = hoe_attunement.get("rarity", "COMMON")
+            hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]")
+            embed_stats.add_field(name="✨ Gather Attunement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=True)
+        else:
+            embed_stats.add_field(name="✨ Gather Attunement", value="**None**", inline=True)
+        tractor_attunement = get_user_tractor_attunement(user_id)
+        if tractor_attunement:
+            tractor_name = tractor_attunement.get("name", "Unknown")
+            tractor_rarity = tractor_attunement.get("rarity", "COMMON")
+            tractor_rarity_display = RARITY_EMOJI.get(tractor_rarity, f"[{tractor_rarity}]")
+            embed_stats.add_field(name="✨ Harvest Attunement", value=f"**{tractor_name}** {tractor_rarity_display}", inline=True)
+        else:
+            embed_stats.add_field(name="✨ Harvest Attunement", value="**None**", inline=True)
+        if items_needed == 0:
+            embed_stats.add_field(name="🏆 Rank Status", value=f"**{next_rank}**", inline=False)
+        else:
+            embed_stats.add_field(name="📈 Next Rank", value=f"**{items_needed}** more plants until **{next_rank}**", inline=False)
+
+        # ── 2. Gathered items (almanac) ──
+        user_items = get_user_items(user_id)
+        if user_items:
+            almanac_lines = []
+            for item_name, count in user_items.items():
+                almanac_lines.append(f"[ {item_name.upper()} ] x{count}")
+            embed_items = discord.Embed(
+                title=f"📚 {display_name}'s Gathered Items (Almanac)",
+                description="\n".join(almanac_lines)[:4000] or "—",
+                color=discord.Color.green()
+            )
+        else:
+            embed_items = discord.Embed(
+                title=f"📚 {display_name}'s Gathered Items (Almanac)",
+                description="*No gathered items.*",
+                color=discord.Color.green()
+            )
+
+        # ── 3. Shop inventory ──
+        shop_inv = get_user_shop_inventory(user_id)
+        if shop_inv:
+            shop_lines = [f"**{k}**: {v}" for k, v in shop_inv.items()]
+            embed_shop = discord.Embed(
+                title=f"🛒 {display_name}'s Shop Inventory",
+                description="\n".join(shop_lines)[:4000] or "—",
+                color=discord.Color.gold()
+            )
+        else:
+            embed_shop = discord.Embed(
+                title=f"🛒 {display_name}'s Shop Inventory",
+                description="*Empty.*",
+                color=discord.Color.gold()
+            )
+
+        # ── 4. Achievements ──
+        total_boost_multiplier = get_achievement_multiplier(user_id)
+        total_boost_percent = (total_boost_multiplier - 1.0) * 100
+        embed_ach = discord.Embed(
+            title=f"🏆 {display_name}'s Achievements",
+            color=discord.Color.gold()
+        )
+        for achievement_name, achievement_data in ACHIEVEMENTS.items():
+            current_level = get_user_achievement_level(user_id, achievement_name)
+            levels = achievement_data["levels"]
+            if current_level < len(levels):
+                current_level_data = levels[current_level]
+            else:
+                current_level_data = levels[-1]
+            max_earnable = len(levels) - 1
+            progress_bar = "🟩" * current_level + "⬜" * (max_earnable - current_level)
+            achievement_display_name = current_level_data["name"]
+            boost_percent = current_level_data["boost"] * 100
+            embed_ach.add_field(
+                name=achievement_display_name,
+                value=f"Level **{current_level}**\n{progress_bar}\nBoost: **{boost_percent:.1f}%**",
+                inline=True
+            )
+        embed_ach.add_field(name="━━━ Total Boost ━━━", value=f"**{total_boost_percent:.1f}%**", inline=False)
+
+        # ── 5. Hidden achievements ──
+        hidden_achievements_count = get_user_hidden_achievements_count(user_id)
+        embed_hidden = discord.Embed(
+            title=f"🔒 {display_name}'s Hidden Achievements",
+            description=f"Discovered: **{hidden_achievements_count}/{TOTAL_HIDDEN_ACHIEVEMENTS}**",
+            color=discord.Color.dark_gray()
+        )
+        for key, data in HIDDEN_ACHIEVEMENTS.items():
+            name = data["name"]
+            if has_hidden_achievement(user_id, key):
+                desc = data["description"]
+                embed_hidden.add_field(name=name, value=desc, inline=False)
+            else:
+                embed_hidden.add_field(name=name, value="???????", inline=False)
+
+        # ── 6. Wild Animals spawn reference (for admin) ──
+        animal_mult, _ = _pve_spawn_multiplier()
+        base_gather = PVE_TRIGGER_CHANCE_GATHER * 100
+        base_harvest = PVE_TRIGGER_CHANCE_HARVEST * 100
+        effective_gather = min(100.0, PVE_TRIGGER_CHANCE_GATHER * animal_mult * 100)
+        effective_harvest = min(100.0, PVE_TRIGGER_CHANCE_HARVEST * animal_mult * 100)
+        jungle_mult = UNDERGROUND_JUNGLE_ANIMAL_SPAWN_MULT
+        embed_ref = discord.Embed(
+            title="🐾 Wild Animals Spawn Chances (Reference)",
+            color=discord.Color.dark_green()
+        )
+        embed_ref.add_field(
+            name="Base chances",
+            value=f"**/gather**: {base_gather:.1f}% per use\n**/harvest**: {base_harvest:.1f}% per use",
+            inline=True
+        )
+        embed_ref.add_field(
+            name="Current (with event mult)",
+            value=f"**/gather**: {effective_gather:.1f}%\n**/harvest**: {effective_harvest:.1f}%\n*(Solar Eclipse / Blood Moon = 2.5x)*",
+            inline=True
+        )
+        embed_ref.add_field(
+            name="#underground-jungle",
+            value=f"Animal spawn mult: **{jungle_mult}x** (then capped at 100%)",
+            inline=False
+        )
+
+        await safe_interaction_response(interaction, interaction.followup.send,
+            embeds=[embed_stats, embed_items, embed_shop, embed_ach, embed_hidden, embed_ref])
+    except Exception as e:
+        print(f"Error in user admin command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
@@ -13841,7 +14469,7 @@ def _apply_auto_water_for_user(user_id: int, now_est: datetime.datetime) -> bool
     now_ts = time.time()
     update_user_last_water_time(user_id, now_ts)
     increment_user_water_count(user_id)
-    money_reward = consecutive_days * 7500.0
+    money_reward = consecutive_days * 5000.0
     money_reward = normalize_money(money_reward)
     current_balance = get_user_balance(user_id)
     new_balance = normalize_money(current_balance + money_reward)

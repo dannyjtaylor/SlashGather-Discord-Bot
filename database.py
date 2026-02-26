@@ -240,9 +240,9 @@ def perform_gather_update(user_id: int, balance_increment: float, item_name: str
             current_total = int(doc.get("gather_stats", {}).get("total_items", 0))
         current_bloom_cycle = int(doc.get("bloom_cycle_plants", 0))
     
-    # Check if this gather will cross a 200-plant milestone
+    # Check if this gather will cross a 100-plant milestone
     new_total = current_total + 1
-    should_award_tree_ring = (new_total % 200 == 0) and new_total > 0
+    should_award_tree_ring = (new_total % 100 == 0) and new_total > 0
     
     new_bloom_cycle = current_bloom_cycle + 1
     
@@ -326,7 +326,7 @@ def perform_batch_gather_update(user_id: int, results: list, apply_cooldown: boo
         name = r["name"]
         gather_items_inc[f"gather_stats.items.{name}"] = gather_items_inc.get(f"gather_stats.items.{name}", 0) + 1
 
-    tree_rings = sum(1 for i in range(n) if ((current_total + 1 + i) % 200 == 0) and (current_total + 1 + i) > 0)
+    tree_rings = sum(1 for i in range(n) if ((current_total + 1 + i) % 100 == 0) and (current_total + 1 + i) > 0)
     new_bloom_cycle = current_bloom_cycle + n
 
     update_ops = {
@@ -2489,7 +2489,7 @@ def perform_harvest_batch_update(
 
     new_total = pre_total_items + num_items
     tree_rings_to_award = 0
-    for milestone in range(200, new_total + 1, 200):
+    for milestone in range(100, new_total + 1, 100):
         if pre_total_items < milestone <= new_total:
             tree_rings_to_award += 1
 
