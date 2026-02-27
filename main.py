@@ -7293,6 +7293,13 @@ NETHER_STAR_EMOJI = "<a:netherstar:1476237557221163210>"
 NETHER_STAR_EMOJI_PARTIAL = discord.PartialEmoji(name="netherstar", id=1476237557221163210, animated=True)
 
 
+def _format_item_boost_source(name: str) -> str:
+    """Format an item boost source for embed display; adds Nether Star emoji next to Nether Star."""
+    if name == "Nether Star":
+        return f"{NETHER_STAR_EMOJI} **NETHER STAR**"
+    return f"**{name.upper()}**"
+
+
 class NetherStarClaimView(discord.ui.View):
     """One-time claim button after Wither defeat. First user without a Nether Star gets it; button locks after claim."""
 
@@ -8346,10 +8353,10 @@ async def gather(interaction: discord.Interaction):
             if item_boost_sources:
                 extra = gather_result.get("extra_money_from_nether_star", 0)
                 value_parts = [f"**+${extra:.2f}**"] if extra > 0 else []
-                value_parts.append("\n".join(f"**{name.upper()}**" for name in item_boost_sources))
+                value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
                 embed.add_field(
                     name="📦 Item Boost",
-                    value="\n\n".join(value_parts),
+                    value="\n".join(value_parts),
                     inline=False
                 )
             month_name = gather_result.get("month_name", "—")
@@ -8393,10 +8400,10 @@ async def gather(interaction: discord.Interaction):
             if item_boost_sources:
                 extra = gather_result.get("extra_money_from_nether_star", 0)
                 value_parts = [f"**+${extra:.2f}**"] if extra > 0 else []
-                value_parts.append("\n".join(f"**{name.upper()}**" for name in item_boost_sources))
+                value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
                 embed.add_field(
                     name="📦 Item Boost",
-                    value="\n\n".join(value_parts),
+                    value="\n".join(value_parts),
                     inline=False
                 )
 
@@ -9224,10 +9231,10 @@ async def harvest(interaction: discord.Interaction):
         if item_boost_sources:
             extra = result.get("extra_money_from_nether_star", 0)
             value_parts = [f"**+${extra:.2f}**"] if extra > 0 else []
-            value_parts.append("\n".join(f"**{name.upper()}**" for name in item_boost_sources))
+            value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
             embed.add_field(
                 name="📦 Item Boost",
-                value="\n\n".join(value_parts),
+                value="\n".join(value_parts),
                 inline=False
             )
 
@@ -15587,10 +15594,10 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             if item_boost_sources:
                 extra_ns = total_sale_value * (NETHER_STAR_MONEY_MULTIPLIER - 1.0) / NETHER_STAR_MONEY_MULTIPLIER if has_shop_item(user_id, "nether_star") else 0.0
                 value_parts = [f"**+${extra_ns:.2f}**"] if extra_ns > 0 else []
-                value_parts.append("\n".join(f"**{name.upper()}**" for name in item_boost_sources))
+                value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
                 embed.add_field(
                     name="📦 Item Boost",
-                    value="\n\n".join(value_parts),
+                    value="\n".join(value_parts),
                     inline=False
                 )
             
@@ -15721,10 +15728,10 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         if item_boost_sources:
             extra_ns = sale_value * (NETHER_STAR_MONEY_MULTIPLIER - 1.0) / NETHER_STAR_MONEY_MULTIPLIER if has_shop_item(user_id, "nether_star") else 0.0
             value_parts = [f"**+${extra_ns:.2f}**"] if extra_ns > 0 else []
-            value_parts.append("\n".join(f"**{name.upper()}**" for name in item_boost_sources))
+            value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
             embed.add_field(
                 name="📦 Item Boost",
-                value="\n\n".join(value_parts),
+                value="\n".join(value_parts),
                 inline=False
             )
         
