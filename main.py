@@ -9347,19 +9347,48 @@ async def achievements(interaction: discord.Interaction, hidden: bool = False):
         
         # If hidden=True, show only hidden achievements list
         if hidden:
-            embed = discord.Embed(
-                title=f"🔒 {interaction.user.name}'s Hidden Achievements",
-                color=discord.Color.dark_gray()
-            )
+            # Build list of hidden achievement fields
+            hidden_fields = []
             for key, data in HIDDEN_ACHIEVEMENTS.items():
                 name = data["name"]
                 if has_hidden_achievement(user_id, key):
                     desc = data["description"]
-                    embed.add_field(name=name, value=desc, inline=False)
                 else:
-                    embed.add_field(name=name, value="???????", inline=False)
-            embed.set_footer(text=f"Discovered: {hidden_achievements_count}/{TOTAL_HIDDEN_ACHIEVEMENTS}")
-            await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+                    desc = "???????"
+                hidden_fields.append((name, desc))
+
+            # Discord allows a maximum of 25 fields per embed, so chunk if needed
+            MAX_FIELDS_PER_EMBED = 25
+            embeds = []
+            for i in range(0, len(hidden_fields), MAX_FIELDS_PER_EMBED):
+                chunk = hidden_fields[i:i + MAX_FIELDS_PER_EMBED]
+
+                if i == 0:
+                    title = f"🔒 {interaction.user.name}'s Hidden Achievements"
+                else:
+                    page = i // MAX_FIELDS_PER_EMBED + 1
+                    title = f"🔒 {interaction.user.name}'s Hidden Achievements (Page {page})"
+
+                embed = discord.Embed(
+                    title=title,
+                    color=discord.Color.dark_gray()
+                )
+                for name, desc in chunk:
+                    embed.add_field(name=name, value=desc, inline=False)
+
+                embed.set_footer(text=f"Discovered: {hidden_achievements_count}/{TOTAL_HIDDEN_ACHIEVEMENTS}")
+                embeds.append(embed)
+
+            # Send embeds, respecting Discord limits (max 10 embeds per message)
+            if len(embeds) <= 10:
+                await safe_interaction_response(interaction, interaction.followup.send, embeds=embeds)
+            else:
+                for i in range(0, len(embeds), 10):
+                    await safe_interaction_response(
+                        interaction,
+                        interaction.followup.send,
+                        embeds=embeds[i:i + 10],
+                    )
             return
         
         # Create embed
