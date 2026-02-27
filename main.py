@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import logging
+from collections import Counter
 from dotenv import load_dotenv
 import os
 import random
@@ -686,6 +687,20 @@ RARITY_EMOJI = {
     "CELESTIAL":   "<:IMBUE_CE:1472431208859439295>",
     "SECRET":      "<:IMBUE_SEC:1473395529554591848>"
 }
+
+# Ripeness name -> imbue tier for plant display (COMMON/UNCOMMON/RARE + rares LEGENDARY/NETHERITE/LUMINITE/CELESTIAL/SECRET)
+RIPENESS_IMBUE_TIER = {
+    "Budding": "COMMON", "Flowering": "UNCOMMON", "Raw": "COMMON", "Slightly Ripe": "UNCOMMON",
+    "Perfectly Ripe": "RARE", "Overripe": "UNCOMMON", "Spoiled": "COMMON",
+    "Sproutling": "COMMON", "Budded": "COMMON", "Blooming": "UNCOMMON", "Full Bloom": "RARE", "Wilted": "COMMON",
+    "Legendary": "LEGENDARY", "Netherite": "NETHERITE", "Luminite": "LUMINITE", "Celestial": "CELESTIAL", "Mikellion": "SECRET",
+}
+
+def get_ripeness_imbue_emoji(ripeness_name: str) -> str:
+    """Return the IMBUE emoji for a plant's ripeness tier, or empty string if unknown."""
+    tier = RIPENESS_IMBUE_TIER.get((ripeness_name or "").strip())
+    return RARITY_EMOJI.get(tier, "") if tier else ""
+
 # GIF emojis used to mask SECRET imbue stats until claimed.
 IMBUE_SEC_GIF_1 = "<a:IMBUE_SEC_1:1474405245563175175>"
 IMBUE_SEC_GIF_2 = "<a:IMBUE_SEC_2:1474405298385981502>"
@@ -1579,7 +1594,7 @@ PVE_BOSSES = [
     {
         "id": "wither",
         "name": "The Wither",
-        "emoji": "💀",
+        "emoji": "💀💀💀",
         "hp_range": (300, 300),
         "color": 0x1a0a1a,
         "description": "Somebody summoned the Wither! It's blowing up all the gathering grounds!",
@@ -1624,8 +1639,8 @@ PVE_BOSSES = [
     },
     {
         "id": "queen_bee",
-        "name": "Queen Bee",
-        "emoji": "👑🐝",
+        "name": "Queen Bee🐝",
+        "emoji": "👑",
         "hp_range": (220, 260),
         "color": 0xFFD700,
         "description": "You disturbed the bees.. Queen Bee is out to get everyone in the Underground Jungle!",
@@ -1687,7 +1702,7 @@ PLANTERA_BULB_MAX_AGE_SEC = 86400  # 24h
 UNDERGROUND_JUNGLE_ANIMAL_SPAWN_MULT = 2.0
 UNDERGROUND_JUNGLE_BOSS_SPAWN_MULT = 2.0
 
-# Channel name for auto-logging rare occurrences (e.g. One in a Million, Mikellion, netherite+ imbues)
+# Channel name for auto-logging rare occurrences (e.g. Legendary/Netherite/Luminite/Celestial/Mikellion plants, netherite+ imbues)
 RARES_CHANNEL_NAME = "rares"
 
 # Planter rank name -> numeric level mapping for area requirement checks
@@ -3560,6 +3575,8 @@ GATHERABLE_ITEMS = [
     {"category": "Flower", "name": "Herb 🌿", "base_value": 5},
     {"category": "Flower", "name": "Hyacinth 🪻", "base_value": 3},
     {"category": "Flower", "name": "Wilted Rose 🥀", "base_value": 0.5},
+    {"category": "Flower", "name": "Fortnite Battle Pass 🌸", "base_value": 5.2},
+    {"category": "Flower", "name": "Rainbow Eucalyptus 🌈", "base_value": 3.5},
 
 
     {"category": "Fruit","name": "Strawberry 🍓", "base_value": 8},
@@ -3584,6 +3601,9 @@ GATHERABLE_ITEMS = [
     {"category": "Fruit","name": "Rice Plant 🌾", "base_value": 0.7},
     {"category": "Fruit","name": "Lime 🍋", "base_value": 5.5},
     {"category": "Fruit","name": "Chestnut 🌰", "base_value": 0.35},
+    {"category": "Fruit","name": "Golden Apple", "base_value": 15},
+    {"category": "Fruit","name": "Enchanted Golden Apple", "base_value": 25},
+    {"category": "Fruit","name": "Fruit of the Spirit 🍇", "base_value": 6.9},
 
     {"category": "Vegetable","name": "Carrot 🥕", "base_value": 2},
     {"category": "Vegetable","name": "Potato 🥔", "base_value": 1},
@@ -3611,6 +3631,8 @@ GATHERABLE_ITEMS = [
 CUSTOM_ITEM_EMOJIS = {
     "Flowey": "<:flowey:1473550098716819682>",
     "Raspberry": "<:raspberry:1473550163711627399>",
+    "Golden Apple": "<:goldenapple:1476645453415055657>",
+    "Enchanted Golden Apple": "<a:enchantedgoldapple:1476645603931984014>",
 }
 
 def get_item_display_emoji(item_name: str) -> str:
@@ -3678,6 +3700,11 @@ ITEM_DESCRIPTIONS = {
     "Pea Pod 🫛": "Sweet little green pearls in a pod!",
     "Eggplant 🍆": "Purple and versatile, a kitchen staple!",
     "Sweet Potato 🍠": "Naturally sweet and nutritious root vegetable!",
+     "Golden Apple": "Half-a-heartedly comes in clutch! Commonly referred to as a Gapple.",
+     "Enchanted Golden Apple": "A ambrosiac creation from the hands of Notch himself!",
+     "Fruit of the Spirit 🍇": "A holy harvest of love, joy, and peace.",
+     "Fortnite Battle Pass 🌸": "You just WHAT out of your WHAT?",
+     "Rainbow Eucalyptus 🌈": "A tree trunk painted with every color of the rainbow!",
 }
 
 #level of ripeness - FRUITS
@@ -3687,9 +3714,12 @@ LEVEL_OF_RIPENESS_FRUITS = [
     {"name": "Raw", "multiplier": 1.3, "chance": 15},
     {"name": "Slightly Ripe", "multiplier": 1.5, "chance": 25},
     {"name": "Perfectly Ripe", "multiplier": 2.5, "chance": 20},
-    {"name": "Overripe", "multiplier": 1.6, "chance": 10},  
+    {"name": "Overripe", "multiplier": 1.6, "chance": 10},
     {"name": "Spoiled", "multiplier": 0.9, "chance": 4.99999},
-    {"name": "One in a Million", "multiplier": 50, "chance": 1},
+    {"name": "Legendary", "multiplier": 20, "chance": 1},
+    {"name": "Netherite", "multiplier": 25, "chance": 0.5},
+    {"name": "Luminite", "multiplier": 50, "chance": 0.1},
+    {"name": "Celestial", "multiplier": 100, "chance": 0.05},
     {"name": "Mikellion", "multiplier": 200, "chance": 0.000101},
 ]
 
@@ -3701,7 +3731,10 @@ LEVEL_OF_RIPENESS_VEGETABLES = [
     {"name": "Perfectly Ripe", "multiplier": 2.5, "chance": 20},
     {"name": "Overripe", "multiplier": 1.6, "chance": 10},
     {"name": "Spoiled", "multiplier": 0.9, "chance": 4.99999},
-    {"name": "One in a Million", "multiplier": 50, "chance": 1},
+    {"name": "Legendary", "multiplier": 20, "chance": 1},
+    {"name": "Netherite", "multiplier": 25, "chance": 0.5},
+    {"name": "Luminite", "multiplier": 50, "chance": 0.1},
+    {"name": "Celestial", "multiplier": 100, "chance": 0.05},
     {"name": "Mikellion", "multiplier": 200, "chance": 0.000101},
 ]
 
@@ -3711,7 +3744,10 @@ LEVEL_OF_RIPENESS_FLOWERS = [
     {"name": "Blooming", "multiplier": 1, "chance": 45},
     {"name": "Full Bloom", "multiplier": 1.5, "chance": 20},
     {"name": "Wilted", "multiplier": 0.6, "chance": 4.99999},
-    {"name": "One in a Million", "multiplier": 50, "chance": 1},
+    {"name": "Legendary", "multiplier": 20, "chance": 1},
+    {"name": "Netherite", "multiplier": 25, "chance": 0.5},
+    {"name": "Luminite", "multiplier": 50, "chance": 0.1},
+    {"name": "Celestial", "multiplier": 100, "chance": 0.05},
     {"name": "Mikellion", "multiplier": 200, "chance": 0.000101},
 ]
 
@@ -6528,14 +6564,28 @@ async def on_invite_delete(invite):
 
 
 # ----- Auto-log rare occurrences to #rares -----
-def _plant_rare_label(ripeness: str, is_gmo: bool) -> str | None:
-    """Return display label for a plant rare (One in a Million / Mikellion), or None if not rare."""
+# Ripeness names that get posted to #rares; value is (display_label_suffix, imbue_tier for RARITY_EMOJI)
+# Includes RARE-tier ripeness (Perfectly Ripe, Full Bloom) and ultra-rares (Legendary/Netherite/Luminite/Celestial/Mikellion)
+_PLANT_RARES: dict[str, tuple[str, str]] = {
+    "Perfectly Ripe": ("Perfectly Ripe", "RARE"),
+    "Full Bloom": ("Full Bloom", "RARE"),
+    "Legendary": ("LEGENDARY", "LEGENDARY"),
+    "Netherite": ("NETHERITE", "NETHERITE"),
+    "Luminite": ("LUMINITE", "LUMINITE"),
+    "Celestial": ("CELESTIAL", "CELESTIAL"),
+    "Mikellion": ("MIKELLION", "SECRET"),
+}
+
+
+def _plant_rare_label(ripeness: str, is_gmo: bool) -> tuple[str | None, str | None]:
+    """Return (display_label, imbue_tier) for a plant rare (Legendary/Netherite/Luminite/Celestial/Mikellion), or (None, None) if not rare."""
     r = (ripeness or "").strip()
-    if r == "One in a Million":
-        return "GMO ONE IN A MILLION" if is_gmo else "ONE IN A MILLION"
-    if r == "Mikellion":
-        return "GMO MIKELLION" if is_gmo else "MIKELLION"
-    return None
+    entry = _PLANT_RARES.get(r)
+    if not entry:
+        return None, None
+    suffix, tier = entry
+    label = f"GMO {suffix}" if is_gmo else suffix
+    return label, tier
 
 
 async def _post_to_rares_channel(guild: discord.Guild, content: str) -> None:
@@ -6553,19 +6603,18 @@ async def _post_to_rares_channel(guild: discord.Guild, content: str) -> None:
 async def _post_rares_plant(guild: discord.Guild, user: discord.Member, source: str,
                             item_name: str, category: str, value: float,
                             ripeness: str, is_gmo: bool, area_tag: str) -> None:
-    """Post a plant rare (One in a Million / Mikellion) to #rares."""
-    label = _plant_rare_label(ripeness, is_gmo)
+    """Post a plant rare (Legendary/Netherite/Luminite/Celestial/Mikellion) to #rares with its IMBUE emoji."""
+    label, tier = _plant_rare_label(ripeness, is_gmo)
     if not label:
         return
-    # Sparkle emoji for GMO rares, plant emoji otherwise
-    lead_emoji = "✨" if label.startswith("GMO ") else "🌱"
+    rarity_emoji = RARITY_EMOJI.get(tier, "")
     # Use get_item_display_emoji so Flowey/Raspberry (custom server emojis) display correctly in #rares
     item_emoji = get_item_display_emoji(item_name)
     # Avoid double emoji when item name already includes it (e.g. "Daffodil 🌼")
     item_display = f"{item_name} {item_emoji}" if item_emoji and item_emoji not in item_name else item_name
-    # e.g. "🌱 @User caught a ONE IN A MILLION *Strawberry 🍓* in a GATHER worth $2,216,775.69! | **[FOREST]**"
+    # e.g. ":IMBUE_L: @User caught a LEGENDARY *Strawberry 🍓* in a GATHER worth $2,216,775.69! | **[FOREST]**"
     msg = (
-        f"{lead_emoji} {user.mention} caught a **{label}** *{item_display}* "
+        f"{rarity_emoji} {user.mention} caught a **{label}** *{item_display}* "
         f"in a **{source}** worth **${value:,.2f}**! | **{area_tag}**"
     )
     await _post_to_rares_channel(guild, msg)
@@ -6588,6 +6637,14 @@ async def _post_rares_imbue(guild: discord.Guild, user: discord.Member,
     # Leading rarity emoji, rarity in caps, tool type next, imbue name bold+italic, sparkle at end
     # e.g. ":IMBUE_CE: @User rolled a CELESTIAL hoe imbue: CULTISCYTHE OF THE LIGHTBRINGER! ✨"
     msg = f"{rarity_emoji} {user.mention} rolled a **{rarity}** {tool_text}: **_{name}_**! ✨"
+    await _post_to_rares_channel(guild, msg)
+
+
+async def _post_rares_nether_star_claim(guild: discord.Guild, user: discord.Member) -> None:
+    """Post a Nether Star claim (from Wither defeat) to #rares."""
+    if not guild or not user:
+        return
+    msg = f"{NETHER_STAR_EMOJI} {user.mention} claimed the **Nether Star** from the Wither!"
     await _post_to_rares_channel(guild, msg)
 
 
@@ -7204,9 +7261,9 @@ class BeeView(discord.ui.View):
                     if channel and guild_id and random.random() < BEE_SWARM_LARVA_CHANCE:
                         larva_embed = discord.Embed(
                             title="🐝 A Larva has been revealed!",
-                            description="Break it to summon the **Queen Bee**, or ignore it. (Auto-ignored in 10 seconds.)",
+                            description="Should we break it. . . ?",
                             color=0xFFD700)
-                        larva_embed.set_footer(text="Break or Ignore — or wait 10 seconds to auto-ignore.")
+                        larva_embed.set_footer(text="(Auto-ignored after 10 sec)")
                         view_larva = LarvaView(channel_id=self.channel_id, guild_id=guild_id, area_multiplier=area_mult)
                         larva_msg = await channel.send(embed=larva_embed, view=view_larva)
                         view_larva.message = larva_msg
@@ -7266,6 +7323,8 @@ class NetherStarClaimView(discord.ui.View):
         embed.add_field(name=f"{NETHER_STAR_EMOJI} Nether Star", value=f"**Claimed by {interaction.user.mention}!**", inline=False)
         embed.set_footer(text="1.15x all Money buff active!")
         await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+        if interaction.guild:
+            asyncio.create_task(_post_rares_nether_star_claim(interaction.guild, interaction.user))
         await interaction.followup.send(
             f"{NETHER_STAR_EMOJI} You claimed the **Nether Star**! You now have **1.15x all Money**!",
             ephemeral=True)
@@ -7360,7 +7419,7 @@ class BossView(discord.ui.View):
                             title="☠️ The Twins Defeated! ☠️",
                             description="The Twins have been defeated! Conditions return to normal.",
                             color=discord.Color.gold())
-                    broadcast_embed.set_footer(text="Gathering channels are now unblocked.")
+                    broadcast_embed.set_footer(text="gathering channels are now unblocked")
                     for ch in channels:
                         try:
                             if ch.permissions_for(guild.me).send_messages:
@@ -7415,7 +7474,7 @@ async def trigger_boss_event(channel: discord.TextChannel, boss: dict, area_mult
         description=boss["description"],
         color=boss["color"])
     embed.add_field(name="HP", value=f"**{hp}** / **{hp}**\n{'🟥' * 20}", inline=False)
-    embed.add_field(name="⚔️ How to Fight", value="Press **Attack**! Damage per hit (and plants earned) depends on your Daily Shop weapons!", inline=False)
+    embed.add_field(name="⚔️ How to Fight", value="Press **Attack**!", inline=False)
     embed.set_footer(text="All gathering channels are BLOCKED until this boss is defeated!")
     view = BossView(boss=boss, hp=hp, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_multiplier, boss_state_ref=entry)
     await channel.send(embed=embed, view=view)
@@ -7708,7 +7767,7 @@ async def trigger_ender_dragon_event(channel: discord.TextChannel, area_multipli
         color=boss["color"])
     embed.add_field(name="HP", value=f"**{hp}** / **{hp}**\n{'🟥' * 20}", inline=False)
     embed.add_field(name="❤️ Regeneration", value="Destroy the **End Crystals** on Obsidian Towers in other channels to stop the dragon's regeneration!", inline=False)
-    embed.add_field(name="⚔️ How to Fight", value="Press **Attack**! Damage per hit (and plants earned) depends on your Daily Shop weapons!", inline=False)
+    embed.add_field(name="⚔️ How to Fight", value="Press **Attack**!", inline=False)
     embed.set_footer(text="All gathering channels are BLOCKED until the Ender Dragon is defeated!")
     view = EnderDragonView(boss=boss, entry=entry, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_multiplier)
     msg = await channel.send(embed=embed, view=view)
@@ -7945,7 +8004,7 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
                                    attackers: dict[int, int], channel_id: int,
                                    area_multiplier: float, *, achievements_ephemeral: bool = False):
     """Award plants to every participant. Record defeats, update PLANTER role, unlock achievements.
-    If achievements_ephemeral is True (e.g. Twins, Bullet Ant swarm), send achievement notifications via DM to avoid spamming the channel."""
+    Achievement notifications and reward embeds are always sent via DM so only the user sees them."""
     channel = interaction.guild.get_channel(channel_id)
     enemy_id = animal.get("id")
     guild = interaction.guild
@@ -7967,33 +8026,24 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
                 except Exception as e:
                     print(f"Error assigning gatherer role after PvE for user {user_id}: {e}")
 
-                # Unlock per-enemy hidden achievement if first time (ephemeral = DM to user)
+                # Unlock per-enemy hidden achievement if first time (always DM so only user sees it)
                 if enemy_id:
                     ach_key = PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT.get(enemy_id)
                     if ach_key and unlock_hidden_achievement(user_id, ach_key):
-                        if achievements_ephemeral:
-                            await send_hidden_achievement_notification_dm(user_id, ach_key)
-                        elif channel:
-                            await send_hidden_achievement_notification_async(channel, member.mention, ach_key)
+                        await send_hidden_achievement_notification_dm(user_id, ach_key)
 
-                # Slayer achievement category (total defeats)
+                # Slayer achievement category (total defeats) — always DM so only user sees it
                 total_defeats = get_user_total_pve_defeats(user_id)
                 new_slayer_level = get_achievement_level_for_stat("slayer", total_defeats)
                 cur_slayer = get_user_achievement_level(user_id, "slayer")
                 if new_slayer_level > cur_slayer:
                     set_user_achievement_level(user_id, "slayer", new_slayer_level)
-                    if achievements_ephemeral:
-                        await send_achievement_notification_dm(user_id, "slayer", new_slayer_level)
-                    elif channel:
-                        await send_achievement_notification_async(channel, member.mention, "slayer", new_slayer_level)
+                    await send_achievement_notification_dm(user_id, "slayer", new_slayer_level)
 
-                # PvE Master: defeat every type at least once
+                # PvE Master: defeat every type at least once — always DM so only user sees it
                 if PVE_MASTER_REQUIRED_IDS.issubset(set(get_user_pve_defeated(user_id))):
                     if unlock_hidden_achievement(user_id, "pve_master"):
-                        if achievements_ephemeral:
-                            await send_hidden_achievement_notification_dm(user_id, "pve_master")
-                        elif channel:
-                            await send_hidden_achievement_notification_async(channel, member.mention, "pve_master")
+                        await send_hidden_achievement_notification_dm(user_id, "pve_master")
 
                 plant_emojis = [get_item_display_emoji(r["name"]) for r in results]
                 emoji_display = " ".join(plant_emojis)
@@ -8012,13 +8062,11 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
                     name="💰 Total Earned", value=f"**${total_value:,.2f}**", inline=True)
                 reward_embed.set_footer(text="Thanks for defending the gathering grounds!")
 
-                if channel:
-                    await channel.send(f"{member.mention}", embed=reward_embed, delete_after=60)
-                else:
-                    try:
-                        await member.send(embed=reward_embed)
-                    except Exception:
-                        pass
+                # Send reward embed via DM (ephemeral-style) to avoid cluttering the channel
+                try:
+                    await member.send(embed=reward_embed)
+                except Exception:
+                    pass
             except Exception as e:
                 print(f"PvE reward failed for user {user_id}: {e}")
 
@@ -8122,7 +8170,11 @@ async def trigger_pve_event(channel: discord.TextChannel, area_multiplier: float
         if random.random() < PVE_SWARM_TRIGGER_CHANCE:
             await trigger_bee_swarm_event(channel, area_multiplier)
             return
-        animal = _weighted_choice_jungle()
+        # Underground jungle: spawn either jungle-specific or regular animals
+        if random.random() < 0.5:
+            animal = _weighted_choice_jungle()
+        else:
+            animal = random.choice(PVE_WILD_ANIMALS_SINGLE)
     else:
         if random.random() < PVE_SWARM_TRIGGER_CHANCE:
             await trigger_bullet_ant_swarm_event(channel, area_multiplier)
@@ -8142,7 +8194,7 @@ async def trigger_pve_event(channel: discord.TextChannel, area_multiplier: float
         embed.add_field(name="HP", value=f"**{hp}** / **{hp}**\n{hp_bar_filled}", inline=False)
         embed.add_field(
             name="⚔️ How to Fight",
-            value="Press the **Attack** button below! Damage per hit (and plants earned) depends on your Daily Shop weapons!",
+            value="Press the **Attack** button below!",
             inline=False)
         embed.set_footer(text="All gathering commands are BLOCKED until the wild animal is defeated")
 
@@ -8232,6 +8284,24 @@ async def gather(interaction: discord.Interaction):
 
         # --- build embed (pure computation, no DB) ---
         is_crit = gather_result.get('is_critical_gather', False)
+        item_name = gather_result.get("name", "—")
+        item_emoji = get_item_display_emoji(item_name)
+        item_display = f"{item_name} {item_emoji}" if item_emoji and item_emoji not in item_name else item_name
+        rip_emoji = get_ripeness_imbue_emoji(gather_result.get("ripeness", ""))
+
+        # Daily shop / item boosts that affected this gather
+        item_boost_sources = []
+        shop_inv = full_data.get("shop_inventory", {}) if full_data else {}
+        category = gather_result.get("category")
+
+        if shop_inv.get("scarecrow", 0) >= 1:
+            item_boost_sources.append("Scarecrow")
+        if category == "Flower" and shop_inv.get("bloomstone", 0) >= 1:
+            item_boost_sources.append("Bloomstone")
+        if shop_inv.get("alchemists_pocketwatch", 0) >= 1:
+            item_boost_sources.append("Alchemist's Pocketwatch")
+        if gather_result.get("extra_money_from_nether_star", 0) > 0:
+            item_boost_sources.append("Nether Star")
 
         if is_crit:
             hoe_enc = gather_result.get('hoe_enchant')
@@ -8239,15 +8309,16 @@ async def gather(interaction: discord.Interaction):
             hoe_rarity = hoe_enc.get("rarity", "COMMON") if hoe_enc else "COMMON"
             hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]")
             pre_crit_value = gather_result['value'] / 2
+            desc_prefix = f"{rip_emoji} " if rip_emoji else ""
             embed = discord.Embed(
                 title="\U0001f4a5 CRITICAL HIT! \U0001f4a5",
                 description=(
-                    f"**{interaction.user.name}** foraged for a(n) **{gather_result['name']}** "
+                    f"{desc_prefix}**{interaction.user.name}** foraged for a(n) **{item_display}** "
                     f"and got a **CRIT**!\n\n"
                     f"\U0001f4a5 **2X MONEY** \U0001f4a5"),
                 color=discord.Color.orange())
             embed.add_field(name="Value", value=f"**${gather_result['base_value']:.2f}**", inline=True)
-            embed.add_field(name="Ripeness", value=f"{gather_result['ripeness']}", inline=True)
+            embed.add_field(name="Ripeness", value=f"{rip_emoji} {gather_result['ripeness']}".strip(), inline=True)
             embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
 
             bloom_count = full_data.get("bloom_count", 0)
@@ -8274,20 +8345,27 @@ async def gather(interaction: discord.Interaction):
             if gather_result.get('extra_money_from_beta_tester', 0) > 0:
                 embed.add_field(name="🧪 Beta Tester!",
                     value=f"{gather_result['beta_tester_multiplier']:.2f}x - **+${gather_result['extra_money_from_beta_tester']:.2f}**", inline=False)
-            if gather_result.get('extra_money_from_nether_star', 0) > 0:
-                embed.add_field(name=f"{NETHER_STAR_EMOJI} Nether Star",
-                    value=f"{gather_result['nether_star_multiplier']:.2f}x - **+${gather_result['extra_money_from_nether_star']:.2f}**", inline=False)
+            if item_boost_sources:
+                extra = gather_result.get("extra_money_from_nether_star", 0)
+                value_parts = [f"**+${extra:.2f}**"] if extra > 0 else []
+                value_parts.append("\n".join(f"**{name.upper()}**" for name in item_boost_sources))
+                embed.add_field(
+                    name="📦 Item Boost",
+                    value="\n\n".join(value_parts),
+                    inline=False
+                )
             month_name = gather_result.get("month_name", "—")
             embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
             embed.add_field(name="\U0001f4b0 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
             embed.add_field(name="\U0001f4b5 New Balance", value=f"**${gather_result['new_balance']:.2f}**", inline=True)
         else:
+            desc_prefix = f"{rip_emoji} " if rip_emoji else ""
             embed = discord.Embed(
                 title="You Gathered!",
-                description=f"You foraged for a(n) **{gather_result['name']}**!",
+                description=f"{desc_prefix}You foraged for a(n) **{item_display}**!",
                 color=discord.Color.green())
             embed.add_field(name="Value", value=f"**${gather_result['base_value']:.2f}**", inline=True)
-            embed.add_field(name="Ripeness", value=f"{gather_result['ripeness']}", inline=True)
+            embed.add_field(name="Ripeness", value=f"{rip_emoji} {gather_result['ripeness']}".strip(), inline=True)
             embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
 
             bloom_count = full_data.get("bloom_count", 0)
@@ -8314,9 +8392,15 @@ async def gather(interaction: discord.Interaction):
             if gather_result.get('extra_money_from_beta_tester', 0) > 0:
                 embed.add_field(name="🧪 Beta Tester!",
                     value=f"{gather_result['beta_tester_multiplier']:.2f}x - **+${gather_result['extra_money_from_beta_tester']:.2f}**", inline=False)
-            if gather_result.get('extra_money_from_nether_star', 0) > 0:
-                embed.add_field(name=f"{NETHER_STAR_EMOJI} Nether Star",
-                    value=f"{gather_result['nether_star_multiplier']:.2f}x - **+${gather_result['extra_money_from_nether_star']:.2f}**", inline=False)
+            if item_boost_sources:
+                extra = gather_result.get("extra_money_from_nether_star", 0)
+                value_parts = [f"**+${extra:.2f}**"] if extra > 0 else []
+                value_parts.append("\n".join(f"**{name.upper()}**" for name in item_boost_sources))
+                embed.add_field(
+                    name="📦 Item Boost",
+                    value="\n\n".join(value_parts),
+                    inline=False
+                )
 
             hoe_enc = gather_result.get('hoe_enchant')
             if hoe_enc:
@@ -8352,8 +8436,9 @@ async def gather(interaction: discord.Interaction):
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"🔗🔗 **CHAIN!** Your cooldown has been reset! Gather again! 🔗🔗")
 
-        # Auto-log to #rares for One in a Million / Mikellion (GMO or not)
-        if _plant_rare_label(gather_result.get("ripeness", ""), gather_result.get("is_gmo", False)):
+        # Auto-log to #rares for Legendary/Netherite/Luminite/Celestial/Mikellion (GMO or not)
+        rare_label, _ = _plant_rare_label(gather_result.get("ripeness", ""), gather_result.get("is_gmo", False))
+        if rare_label:
             area_tag = "[" + channel_name.upper() + "]"
             asyncio.create_task(_post_rares_plant(
                 interaction.guild, interaction.user, "GATHER",
@@ -9075,9 +9160,11 @@ async def harvest(interaction: discord.Interaction):
         # One line per item: emoji (ripeness) GMO? — no plant name text to stay under 1024
         lines = []
         for item in gathered_items:
+            rip_em = get_ripeness_imbue_emoji(item.get("ripeness", ""))
             emoji = get_item_display_emoji(item["name"])
             gmo = " GMO! ✨" if item["is_gmo"] else ""
-            lines.append(f"{emoji} (**{item['ripeness']}**){gmo}")
+            prefix = f"{rip_em} " if rip_em else ""
+            lines.append(f"{prefix}{emoji} (**{item['ripeness']}**){gmo}")
         items_display = "\n".join(lines)
         if len(items_display) > 1024:
             max_content = 1024 - 20  # reserve space for " … and 99999 more"
@@ -9126,9 +9213,25 @@ async def harvest(interaction: discord.Interaction):
         if result.get("extra_money_from_beta_tester", 0) > 0:
             embed.add_field(name="🧪 Beta Tester!",
                 value=f"{result['beta_tester_multiplier']:.2f}x - **+${result['extra_money_from_beta_tester']:.2f}**", inline=False)
+        # Daily shop / item boosts that affected this harvest
+        item_boost_sources = []
+        shop_inv = full_data.get("shop_inventory", {}) if full_data else {}
+        if shop_inv.get("bloomstone", 0) >= 1:
+            item_boost_sources.append("Bloomstone")
+        if shop_inv.get("fuzzy_dice", 0) >= 1:
+            item_boost_sources.append("Fuzzy Dice")
         if result.get("extra_money_from_nether_star", 0) > 0:
-            embed.add_field(name=f"{NETHER_STAR_EMOJI} Nether Star",
-                value=f"{result['nether_star_multiplier']:.2f}x - **+${result['extra_money_from_nether_star']:.2f}**", inline=False)
+            item_boost_sources.append("Nether Star")
+
+        if item_boost_sources:
+            extra = result.get("extra_money_from_nether_star", 0)
+            value_parts = [f"**+${extra:.2f}**"] if extra > 0 else []
+            value_parts.append("\n".join(f"**{name.upper()}**" for name in item_boost_sources))
+            embed.add_field(
+                name="📦 Item Boost",
+                value="\n\n".join(value_parts),
+                inline=False
+            )
 
         tractor_enc = result.get("tractor_enchant")
         if tractor_enc:
@@ -9166,10 +9269,11 @@ async def harvest(interaction: discord.Interaction):
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"🔗🔗 **CHAIN!** Your harvest cooldown has been reset! Harvest again! 🔗🔗")
 
-        # Auto-log to #rares for any One in a Million / Mikellion (GMO or not)
+        # Auto-log to #rares for any Legendary/Netherite/Luminite/Celestial/Mikellion (GMO or not)
         area_tag = "[" + channel_name.upper() + "]"
         for item in gathered_items:
-            if _plant_rare_label(item.get("ripeness", ""), item.get("is_gmo", False)):
+            rare_label, _ = _plant_rare_label(item.get("ripeness", ""), item.get("is_gmo", False))
+            if rare_label:
                 cat = next((i["category"] for i in GATHERABLE_ITEMS if i["name"] == item["name"]), "Item")
                 asyncio.create_task(_post_rares_plant(
                     interaction.guild, interaction.user, "HARVEST",
@@ -9704,14 +9808,15 @@ def _format_refresh_countdown() -> str:
     return f"{m}m"
 
 
-def _build_daily_shop_embed_and_view(offerings: list, date_est: str):
+def _build_daily_shop_embed_and_view(offerings: list, date_est: str, user_id: int):
     """Build the Daily Shop embed and view for the given list of item ids (already filtered for user)."""
+    tree_ring_emoji = "<:TreeRing:1474244868288282817>"
+    tree_rings = get_user_tree_rings(user_id)
     embed = discord.Embed(
         title="🛒 Daily Shop",
-        description="Welcome to the Daily Shop! Purchase special items with **<:TreeRing:1474244868288282817> Tree Rings**. Stock refreshes daily at midnight EST!",
+        description=f"{tree_ring_emoji} Your Tree Rings: **{tree_rings}**",
         color=discord.Color.green()
     )
-    tree_ring_emoji = "<:TreeRing:1474244868288282817>"
     for item_id in offerings:
         info = DAILY_SHOP_ITEMS[item_id]
         item_emoji = info.get("emoji", tree_ring_emoji)
@@ -9908,15 +10013,17 @@ class DailyShopBuyButton(discord.ui.Button):
         await safe_interaction_response(interaction, interaction.response.defer, ephemeral=True)
         new_offerings = get_daily_shop_offerings(date_est, user_id)
         if new_offerings:
-            new_embed, new_view = _build_daily_shop_embed_and_view(new_offerings, date_est)
+            new_embed, new_view = _build_daily_shop_embed_and_view(new_offerings, date_est, user_id)
             try:
                 await interaction.message.edit(embed=new_embed, view=new_view)
             except Exception:
                 pass
         else:
+            tree_ring_emoji = "<:TreeRing:1474244868288282817>"
+            tree_rings = get_user_tree_rings(user_id)
             done_embed = discord.Embed(
                 title="🛒 Daily Shop",
-                description="You've bought everything available for you today! You own all items currently on offer.",
+                description=f"You've bought everything available for you today! You own all items currently on offer.\n\n{tree_ring_emoji} Your Tree Rings: **{tree_rings}**",
                 color=discord.Color.gold()
             )
             done_embed.set_footer(text=f"Shop refreshes in {_format_refresh_countdown()}")
@@ -9989,15 +10096,17 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
             return
         offerings = get_daily_shop_offerings(date_est, user_id)
         if not offerings:
+            tree_ring_emoji = "<:TreeRing:1474244868288282817>"
+            tree_rings = get_user_tree_rings(user_id)
             embed = discord.Embed(
                 title="🛒 Daily Shop",
-                description="You already own **all** Daily Shop items! There's nothing new for you today. Check back after the next refresh.",
+                description=f"You already own **all** Daily Shop items! There's nothing new for you today. Check back after the next refresh.\n\n{tree_ring_emoji} Your Tree Rings: **{tree_rings}**",
                 color=discord.Color.gold()
             )
             embed.set_footer(text=f"Shop refreshes in {_format_refresh_countdown()}")
             await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
             return
-        embed, view = _build_daily_shop_embed_and_view(offerings, date_est)
+        embed, view = _build_daily_shop_embed_and_view(offerings, date_est, user_id)
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view, ephemeral=True)
     except Exception as e:
         print(f"Error in dailyshop command: {e}")
@@ -10026,7 +10135,8 @@ async def userstats(interaction: discord.Interaction):
         user_balance = get_user_balance(user_id)
         total_items = get_user_total_items(user_id)
         cycle_plants = get_user_bloom_cycle_plants(user_id)
-        
+        bloom_count = get_user_bloom_count(user_id)
+
         # Calculate items needed for next rankup (based on bloom cycle plants, not lifetime)
         items_needed = None
         next_rank = None
@@ -10070,7 +10180,8 @@ async def userstats(interaction: discord.Interaction):
         
         embed.add_field(name="💰 Balance", value=f"**${user_balance:.2f}**", inline=True)
         embed.add_field(name="🌱 Plants Gathered (Total)", value=f"**{total_items}** plants", inline=True)
-        embed.add_field(name="🌿 Plants Gathered (This Bloom)", value=f"**{cycle_plants}** plants", inline=True)
+        if bloom_count > 0:
+            embed.add_field(name="🌿 Plants Gathered (This Bloom)", value=f"**{cycle_plants}** plants", inline=True)
         
         # Add Bloom Rank and Tree Rings
         bloom_rank = get_bloom_rank(user_id)
@@ -14108,9 +14219,11 @@ async def gardener_background_task():
                                                 
                                                 lines = []
                                                 for item in harvest_result["gathered_items"][:20]:
+                                                    rip_em = get_ripeness_imbue_emoji(item.get("ripeness", ""))
                                                     emoji = get_item_display_emoji(item["name"])
                                                     gmo = " GMO! ✨" if item["is_gmo"] else ""
-                                                    lines.append(f"{emoji} ({item['ripeness']}){gmo}")
+                                                    prefix = f"{rip_em} " if rip_em else ""
+                                                    lines.append(f"{prefix}{emoji} ({item['ripeness']}){gmo}")
                                                 items_display = "\n".join(lines) or "No items"
                                                 embed.add_field(name="📦 Items Harvested", value=items_display, inline=False)
                                                 embed.add_field(name="💰 Total Value", value=f"**${total_value:,.2f}**", inline=True)
@@ -14144,13 +14257,15 @@ async def gardener_background_task():
                                         if lawn_channel:
                                             try:
                                                 if lawn_channel.permissions_for(guild.me).send_messages:
+                                                    rip_em = get_ripeness_imbue_emoji(gather_result.get("ripeness", ""))
+                                                    desc_prefix = f"{rip_em} " if rip_em else ""
                                                     embed = discord.Embed(
                                                         title=f"🌿 {user_name}'s Gardener gathered!",
-                                                        description=f"Their gardener found a **{gather_result['name']}**!",
+                                                        description=f"{desc_prefix}Their gardener found a **{gather_result['name']}**!",
                                                         color=discord.Color.green()
                                                     )
                                                     embed.add_field(name="Value", value=f"**${gather_result['base_value']:.2f}**", inline=True)
-                                                    embed.add_field(name="Ripeness", value=gather_result['ripeness'], inline=True)
+                                                    embed.add_field(name="Ripeness", value=f"{rip_em} {gather_result['ripeness']}".strip(), inline=True)
                                                     embed.add_field(name="GMO?", value="Yes ✨" if gather_result['is_gmo'] else "No", inline=False)
                                                     await lawn_channel.send(embed=embed)
                                                     # Hidden achievement: One in a Mikellion (gardener gathered Mikellion)
@@ -14207,9 +14322,11 @@ async def secret_gardener_background_task():
                                             )
                                             lines = []
                                             for item in harvest_result["gathered_items"][:20]:
+                                                rip_em = get_ripeness_imbue_emoji(item.get("ripeness", ""))
                                                 emoji = get_item_display_emoji(item["name"])
                                                 gmo = " GMO! ✨" if item["is_gmo"] else ""
-                                                lines.append(f"{emoji} ({item['ripeness']}){gmo}")
+                                                prefix = f"{rip_em} " if rip_em else ""
+                                                lines.append(f"{prefix}{emoji} ({item['ripeness']}){gmo}")
                                             items_display = "\n".join(lines) or "No items"
                                             embed.add_field(name="\U0001f4e6 Items Harvested", value=items_display, inline=False)
                                             embed.add_field(name="\U0001f4b0 Total Value", value=f"**${total_value:,.2f}**", inline=True)
@@ -14234,13 +14351,15 @@ async def secret_gardener_background_task():
                                     lawn_channel = discord.utils.get(guild.text_channels, name="lawn")
                                     if lawn_channel and lawn_channel.permissions_for(guild.me).send_messages:
                                         try:
+                                            rip_em = get_ripeness_imbue_emoji(gather_result.get("ripeness", ""))
+                                            desc_prefix = f"{rip_em} " if rip_em else ""
                                             embed = discord.Embed(
                                                 title=f"\U0001f33f\u2728 {user_name}'s Secret Gardener gathered!",
-                                                description=f"The Secret Gardener found a **{gather_result['name']}**!",
+                                                description=f"{desc_prefix}The Secret Gardener found a **{gather_result['name']}**!",
                                                 color=discord.Color.purple()
                                             )
                                             embed.add_field(name="Value", value=f"**${gather_result['base_value']:,.2f}**", inline=True)
-                                            embed.add_field(name="Ripeness", value=gather_result['ripeness'], inline=True)
+                                            embed.add_field(name="Ripeness", value=f"{rip_em} {gather_result['ripeness']}".strip(), inline=True)
                                             embed.add_field(name="GMO?", value="Yes \u2728" if gather_result['is_gmo'] else "No", inline=False)
                                             await lawn_channel.send(embed=embed)
                                             # Hidden achievement: One in a Mikellion (secret gardener gathered Mikellion)
@@ -15461,11 +15580,19 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
                     value=f"{BETA_TESTER_MONEY_MULTIPLIER:.2f}x - **+${extra_beta:.2f}**",
                     inline=False
                 )
+
+            # Item Boosts (shop / dailyshop items affecting this sale)
+            item_boost_sources = []
             if has_shop_item(user_id, "nether_star"):
-                extra_ns = total_sale_value * (NETHER_STAR_MONEY_MULTIPLIER - 1.0) / NETHER_STAR_MONEY_MULTIPLIER
+                item_boost_sources.append("Nether Star")
+
+            if item_boost_sources:
+                extra_ns = total_sale_value * (NETHER_STAR_MONEY_MULTIPLIER - 1.0) / NETHER_STAR_MONEY_MULTIPLIER if has_shop_item(user_id, "nether_star") else 0.0
+                value_parts = [f"**+${extra_ns:.2f}**"] if extra_ns > 0 else []
+                value_parts.append("\n".join(f"**{name.upper()}**" for name in item_boost_sources))
                 embed.add_field(
-                    name=f"{NETHER_STAR_EMOJI} Nether Star",
-                    value=f"{NETHER_STAR_MONEY_MULTIPLIER:.2f}x - **+${extra_ns:.2f}**",
+                    name="📦 Item Boost",
+                    value="\n\n".join(value_parts),
                     inline=False
                 )
             
@@ -15586,11 +15713,20 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
                 value=f"{BETA_TESTER_MONEY_MULTIPLIER:.2f}x - **+${extra_beta:.2f}**",
                 inline=False
             )
+        # Item Boosts (shop / dailyshop items affecting this sale)
+        item_boost_sources = []
+        if has_shop_item(user_id, "cryptobro_shadow"):
+            item_boost_sources.append("Cryptobro's Shadow")
         if has_shop_item(user_id, "nether_star"):
-            extra_ns = sale_value * (NETHER_STAR_MONEY_MULTIPLIER - 1.0) / NETHER_STAR_MONEY_MULTIPLIER
+            item_boost_sources.append("Nether Star")
+
+        if item_boost_sources:
+            extra_ns = sale_value * (NETHER_STAR_MONEY_MULTIPLIER - 1.0) / NETHER_STAR_MONEY_MULTIPLIER if has_shop_item(user_id, "nether_star") else 0.0
+            value_parts = [f"**+${extra_ns:.2f}**"] if extra_ns > 0 else []
+            value_parts.append("\n".join(f"**{name.upper()}**" for name in item_boost_sources))
             embed.add_field(
-                name=f"{NETHER_STAR_EMOJI} Nether Star",
-                value=f"{NETHER_STAR_MONEY_MULTIPLIER:.2f}x - **+${extra_ns:.2f}**",
+                name="📦 Item Boost",
+                value="\n\n".join(value_parts),
                 inline=False
             )
         
