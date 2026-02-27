@@ -6564,11 +6564,9 @@ async def on_invite_delete(invite):
 
 
 # ----- Auto-log rare occurrences to #rares -----
-# Ripeness names that get posted to #rares; value is (display_label_suffix, imbue_tier for RARITY_EMOJI)
-# Includes RARE-tier ripeness (Perfectly Ripe, Full Bloom) and ultra-rares (Legendary/Netherite/Luminite/Celestial/Mikellion)
+# Only these plant ripenesses get posted to #rares (NOT Perfectly Ripe or Full Bloom — those are too common).
+# Also posted to #rares: netherite+ imbue rolls (_post_rares_imbue), Nether Star claims (_post_rares_nether_star_claim).
 _PLANT_RARES: dict[str, tuple[str, str]] = {
-    "Perfectly Ripe": ("Perfectly Ripe", "RARE"),
-    "Full Bloom": ("Full Bloom", "RARE"),
     "Legendary": ("LEGENDARY", "LEGENDARY"),
     "Netherite": ("NETHERITE", "NETHERITE"),
     "Luminite": ("LUMINITE", "LUMINITE"),
