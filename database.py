@@ -241,9 +241,10 @@ def perform_gather_update(user_id: int, balance_increment: float, item_name: str
             current_total = int(doc.get("gather_stats", {}).get("total_items", 0))
         current_bloom_cycle = int(doc.get("bloom_cycle_plants", 0))
     
-    # Check if this gather will cross a 100-plant milestone
+    # Check if this gather will cross the tree-ring milestone (100 plants, or 50 with Time Machine)
     new_total = current_total + 1
-    should_award_tree_ring = (new_total % 100 == 0) and new_total > 0
+    interval = get_tree_ring_interval(user_id)
+    should_award_tree_ring = (new_total % interval == 0) and new_total > 0
     
     new_bloom_cycle = current_bloom_cycle + 1
     
@@ -327,7 +328,8 @@ def perform_batch_gather_update(user_id: int, results: list, apply_cooldown: boo
         name = r["name"]
         gather_items_inc[f"gather_stats.items.{name}"] = gather_items_inc.get(f"gather_stats.items.{name}", 0) + 1
 
-    tree_rings = sum(1 for i in range(n) if ((current_total + 1 + i) % 100 == 0) and (current_total + 1 + i) > 0)
+    interval = get_tree_ring_interval(user_id)
+    tree_rings = sum(1 for i in range(n) if ((current_total + 1 + i) % interval == 0) and (current_total + 1 + i) > 0)
     new_bloom_cycle = current_bloom_cycle + n
 
     update_ops = {
@@ -799,15 +801,21 @@ def increment_user_water_count(user_id: int) -> None:
 
 
 def get_water_multiplier(user_id: int) -> float:
-    """Calculate money multiplier based on water count. Formula: 1.0 + (water_count * 0.01) - 1% per water (additive, similar to Tree Rings)."""
+    """Calculate money multiplier based on water count. Formula: 1.0 + (water_count * 0.01) - 1% per water. Golden Watering Can doubles this boost."""
     water_count = get_user_water_count(user_id)
-    return 1.0 + (water_count * 0.01)
+    base = 1.0 + (water_count * 0.01)
+    inv = get_user_shop_inventory(user_id)
+    if inv.get("golden_watering_can", 0) >= 1:
+        return 1.0 + (base - 1.0) * 2  # double the water boost
+    return base
 
 
 def get_daily_bonus_multiplier(user_id: int) -> float:
-    """Calculate daily streak bonus multiplier based on consecutive water days. Formula: 1.0 + (consecutive_days * 0.02) - 2% per consecutive day."""
+    """Calculate daily streak bonus multiplier. 2% per consecutive day, or 4% with Golden Watering Can."""
     consecutive_days = get_user_consecutive_water_days(user_id)
-    return 1.0 + (consecutive_days * 0.02)
+    inv = get_user_shop_inventory(user_id)
+    rate = 0.04 if inv.get("golden_watering_can", 0) >= 1 else 0.02
+    return 1.0 + (consecutive_days * rate)
 
 
 def get_crypto_prices() -> Dict[str, float]:
@@ -1094,6 +1102,12 @@ def has_shop_item(user_id: int, item_id: str) -> bool:
     return inv.get(item_id, 0) >= 1
 
 
+def get_tree_ring_interval(user_id: int) -> int:
+    """Return 50 if user has Time Machine (1 ring per 50 plants), else 100."""
+    inv = get_user_shop_inventory(user_id)
+    return 50 if inv.get("time_machine", 0) >= 1 else 100
+
+
 def get_user_daily_shop_purchases(user_id: int) -> tuple:
     """Return (purchases_count_today: int, last_date_est: str). Count resets when date changes."""
     users = _get_users_collection()
@@ -1146,6 +1160,26 @@ def purchase_daily_shop_item(user_id: int, item_id: str, cost: int, date_est: st
         }
     )
     return True
+
+
+def get_slot_token_free_spin_used_date_est(user_id: int) -> str:
+    """Return the EST date (YYYY-MM-DD) when user last used their Slot Token free spin, or '' if never."""
+    users = _get_users_collection()
+    doc = users.find_one({"_id": int(user_id)}, {"slot_token_free_spin_used_date_est": 1})
+    if not doc:
+        return ""
+    return str(doc.get("slot_token_free_spin_used_date_est", ""))
+
+
+def set_slot_token_free_spin_used_date_est(user_id: int, date_est: str) -> None:
+    """Record that user used their Slot Token free spin on the given EST date."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"slot_token_free_spin_used_date_est": date_est}},
+        upsert=True,
+    )
 
 
 def get_roulette_elimination_cooldown_seconds(user_id: int) -> int:
@@ -1224,6 +1258,18 @@ def get_user_bloom_count(user_id: int) -> int:
     if not doc:
         return 0
     return int(doc.get("bloom_count", 0))
+
+
+def set_user_bloom_count(user_id: int, bloom_count: int) -> None:
+    """Set a user's bloom count (admin). Clamps to 0-18. Used by /setrank."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    count = max(0, min(18, int(bloom_count)))
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"bloom_count": count}},
+        upsert=True
+    )
 
 
 def perform_bloom(user_id: int) -> None:
@@ -2511,8 +2557,9 @@ def perform_harvest_batch_update(
     _ensure_user_document(user_id)
 
     new_total = pre_total_items + num_items
+    interval = get_tree_ring_interval(user_id)
     tree_rings_to_award = 0
-    for milestone in range(100, new_total + 1, 100):
+    for milestone in range(interval, new_total + 1, interval):
         if pre_total_items < milestone <= new_total:
             tree_rings_to_award += 1
 

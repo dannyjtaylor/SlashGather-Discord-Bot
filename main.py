@@ -113,6 +113,7 @@ from database import (
     get_bloom_multiplier,
     get_bloom_rank,
     get_user_bloom_count,
+    set_user_bloom_count,
     perform_bloom,
     get_user_bloom_cycle_plants,
     deduct_user_bloom_cycle_plants,
@@ -187,6 +188,8 @@ from database import (
     get_user_daily_shop_purchases,
     purchase_daily_shop_item,
     get_roulette_elimination_cooldown_seconds,
+    get_slot_token_free_spin_used_date_est,
+    set_slot_token_free_spin_used_date_est,
     get_user_ids_with_shop_item,
     add_shop_item_to_user,
     steal_revert_gather,
@@ -292,7 +295,7 @@ async def safe_interaction_response(interaction: discord.Interaction,
 
 # Helper function to safely defer an interaction
 async def safe_defer(interaction: discord.Interaction, ephemeral: bool = False):
-    """Safely defer an interaction, handling all possible errors."""
+    """Safely defer an interaction, handling all possible errors. Call this FIRST in every button/callback to avoid 'This interaction failed.'"""
     try:
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=ephemeral)
@@ -307,6 +310,7 @@ async def safe_defer(interaction: discord.Interaction, ephemeral: bool = False):
     except Exception as e:
         print(f"Error deferring interaction: {e}")
         return False
+
 
 # Helper function to send achievement notification
 async def send_achievement_notification(interaction: discord.Interaction, achievement_name: str, level: int):
@@ -683,10 +687,14 @@ RARITY_EMOJI = {
     "SUPER RARE":  "<:IMBUE_SR:1472431974428704999>",
     "LEGENDARY":   "<:IMBUE_L:1472431641975717971>",
     "NETHERITE":   "<:IMBUE_N:1472431697642520576>",
-    "LUMINITE":    "<:IMBUE_LUM:1472431119466107000>",
+    "LUMINITE":    "<:IMBUE_LUM:1477751680199164075>",
     "CELESTIAL":   "<:IMBUE_CE:1472431208859439295>",
     "SECRET":      "<:IMBUE_SEC:1473395529554591848>"
 }
+
+# Progress bar emojis for /gear, /orchard, /achievements (white = not filled, green = filled)
+PROGRESS_N = "<:PROGRESS_N:1477736801480474634>"  # white square
+PROGRESS_Y = "<:PROGRESS_Y:1477736340941701416>"  # green square
 
 # Ripeness name -> imbue tier for plant display (COMMON/UNCOMMON/RARE + rares LEGENDARY/NETHERITE/LUMINITE/CELESTIAL/SECRET)
 RIPENESS_IMBUE_TIER = {
@@ -783,16 +791,20 @@ HOE_ENCHANTMENTS = {
         _make_hoe_enchant("RUSTED", "COMMON", "Your hoe's rusted!", resonance=1, prosperity=1, renewal=-3),
         _make_hoe_enchant("SPLINTERED", "COMMON", "Your hoe's handle gives you splinters!", resonance=-2, renewal=-5, abundance=1),
         _make_hoe_enchant("DULLBLADE", "COMMON", "Your hoe's blade is dulling!", prosperity=-1, abundance=2, renewal=1, resonance=1),
-        _make_hoe_enchant("DUSTWORN", "COMMON", "Your hoe has been worn with time.", prosperity=1, renewal=1),
+        _make_hoe_enchant("DUSTWORN", "COMMON", "Your hoe has been worn with time!", prosperity=1, renewal=1),
         _make_hoe_enchant("VOIDGRAIN", "COMMON", "Your plants are coming straight from the void!", prosperity=1, renewal=2),
         _make_hoe_enchant("TARNISHED TILL", "COMMON", "Your hoe is tarnished!", prosperity=-1, renewal=-5),
         _make_hoe_enchant("SHALLOWCUT", "COMMON", "Your hoe's handle is shorter!", renewal=4, prosperity=-1, resonance=1),
+        _make_hoe_enchant("WORMGNAW", "COMMON", "Worms have been nibbling at the handle!", abundance=2, renewal=-2, resonance=-1),
+        _make_hoe_enchant("CLAYCAKED", "COMMON", "Dried clay is caked on the blade!", prosperity=2, renewal=-1, abundance=-1),
+        _make_hoe_enchant("ROOTBOUND", "COMMON", "Tiny roots have grown into the wood!", renewal=3, abundance=1, prosperity=-1),
+        _make_hoe_enchant("SUNCRACKED", "COMMON", "The handle is cracked from the sun!", resonance=2, renewal=-3, prosperity=1),
     ],
     "UNCOMMON": [
         _make_hoe_enchant("WINDBLESSED", "UNCOMMON", "Your hoe has been blessed by the wind!", prosperity=2, renewal=3, resonance=2),
         _make_hoe_enchant("DEWFORGED", "UNCOMMON", "Your hoe has been infused with water!", prosperity=1, renewal=1, resonance=1, abundance=1),
         _make_hoe_enchant("CROPWOVEN", "UNCOMMON", "Your hoe can get more valuable crops!", prosperity=4),
-        _make_hoe_enchant("ABYSSALSEED", "UNCOMMON", "Your hoe is from the abyss...", prosperity=1, abundance=2, resonance=1),
+        _make_hoe_enchant("ABYSSALSEED", "UNCOMMON", "Your hoe is from the abyss!", prosperity=1, abundance=2, resonance=1),
         _make_hoe_enchant("THISTLEBOUND", "UNCOMMON", "Your hoe is prone to thistles!", abundance=4, renewal=-5, resonance=-1),
         _make_hoe_enchant("THORNWOVEN", "UNCOMMON", "Your hoe's handle is reinforced with thorns!", abundance=3, renewal=-2, resonance=1),
         _make_hoe_enchant("SAPLINE", "UNCOMMON", "Your hoe has been made with the finest of saplings!", abundance=1, prosperity=3, renewal=3, resonance=1),
@@ -803,41 +815,69 @@ HOE_ENCHANTMENTS = {
         _make_hoe_enchant("STORMROOT", "RARE", "Your hoe has the power of storms!", prosperity=4, abundance=1, resonance=-1, renewal=-2),
         _make_hoe_enchant("EMBERWIND", "RARE", "Your hoe has been imbued with embers!", prosperity=2, abundance=3, resonance=1, renewal=2),
         _make_hoe_enchant("SCYTHEREAP", "RARE", "Your hoe's blade has been sharpened into a scythe!", prosperity=5, abundance=1, resonance=2, renewal=1),
+        _make_hoe_enchant("RAINSPROUT", "RARE", "Your hoe calls upon the rain to nourish the soil!", prosperity=4, renewal=2, abundance=2, resonance=1),
+        _make_hoe_enchant("GOLDENFURROW", "RARE", "Your furrows gleam like gold!", prosperity=6, abundance=1, resonance=-1, renewal=-1),
+        _make_hoe_enchant("FROSTTHAW", "RARE", "Your hoe breaks the frost and wakes the earth!", prosperity=3, renewal=4, abundance=2, resonance=1),
+        _make_hoe_enchant("HARVESTCROWN", "RARE", "Your hoe wears a crown of harvest!", prosperity=5, abundance=2, renewal=1, resonance=2),
     ],
     "SUPER RARE": [
         _make_hoe_enchant("TITANBLOOM", "SUPER RARE", "Your hoe's been blessed by the titans!", prosperity=6, abundance=3, renewal=-5, resonance=5),
         _make_hoe_enchant("LIGHTGROWN", "SUPER RARE", "Your hoe's been blessed by light!", prosperity=6, abundance=2, renewal=8),
-        _make_hoe_enchant("SOL'S MEMORY", "SUPER RARE", "An ancient hoe, thought to be forged from within the sun itself...", prosperity=7, abundance=3, renewal=5, resonance=3),
+        _make_hoe_enchant("SOL'S MEMORY", "SUPER RARE", "An ancient hoe, thought to be forged from within the sun itself!", prosperity=7, abundance=3, renewal=5, resonance=3),
         _make_hoe_enchant("THUNDERSOW", "SUPER RARE", "Your hoe has been charged by lightning!", prosperity=5, abundance=2, renewal=9, resonance=2),
+        _make_hoe_enchant("MOONBLESSED", "SUPER RARE", "Your hoe has been blessed by the moon!", prosperity=6, abundance=3, renewal=6, resonance=3),
+        _make_hoe_enchant("FIRST LIGHT'S KISS", "SUPER RARE", "The first ray of sun blesses every furrow you draw!", prosperity=7, abundance=2, renewal=7, resonance=2),
+        _make_hoe_enchant("VOIDBLOSSOM", "SUPER RARE", "Your hoe blooms from the void!", prosperity=5, abundance=4, renewal=5, resonance=4),
     ],
     "LEGENDARY": [
         _make_hoe_enchant("STARFORGED", "LEGENDARY", "Your hoe has been forged from the cosmos!", prosperity=9, abundance=3, renewal=8, resonance=3),
-        _make_hoe_enchant("MONARCH'S RAKE", "LEGENDARY", "A pristine, auric hoe from an old king, thousands of years past.", prosperity=10, abundance=5, renewal=10, resonance=4),
+        _make_hoe_enchant("MONARCH'S RAKE", "LEGENDARY", "A pristine, auric hoe from an old king, thousands of years past!", prosperity=10, abundance=5, renewal=10, resonance=4),
         _make_hoe_enchant("SOULBOUND", "LEGENDARY", "Your hoe has been infused with souls of past gardeners!", prosperity=9, abundance=4, renewal=7, resonance=4),
+        _make_hoe_enchant("ETERNAL HARVEST", "LEGENDARY", "Your hoe shall reap forever!", prosperity=10, abundance=4, renewal=9, resonance=4),
+        _make_hoe_enchant("ELDER EARTH", "LEGENDARY", "This hoe remembers when the soil was new!", prosperity=9, abundance=5, renewal=8, resonance=5),
+        _make_hoe_enchant("COSMOS REAPER", "LEGENDARY", "Your hoe reaps across the cosmos!", prosperity=10, abundance=3, renewal=10, resonance=4),
     ],
     "NETHERITE": [
-        _make_custom_hoe_enchant("GRANDMASTER'S FURROW", "NETHERITE", "This tool once belonged to a valiant hero.",
+        _make_custom_hoe_enchant("GRANDMASTER'S FURROW", "NETHERITE", "This tool once belonged to a valiant hero!",
             critical_chance=0.15, money_bonus=3.00, chain_chance=0.15, cooldown_reduction=10,
             display_levels={"abundance": 6, "prosperity": 15, "resonance": 3, "renewal": 10}),
-        _make_custom_hoe_enchant("EDEN'S GENESIS", "NETHERITE", "A holy hoe, one who gave birth to an ancient garden.",
+        _make_custom_hoe_enchant("EDEN'S GENESIS", "NETHERITE", "A holy hoe, one who gave birth to an ancient garden!",
             critical_chance=0.20, money_bonus=4.00,
             display_levels={"abundance": 8, "prosperity": 20}),
+        _make_custom_hoe_enchant("CINDER'S EMBRACE", "NETHERITE", "Warm embers linger in every cut your hoe makes!",
+            critical_chance=0.12, money_bonus=2.80, chain_chance=0.12, cooldown_reduction=8,
+            display_levels={"abundance": 5, "prosperity": 14, "resonance": 2, "renewal": 8}),
+        _make_custom_hoe_enchant("HOLLOW HARVEST", "NETHERITE", "Your hoe reaps what grows in the quiet between worlds!",
+            critical_chance=0.18, money_bonus=3.50, chain_chance=0.10, cooldown_reduction=12,
+            display_levels={"abundance": 7, "prosperity": 17, "resonance": 2, "renewal": 12}),
     ],
     "LUMINITE": [
-        _make_custom_hoe_enchant("EARTHSHAPER", "LUMINITE", "This tool can shape the earth to it's will!",
+        _make_custom_hoe_enchant("EARTHSHAPER", "LUMINITE", "This tool can shape the earth to its will!",
             critical_chance=0.20, money_bonus=3.00, chain_chance=0.15, cooldown_reduction=10,
             display_levels={"abundance": 6, "prosperity": 15, "resonance": 3, "renewal": 10}),
         _make_custom_hoe_enchant("AURORABORN RELIC", "LUMINITE", "An ancient tool born out of heavenly lights!",
             critical_chance=0.05, money_bonus=5.00, chain_chance=0.10, cooldown_reduction=20,
             display_levels={"abundance": 2, "prosperity": 25, "resonance": 2, "renewal": 20}),
+        _make_custom_hoe_enchant("STARCRASH TILL", "LUMINITE", "Your hoe tills soil that remembers falling stars!",
+            critical_chance=0.18, money_bonus=3.80, chain_chance=0.14, cooldown_reduction=14,
+            display_levels={"abundance": 7, "prosperity": 19, "resonance": 3, "renewal": 14}),
+        _make_custom_hoe_enchant("LIMINAL FURROW", "LUMINITE", "Your hoe works the threshold between day and night!",
+            critical_chance=0.15, money_bonus=4.20, chain_chance=0.12, cooldown_reduction=18,
+            display_levels={"abundance": 6, "prosperity": 21, "resonance": 2, "renewal": 18}),
     ],
     "CELESTIAL": [
         _make_custom_hoe_enchant("CULTISCYTHE OF THE LIGHTBRINGER", "CELESTIAL", "Razor-sharp & blessed by the sun!",
             critical_chance=0.225, money_bonus=8.00, chain_chance=0.20, cooldown_reduction=15,
             display_levels={"abundance": 7, "prosperity": 40, "resonance": 4, "renewal": 9}),
+        _make_custom_hoe_enchant("NOONSTRIKE", "CELESTIAL", "Your hoe strikes with the weight of the high sun!",
+            critical_chance=0.20, money_bonus=7.50, chain_chance=0.18, cooldown_reduction=18,
+            display_levels={"abundance": 8, "prosperity": 37, "resonance": 4, "renewal": 18}),
+        _make_custom_hoe_enchant("PLANTA MAXIMA LUNAE", "CELESTIAL", "The moon's greatest plant blesses every seed you sow!",
+            critical_chance=0.22, money_bonus=8.50, chain_chance=0.19, cooldown_reduction=16,
+            display_levels={"abundance": 9, "prosperity": 42, "resonance": 4, "renewal": 16}),
     ],
     "SECRET": [
-        _make_custom_hoe_enchant("FLORAL BANE OF VEGETABLES", "SECRET", "The penultimate hoe for /gather.",
+        _make_custom_hoe_enchant("FLORAL BANE OF VEGETABLES", "SECRET", "The ultimate hoe for /gather!",
             critical_chance=0.30, money_bonus=16.00, chain_chance=0.25, cooldown_reduction=25,
             display_levels={"abundance": 12, "prosperity": 80, "resonance": 5, "renewal": 25}),
     ],
@@ -855,12 +895,17 @@ TRACTOR_ENCHANTMENTS = {
         _make_tractor_enchant("GREASEWORN", "COMMON", "Your tractor's gears are greasy!", prosperity=1, renewal=2),
         _make_tractor_enchant("MUDCLOGGED", "COMMON", "Your tractor's clogged with mud!", prosperity=-2, renewal=3, resonance=-1),
         _make_tractor_enchant("HAYBOUND", "COMMON", "Your tractor is prone to collect more!", prosperity=2),
+        _make_tractor_enchant("CHOKEDUST", "COMMON", "Dust has choked the air filter!", prosperity=1, renewal=-2, resonance=-1),
+        _make_tractor_enchant("TIREBALD", "COMMON", "Your tires are bald!", resonance=1, renewal=1, prosperity=-1),
+        _make_tractor_enchant("RATTLESHAFT", "COMMON", "The driveshaft rattles but holds!", renewal=2, resonance=-1, prosperity=1),
+        _make_tractor_enchant("SPUTTERFUEL", "COMMON", "The engine sputters on bad fuel!", resonance=-2, renewal=2, prosperity=1),
+        _make_tractor_enchant("WHEATDUST", "COMMON", "Wheat dust coats everything!", prosperity=1, renewal=1, resonance=1),
     ],
     "UNCOMMON": [
         _make_tractor_enchant("FIELDRUNNER", "UNCOMMON", "Your tractor gets across the field faster!", prosperity=1, renewal=5, resonance=-1),
         _make_tractor_enchant("HEAVYWHEEL", "UNCOMMON", "Your wheels are heavier!", prosperity=2, renewal=2),
         _make_tractor_enchant("GROUNDBREAKER", "UNCOMMON", "The soil lets you pass through easier!", prosperity=1, renewal=5, resonance=1),
-        _make_tractor_enchant("LOADBEARER'S DRIVE", "UNCOMMON", "Your tractor will follow an ancient, optimized route.", prosperity=3),
+        _make_tractor_enchant("LOADBEARER'S DRIVE", "UNCOMMON", "Your tractor will follow an ancient, optimized route!", prosperity=3),
         _make_tractor_enchant("SMOKEBOUND", "UNCOMMON", "Your engine is smoking!", prosperity=3, resonance=1, renewal=-4),
         _make_tractor_enchant("TREADWOVEN", "UNCOMMON", "Your tire treads were made stronger!", prosperity=2, renewal=1, resonance=1),
         _make_tractor_enchant("TORQUETUNED", "UNCOMMON", "Your tractor gets more torque!", natures_favor=1),
@@ -871,25 +916,41 @@ TRACTOR_ENCHANTMENTS = {
         _make_tractor_enchant("OVERDRIVE", "RARE", "Your tractor can now shift into overdrive!", prosperity=3, renewal=7),
         _make_tractor_enchant("COMBUSTINE", "RARE", "Your tractor can transform into a combine!", prosperity=4, natures_favor=2, renewal=-5),
         _make_tractor_enchant("TITANDEEP FIELDBREAKER", "RARE", "Your tractor once belonged to the titans!", prosperity=3, resonance=2, renewal=1, natures_favor=1),
+        _make_tractor_enchant("SILVERPLOW", "RARE", "Your tractor is plated with silver!", prosperity=4, renewal=4, resonance=2),
+        _make_tractor_enchant("RAINFIELD", "RARE", "Your tractor thrives in the rain!", prosperity=3, renewal=5, resonance=1, natures_favor=1),
+        _make_tractor_enchant("GRAINMASTER", "RARE", "Your tractor was built for grain!", prosperity=5, renewal=2, natures_favor=1),
+        _make_tractor_enchant("IRONROOT", "RARE", "Your tractor's frame is forged like roots!", prosperity=4, renewal=3, resonance=2, natures_favor=1),
     ],
     "SUPER RARE": [
         _make_tractor_enchant("MONARCH'S MOTOR", "SUPER RARE", "Your tractor has been passed down by an ancient king!", prosperity=6, renewal=5, resonance=3),
         _make_tractor_enchant("HARVEST LIGHTCORE", "SUPER RARE", "Your tractor's been infused with light!", prosperity=7, natures_favor=2, renewal=8, resonance=-1),
-        _make_tractor_enchant("LUNA'S MEMORY", "SUPER RARE", "An ancient tractor, thought to be forged from within the moon itself...", prosperity=8, natures_favor=2),
+        _make_tractor_enchant("LUNA'S MEMORY", "SUPER RARE", "An ancient tractor, thought to be forged from within the moon itself!", prosperity=8, natures_favor=2),
         _make_tractor_enchant("THUNDERPLOW", "SUPER RARE", "Your tractor's engine has been charged by lightning!", prosperity=5, natures_favor=1, renewal=9, resonance=-1),
+        _make_tractor_enchant("MOONDRIVE", "SUPER RARE", "Your tractor runs under the moon's blessing!", prosperity=7, natures_favor=2, renewal=6, resonance=2),
+        _make_tractor_enchant("DAYBREAK'S BEGINNING", "SUPER RARE", "Your tractor plows at the break of dawn!", prosperity=6, renewal=8, resonance=3, natures_favor=1),
+        _make_tractor_enchant("STARFIELD", "SUPER RARE", "Your tractor harvests under the stars!", prosperity=6, natures_favor=2, renewal=7, resonance=3),
     ],
     "LEGENDARY": [
         _make_tractor_enchant("BOREALIS ENGINE", "LEGENDARY", "Your tractor has been forged from the cosmos!", prosperity=9, natures_favor=2, renewal=8, resonance=3),
         _make_tractor_enchant("WORLDPLOW", "LEGENDARY", "Your tractor can run through any terrain!", prosperity=10, renewal=10, resonance=2, natures_favor=3),
         _make_tractor_enchant("SOULBINDED DRIVESHAFT", "LEGENDARY", "Your tractor has been infused with souls of past gardeners!", prosperity=9, natures_favor=2, renewal=9, resonance=3),
+        _make_tractor_enchant("ETERNAL PLOW", "LEGENDARY", "Your tractor shall plow forever!", prosperity=10, natures_favor=3, renewal=10, resonance=4),
+        _make_tractor_enchant("PRIMORDIAL AXLES", "LEGENDARY", "Your tractor runs on the fire of the first dawn!", prosperity=9, natures_favor=2, renewal=9, resonance=4),
+        _make_tractor_enchant("COSMOS DRIVE", "LEGENDARY", "Your tractor drives across the cosmos!", prosperity=10, natures_favor=3, renewal=10, resonance=3),
     ],
     "NETHERITE": [
-        _make_custom_tractor_enchant("ASHEN COLOSSUS", "NETHERITE", "A tractor to plow through volcanic lava, rock, and ash.",
+        _make_custom_tractor_enchant("ASHEN COLOSSUS", "NETHERITE", "A tractor to plow through volcanic lava, rock, and ash!",
             money_bonus=1.70, chain_chance=0.075, cooldown_reduction=300, additional_plants=4,
             display_levels={"prosperity": 17, "resonance": 3, "renewal": 10, "natures_favor": 4}),
-        _make_custom_tractor_enchant("DEERE OF EDEN", "NETHERITE", "A holy tractor, one who tilled an ancient garden.",
+        _make_custom_tractor_enchant("DEERE OF EDEN", "NETHERITE", "A holy tractor, one who tilled an ancient garden!",
             additional_plants=5, money_bonus=2.00,
             display_levels={"natures_favor": 5, "prosperity": 20}),
+        _make_custom_tractor_enchant("EMBERKISSED DRIVESHAFT", "NETHERITE", "Your tractor runs on eternal embers!",
+            money_bonus=1.50, chain_chance=0.065, cooldown_reduction=270, additional_plants=3,
+            display_levels={"prosperity": 15, "resonance": 2, "renewal": 9, "natures_favor": 3}),
+        _make_custom_tractor_enchant("ESSENCE OF THE VOID", "NETHERITE", "Your tractor plows from the edge of the void!",
+            money_bonus=1.90, chain_chance=0.085, cooldown_reduction=330, additional_plants=4,
+            display_levels={"prosperity": 19, "resonance": 3, "renewal": 11, "natures_favor": 4}),
     ],
     "LUMINITE": [
         _make_custom_tractor_enchant("RIG OF RADIANCE", "LUMINITE", "This tractor radiates solar energy!",
@@ -898,14 +959,26 @@ TRACTOR_ENCHANTMENTS = {
         _make_custom_tractor_enchant("ABYSSAL OVERDRIVE", "LUMINITE", "Your engine is powered from within the abyss!",
             money_bonus=2.40, chain_chance=0.05, cooldown_reduction=300, additional_plants=6,
             display_levels={"prosperity": 25, "resonance": 2, "renewal": 10, "natures_favor": 6}),
+        _make_custom_tractor_enchant("STARDUST GEAR RATIO", "LUMINITE", "Your tractor is woven from stardust!",
+            money_bonus=2.80, chain_chance=0.08, cooldown_reduction=390, additional_plants=5,
+            display_levels={"prosperity": 28, "resonance": 3, "renewal": 13, "natures_favor": 5}),
+        _make_custom_tractor_enchant("TWILIGHTED DUSK TO DAWN", "LUMINITE", "Your tractor runs between day and night!",
+            money_bonus=2.60, chain_chance=0.09, cooldown_reduction=360, additional_plants=5,
+            display_levels={"prosperity": 26, "resonance": 4, "renewal": 12, "natures_favor": 5}),
     ],
     "CELESTIAL": [
         _make_custom_tractor_enchant("TRACTIC SUPERNOVA CORE", "CELESTIAL", "Blessed by the cosmos!",
             money_bonus=4.50, chain_chance=0.125, cooldown_reduction=450, additional_plants=10,
             display_levels={"prosperity": 45, "resonance": 5, "renewal": 15, "natures_favor": 10}),
+        _make_custom_tractor_enchant("SUNSPOT SPARKED ENGINE", "CELESTIAL", "Your tractor is forged in the heart of the sun!",
+            money_bonus=4.20, chain_chance=0.12, cooldown_reduction=480, additional_plants=8,
+            display_levels={"prosperity": 42, "resonance": 5, "renewal": 16, "natures_favor": 8}),
+        _make_custom_tractor_enchant("ECLIPSED PLOWTHROUGH TREADS", "CELESTIAL", "Your tractor plows through the shadow of the eclipse!",
+            money_bonus=4.80, chain_chance=0.13, cooldown_reduction=420, additional_plants=9,
+            display_levels={"prosperity": 48, "resonance": 5, "renewal": 14, "natures_favor": 9}),
     ],
     "SECRET": [
-        _make_custom_tractor_enchant("PROTOTYPE 13: ORBITAL \u03A9", "SECRET", "The penultimate tractor for /harvest.",
+        _make_custom_tractor_enchant("PROTOTYPE 13: ORBITAL \u03A9", "SECRET", "The ultimate tractor for /harvest!",
             money_bonus=8.50, chain_chance=0.15, cooldown_reduction=480, additional_plants=10,
             display_levels={"prosperity": 85, "resonance": 6, "renewal": 16, "natures_favor": 10}),
     ],
@@ -3103,7 +3176,7 @@ def get_nether_star_money_multiplier(user_id: int) -> float:
 
 
 PALACE_TREASURE_MONEY_MULTIPLIER = 1.5
-PALACE_TREASURE_STEAL_CHANCE_MULTIPLIER = 3.0
+PALACE_TREASURE_STEAL_CHANCE_MULTIPLIER = 5.0
 
 
 def get_palace_treasure_money_multiplier(user_id: int) -> float:
@@ -3111,15 +3184,42 @@ def get_palace_treasure_money_multiplier(user_id: int) -> float:
     return PALACE_TREASURE_MONEY_MULTIPLIER if has_shop_item(user_id, "palace_treasure") else 1.0
 
 
+def get_edward_splash_money_multiplier(user_id: int) -> float:
+    """Return cumulative 1% money multiplier per item. Edward and Splash Potion of Luck each add 1% (stack multiplicatively)."""
+    mult = 1.0
+    if has_shop_item(user_id, "edward"):
+        mult *= 1.01
+    if has_shop_item(user_id, "splash_potion_of_luck"):
+        mult *= 1.01
+    return mult
+
+
+def get_eclipse_glasses_money_multiplier(user_id: int) -> float:
+    """Return 1.15 if Solar Eclipse is active and user has Eclipse Glasses, else 1.0."""
+    if get_active_event_by_type("solar_eclipse") is None:
+        return 1.0
+    return 1.15 if has_shop_item(user_id, "eclipse_glasses") else 1.0
+
+
 def get_steal_chance_multiplier(user_id: int) -> float:
-    """Return 3.0 if user (victim) has Palace Treasure, else 1.0. Used when rolling if gather/harvest is stealable."""
-    return PALACE_TREASURE_STEAL_CHANCE_MULTIPLIER if has_shop_item(user_id, "palace_treasure") else 1.0
+    """Return multiplier for victim's stealable chance. Palace Treasure 5x, Bodyguard 0.5x, Presidential Motorcade 0 (cannot be stolen)."""
+    if has_shop_item(user_id, "presidential_motorcade"):
+        return 0.0
+    mult = 1.0
+    if has_shop_item(user_id, "palace_treasure"):
+        mult *= PALACE_TREASURE_STEAL_CHANCE_MULTIPLIER
+    if has_shop_item(user_id, "bodyguard"):
+        mult *= 0.5
+    return mult
 
 
 def get_pve_damage_multiplier(user_id: int, is_boss: bool = False) -> int:
     """Return total damage per hit for PvE (wild animals and optionally bosses). Base 1, weapons stack additively.
-    Zenith +2, Split Soul Katana +1, Inverted Spear +1 (enemies and bosses), Diamond Sword +1."""
+    King's Blade +3, Zenith +2, Split Soul Katana +1, Inverted Spear +1 (enemies and bosses), Diamond Sword +1,
+    Ancient Staff +1, Reaver Karambit +1, Nail +1, Evoker +1."""
     damage = 1
+    if has_shop_item(user_id, "kings_blade"):
+        damage += 3  # +3 for enemies
     if has_shop_item(user_id, "zenith"):
         damage += 2  # 1 -> 3
     if has_shop_item(user_id, "split_soul_katana"):
@@ -3127,6 +3227,14 @@ def get_pve_damage_multiplier(user_id: int, is_boss: bool = False) -> int:
     if has_shop_item(user_id, "inverted_spear_of_heaven"):
         damage += 1  # +1 for enemies and bosses
     if has_shop_item(user_id, "diamond_sword"):
+        damage += 1  # +1 for enemies
+    if has_shop_item(user_id, "ancient_staff"):
+        damage += 1  # +1 for enemies
+    if has_shop_item(user_id, "reaver_karambit"):
+        damage += 1  # +1 for enemies
+    if has_shop_item(user_id, "nail"):
+        damage += 1  # +1 for enemies
+    if has_shop_item(user_id, "evoker"):
         damage += 1  # +1 for enemies
     return damage
 
@@ -3423,10 +3531,15 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     # Additive boosts from base value, then rank multiplies the subtotal
     if full_data is not None:
         bloom_multiplier = 1.0 + (full_data.get("tree_rings", 0) * 0.005)
-        water_multiplier = 1.0 + (full_data.get("water_count", 0) * 0.01)
+        water_base = 1.0 + (full_data.get("water_count", 0) * 0.01)
+        if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1:
+            water_multiplier = 1.0 + (water_base - 1.0) * 2  # Golden Watering Can: double water streak boost
+        else:
+            water_multiplier = water_base
         rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
         achievement_multiplier = get_achievement_multiplier(user_id, full_data=full_data)
-        daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * 0.02)
+        daily_rate = 0.04 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.02
+        daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * daily_rate)
     else:
         bloom_multiplier = get_bloom_multiplier(user_id)
         water_multiplier = get_water_multiplier(user_id)
@@ -3453,8 +3566,10 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         if money_bonus != 0:
             enchant_money_bonus = base_final_value * money_bonus
 
-        # Check for critical gather (Abundance) - only for player gathers, not gardeners
+        # Check for critical gather (Abundance) - only for player gathers, not gardeners. Frontier Justice: +10% chance.
         crit_chance = hoe_enchant.get("critical_chance", 0)
+        if has_shop_item(user_id, "frontier_justice"):
+            crit_chance += 0.10
         if crit_chance > 0 and apply_cooldown:  # apply_cooldown=True means player, not gardener
             is_critical_gather = random.random() < crit_chance
 
@@ -3494,6 +3609,16 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
 
     # Palace Treasure: 1.5x money (shop item)
     final_value *= get_palace_treasure_money_multiplier(user_id)
+
+    # Edward / Splash Potion of Luck: 1% each to all money (shop items)
+    final_value *= get_edward_splash_money_multiplier(user_id)
+    final_value *= get_eclipse_glasses_money_multiplier(user_id)
+    # Work Lunch: 10% more from gardener auto-gather/auto-harvest (when not player cooldown)
+    if not apply_cooldown and has_shop_item(user_id, "work_lunch"):
+        final_value *= 1.10
+    # Overtime Approval: 10% chance for gardener gather to grant double money
+    if not apply_cooldown and has_shop_item(user_id, "overtime_approval") and random.random() < 0.10:
+        final_value *= 2.0
 
     # Alchemist's Pocketwatch: +5% money from /gather (shop item)
     if full_data is not None and full_data.get("shop_inventory", {}).get("alchemists_pocketwatch", 0) >= 1:
@@ -3899,7 +4024,7 @@ class RouletteGame:
         self.initial_bullets=bullets
         self.bet_amount = bet_amount
         self.max_players = max_players
-        self.players = {host_id: {"name": host_name, "alive": True, "rounds_survived": 0, "current_stake": bet_amount}}
+        self.players = {host_id: {"name": host_name, "alive": True, "rounds_survived": 0, "current_stake": bet_amount, "cashed_out": False}}
         self.pot = 0
         self.round_number = 0
         self.chamber_size = 6
@@ -3918,7 +4043,8 @@ class RouletteGame:
             "name": player_name,
             "alive": True,
             "rounds_survived": 0,
-            "current_stake": self.bet_amount
+            "current_stake": self.bet_amount,
+            "cashed_out": False
         }
         self.player_order.append(player_id)
         return True
@@ -4124,9 +4250,12 @@ async def play_roulette_round(channel, game_id):
     random.shuffle(chambers)
 
     shot_fired = chambers[0]
+    # Blanks: 20% chance for bullet to be a blank when fired on a user who has the item (they survive)
+    is_blank = shot_fired and has_shop_item(current_player_id, "blanks") and random.random() < 0.20
+    survived = not shot_fired or is_blank
 
-    if shot_fired:
-        #player eliminated
+    if shot_fired and not is_blank:
+        # Player eliminated
         game.eliminate(current_player_id)
         game.bullets -= 1
 
@@ -4134,35 +4263,35 @@ async def play_roulette_round(channel, game_id):
             title="💥 BANG! 💥",
             description=f"**{current_player['name']}** has been eliminated!",
             color=discord.Color.dark_red()
-            ) 
+        )
         embed.add_field(name="💀 Status", value="ELIMINATED", inline=True)
         embed.add_field(name="💸 Lost", value=f"${current_player['current_stake']:.2f}", inline=True)
         embed.add_field(name="💰 Pot Now", value=f"${game.pot:.2f}", inline=True)
         embed.add_field(name="🔫 Bullets Left", value=f"{game.bullets}/6", inline=True)
         embed.add_field(name="👥 Players Alive", value=f"{len(game.get_alive_players())}", inline=True)
-    
+
         await msg.edit(embed=embed)
-    
+
         # remove player from active games
         if current_player_id in user_active_games:
             del user_active_games[current_player_id]
-        
+
         # Check russian roulette achievement (player died = game completed)
         await check_russian_roulette_achievement(current_player_id)
-    
+
         # check if anyone is left
         await asyncio.sleep(2)
         if len(game.get_alive_players()) == 0:
             await end_roulette_game(channel, game_id)
             return
-    
-        #continue to next player - give them option to cash out (except first turn)
+
+        # continue to next player - give them option to cash out (except first turn)
         game.next_turn()
         await asyncio.sleep(2)
-        
+
         # Check if this is the very first turn (no one has survived a round yet)
         is_first_turn = all(player['rounds_survived'] == 0 for player in game.players.values())
-        
+
         if is_first_turn:
             # First turn - immediately continue to next player's turn
             await play_roulette_round(channel, game_id)
@@ -4172,24 +4301,24 @@ async def play_roulette_round(channel, game_id):
             if len(alive_players) == 0:
                 await end_roulette_game(channel, game_id)
                 return
-            
+
             next_player_id = game.get_current_player()
             if next_player_id is None:
                 await end_roulette_game(channel, game_id)
                 return
-            
+
             next_player = game.players[next_player_id]
-            
+
             # Determine total winnings if they cash out now
             if len(alive_players) == 1:
                 potential_winnings = game.pot + next_player['current_stake']
             else:
                 potential_winnings = next_player['current_stake']
-            
+
             # Create continue/cashout view (only allow cash out if not first turn)
             is_first_turn_here = all(player['rounds_survived'] == 0 for player in game.players.values())
             view = RouletteContinueView(game_id, timeout=300, allow_cashout=not is_first_turn_here)
-            
+
             if is_first_turn_here:
                 embed = discord.Embed(
                     title="⚠️ YOUR TURN ⚠️",
@@ -4207,7 +4336,7 @@ async def play_roulette_round(channel, game_id):
             embed.add_field(name="💀 Death Odds", value=f"{(game.bullets/6)*100:.1f}%", inline=True)
             embed.add_field(name="📈 Current Multiplier", value=f"{game.calculate_total_multiplier(next_player['rounds_survived']):.2f}x", inline=True)
             embed.add_field(name="🎯 Rounds Survived", value=f"{next_player['rounds_survived']}", inline=True)
-            
+
             if len(alive_players) == 1 and game.max_players > 1:
                 embed.add_field(
                     name="🏆 Victory Status",
@@ -4216,23 +4345,27 @@ async def play_roulette_round(channel, game_id):
                 )
             await channel.send(f"<@{next_player_id}>", embed=embed, view=view)
         return
-    
-    else:
-        # player survived!
+
+    if survived:
+        # Player survived (click or BLANK!)
         game.player_survived_round(current_player_id)
-    
-        embed = discord.Embed(
-            title="*click*",
-            description=f"**{current_player['name']}** survived!",
-            color=discord.Color.green()
+        if is_blank:
+            embed = discord.Embed(
+                title="💥 BLANK! 💥",
+                description=f"**{current_player['name']}** survived — it was a blank!",
+                color=discord.Color.green()
             )
-    
+        else:
+            embed = discord.Embed(
+                title="*click*",
+                description=f"**{current_player['name']}** survived!",
+                color=discord.Color.green()
+            )
         new_multiplier = game.calculate_total_multiplier(current_player['rounds_survived'])
         embed.add_field(name="✅ Status", value="ALIVE", inline=True)
         embed.add_field(name="💰 Current Stake", value=f"${current_player['current_stake']:.2f}", inline=True)
         embed.add_field(name="📈 Multiplier", value=f"{new_multiplier:.2f}x", inline=True)
         embed.add_field(name="🎯 Rounds Survived", value=f"{current_player['rounds_survived']}", inline=True)
-    
         await msg.edit(embed=embed)
 
     # If all bullets gone, reload chamber
@@ -4316,9 +4449,11 @@ class RouletteJoinView(discord.ui.View):
         self.game_id = game_id
         self.host_id = host_id
 
-    @discord.ui.button(label = "Join Game", style = discord.ButtonStyle.green, emoji = "🔫")
+    @discord.ui.button(label="Join", style=discord.ButtonStyle.green, emoji="🔫")
     async def join_game(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=False):
+                return
             user_id = interaction.user.id
             if self.game_id not in active_roulette_games:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
@@ -4385,9 +4520,11 @@ class RouletteJoinView(discord.ui.View):
             print(f"Error in join_game: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
 
-    @discord.ui.button(label="Start Game", style=discord.ButtonStyle.blurple, emoji="🚀")
+    @discord.ui.button(label="Start", style=discord.ButtonStyle.blurple, emoji="❗")
     async def start_game(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=False):
+                return
             # Only host can start
             if interaction.user.id != self.host_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Only the game host can start the game!", ephemeral=True)
@@ -4420,9 +4557,11 @@ class RouletteJoinView(discord.ui.View):
             print(f"Error in start_game: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
-    @discord.ui.button(label="Cancel Game", style=discord.ButtonStyle.red, emoji="❌")
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red, emoji="❌")
     async def cancel_game(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=False):
+                return
             # Only host can cancel
             if interaction.user.id != self.host_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Only the game host can cancel the game!", ephemeral=True)
@@ -4513,6 +4652,8 @@ class RouletteContinueView(discord.ui.View):
     @discord.ui.button(label="Pull Trigger", style=discord.ButtonStyle.danger, emoji="🔫")
     async def continue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=False):
+                return
             if self.game_id not in active_roulette_games:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
                 return
@@ -4522,9 +4663,6 @@ class RouletteContinueView(discord.ui.View):
             
             if interaction.user.id != current_player_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ It's not your turn!", ephemeral=True)
-                return
-            
-            if not await safe_defer(interaction):
                 return
             
             try:
@@ -4541,6 +4679,8 @@ class RouletteContinueView(discord.ui.View):
     @discord.ui.button(label="Cash Out", style=discord.ButtonStyle.secondary, emoji="💰")
     async def cashout_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=False):
+                return
             if not self.allow_cashout:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Cash out is not available on the very first turn!", ephemeral=True)
                 return
@@ -4554,9 +4694,6 @@ class RouletteContinueView(discord.ui.View):
             
             if interaction.user.id != current_player_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ It's not your turn!", ephemeral=True)
-                return
-            
-            if not await safe_defer(interaction):
                 return
             
             # Cash out - player gets their stake back
@@ -4575,6 +4712,7 @@ class RouletteContinueView(discord.ui.View):
             
             # Mark player as eliminated (cashed out)
             game.players[current_player_id]['alive'] = False
+            game.players[current_player_id]['cashed_out'] = True
             
             embed = discord.Embed(
                 title="💰 CASHED OUT! 💰",
@@ -4658,6 +4796,7 @@ class RouletteContinueView(discord.ui.View):
         
         # Mark player as eliminated (cashed out)
         game.players[current_player_id]['alive'] = False
+        game.players[current_player_id]['cashed_out'] = True
         
         embed = discord.Embed(
             title="💰 AUTO CASHED OUT! 💰",
@@ -4740,15 +4879,61 @@ async def end_roulette_game(channel, game_id):
         await check_russian_roulette_achievement(winner_id)
         
     elif len(alive_players) == 0:
-        # Everyone eliminated (all died on same round)
-        embed = discord.Embed(
-            title="☠️ EVERYONE ELIMINATED ☠️",
-            description="Nobody survived... The pot is lost to the void.",
-            color=discord.Color.dark_red()
-        )
-        embed.add_field(name="💰 Lost Pot", value=f"${game.pot:.2f}", inline=True)
+        # Check if everyone cashed out vs everyone died vs mixed (some cashed out, some died)
+        everyone_cashed_out = all(data.get("cashed_out", False) for data in game.players.values())
+        everyone_died = not any(data.get("cashed_out", False) for data in game.players.values())
         
-        await channel.send(embed=embed)
+        if everyone_cashed_out:
+            # Results screen: everyone left with their winnings
+            embed = discord.Embed(
+                title="💰 EVERYONE CASHED OUT! 💰",
+                description="Everyone walked away with their winnings. Here's how each player did:",
+                color=discord.Color.gold()
+            )
+            for player_id, data in game.players.items():
+                winnings = normalize_money(data["current_stake"])
+                profit = normalize_money(winnings - normalize_money(game.bet_amount))
+                mult = game.calculate_total_multiplier(data["rounds_survived"])
+                embed.add_field(
+                    name=f"**{data['name']}**",
+                    value=f"💵 ${winnings:.2f} winnings | 💸 ${profit:+.2f} profit\n📈 {mult:.2f}x multiplier | 🎯 {data['rounds_survived']} rounds",
+                    inline=False
+                )
+            await channel.send(embed=embed)
+        elif everyone_died:
+            # Everyone eliminated (all died, nobody cashed out)
+            embed = discord.Embed(
+                title="☠️ EVERYONE ELIMINATED ☠️",
+                description="Nobody survived... The pot is lost to the void.",
+                color=discord.Color.dark_red()
+            )
+            embed.add_field(name="💰 Lost Pot", value=f"${game.pot:.2f}", inline=True)
+            await channel.send(embed=embed)
+        else:
+            # Mixed: some cashed out, some died — show results for each player
+            embed = discord.Embed(
+                title="/russian RESULTS",
+                description="Here's how each player did:",
+                color=discord.Color.blue()
+            )
+            for player_id, data in game.players.items():
+                if data.get("cashed_out", False):
+                    winnings = normalize_money(data["current_stake"])
+                    profit = normalize_money(winnings - normalize_money(game.bet_amount))
+                    mult = game.calculate_total_multiplier(data["rounds_survived"])
+                    embed.add_field(
+                        name=f"**{data['name']}** — Cashed out",
+                        value=f"💵 ${winnings:.2f} winnings | 💸 ${profit:+.2f} profit\n📈 {mult:.2f}x multiplier | 🎯 {data['rounds_survived']} rounds",
+                        inline=False
+                    )
+                else:
+                    lost = normalize_money(data["current_stake"])
+                    embed.add_field(
+                        name=f"**{data['name']}** — Eliminated",
+                        value=f"💀 Lost ${lost:.2f}",
+                        inline=False
+                    )
+            await channel.send(embed=embed)
     
     # Clean up - remove all players from active games tracker
     for player_id in game.players.keys():
@@ -5196,6 +5381,8 @@ class GathemonLobbyView(discord.ui.View):
 
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.green, emoji="✅")
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         if interaction.user.id != self.opponent_id:
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ This challenge is not for you!", ephemeral=False)
             return
@@ -5217,7 +5404,6 @@ class GathemonLobbyView(discord.ui.View):
             add_user_bloom_cycle_plants(self.challenger_id, bet)
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ You don't have enough plants!", ephemeral=False)
             return
-        await interaction.response.defer(ephemeral=False)
         del active_gathemon_challenges[self.challenge_id]
         game_id = str(uuid.uuid4())[:8]
         channel_id = interaction.channel_id
@@ -5238,6 +5424,8 @@ class GathemonLobbyView(discord.ui.View):
 
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.red, emoji="❌")
     async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         if interaction.user.id != self.opponent_id:
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ This challenge is not for you!", ephemeral=False)
             return
@@ -5299,9 +5487,10 @@ class GathemonUseMoveButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         try:
-            await interaction.response.defer(ephemeral=False)
+            if not await safe_defer(interaction, ephemeral=False):
+                return
         except Exception:
-            pass
+            return
         if self.game_id not in active_gathemon_battles:
             try:
                 await interaction.followup.send("❌ Battle no longer exists!", ephemeral=False)
@@ -5348,6 +5537,8 @@ class GathemonUseMoveButton(discord.ui.Button):
             winner_id = battle.player1_id if is_p1 else battle.player2_id
             loser_id = battle.player2_id if is_p1 else battle.player1_id
             num_plants_won = battle.bet * 2
+            if has_shop_item(winner_id, "rare_candy"):
+                num_plants_won += 2
             channel = interaction.channel
             battle.exp_gained = random.randint(23, 53)  # for embed: winner's Pokemon gained X Exp.
             for uid in (battle.player1_id, battle.player2_id):
@@ -5547,9 +5738,11 @@ class GathershipLobbyView(discord.ui.View):
         self.host_id = host_id
         self.opponent_id = opponent_id
 
-    @discord.ui.button(label="Join Game", style=discord.ButtonStyle.green, emoji="🚢")
+    @discord.ui.button(label="Join", style=discord.ButtonStyle.green, emoji="🚢")
     async def join_game(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=False):
+                return
             if self.game_id not in active_gathership_games:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
                 return
@@ -5573,7 +5766,7 @@ class GathershipLobbyView(discord.ui.View):
             embed = interaction.message.embeds[0]
             host_mention = f"<@{game.host_id}>"
             opponent_mention = f"<@{game.opponent_id}>"
-            embed.description = f"{host_mention} is challenging {opponent_mention} to **MAYFLOWER**!\n\n✅ {opponent_mention} has joined! Host can start the game."
+            embed.description = f"{host_mention} is challenging {opponent_mention} to **MAYFLOWER**!\n\n✅ {opponent_mention} has joined! Host can start."
             embed.set_field_at(0, name="💰 Bet", value=f"${game.bet:.2f}", inline=True)
             # Reset 5-minute timeout when opponent joins (backend only; no UI mention)
             fresh_view = GathershipLobbyView(self.game_id, self.host_id, self.opponent_id, timeout=300)
@@ -5582,9 +5775,11 @@ class GathershipLobbyView(discord.ui.View):
             print(f"Gathership join_game: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
 
-    @discord.ui.button(label="Start Game", style=discord.ButtonStyle.blurple, emoji="🚀")
+    @discord.ui.button(label="Start", style=discord.ButtonStyle.blurple, emoji="❗")
     async def start_game(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=False):
+                return
             if interaction.user.id != self.host_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Only the host can start!", ephemeral=True)
                 return
@@ -5612,6 +5807,8 @@ class GathershipLobbyView(discord.ui.View):
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red, emoji="❌")
     async def cancel_game(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=False):
+                return
             if interaction.user.id != self.host_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Only the host can cancel!", ephemeral=True)
                 return
@@ -5654,6 +5851,8 @@ class GathershipOpenSetupView(discord.ui.View):
     @discord.ui.button(label="Place Ships", style=discord.ButtonStyle.green, emoji="🚢")
     async def open_setup(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=True):
+                return
             if self.game_id not in active_gathership_games:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
                 return
@@ -5729,6 +5928,8 @@ class GathershipSetupView(discord.ui.View):
 
     async def _move(self, interaction: discord.Interaction, dr: int, dc: int):
         try:
+            if not await safe_defer(interaction, ephemeral=True):
+                return
             if self.game_id not in active_gathership_games:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
                 return
@@ -5747,6 +5948,8 @@ class GathershipSetupView(discord.ui.View):
     @discord.ui.button(label="Place Ship", style=discord.ButtonStyle.green, row=2)
     async def place_ship(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=True):
+                return
             if self.game_id not in active_gathership_games:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
                 return
@@ -5792,6 +5995,8 @@ class GathershipTurnView(discord.ui.View):
     @discord.ui.button(label="Take Shot", style=discord.ButtonStyle.danger, emoji="🔥")
     async def take_shot(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=True):
+                return
             if self.game_id not in active_gathership_games:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
                 return
@@ -5873,6 +6078,8 @@ class GathershipFireView(discord.ui.View):
 
     async def _move(self, interaction: discord.Interaction, dr: int, dc: int):
         try:
+            if not await safe_defer(interaction, ephemeral=True):
+                return
             if self.game_id not in active_gathership_games:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
                 return
@@ -5891,6 +6098,8 @@ class GathershipFireView(discord.ui.View):
     @discord.ui.button(label="Fire!", style=discord.ButtonStyle.danger, emoji="🔥", row=2)
     async def fire(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=True):
+                return
             if self.game_id not in active_gathership_games:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Game no longer exists!", ephemeral=True)
                 return
@@ -5910,7 +6119,6 @@ class GathershipFireView(discord.ui.View):
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Channel not found.", ephemeral=True)
                 return
             hit_text = "🔥 **Hit!**" if hit else "❌ **Miss!**"
-            await interaction.response.defer(ephemeral=True)
             await channel.send(f"**{game.get_current_turn_name()}** fired at ({r+1},{c+1}). {hit_text}")
             loser_id = None
             if at_host_board and game.all_ships_sunk(True):
@@ -5939,9 +6147,11 @@ class GathershipFireView(discord.ui.View):
 ])
 async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
     try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         user_id = interaction.user.id
 
-        # 10-second cooldown after losing a coinflip — check before defer so we can reply ephemerally (only user sees it)
+        # 10-second cooldown after losing a coinflip — reply via followup (we already deferred)
         last_loss_time = get_user_last_coinflip_loss_time(user_id)
         if last_loss_time > 0:
             now = time.time()
@@ -5950,9 +6160,6 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
                 wait_secs = int(COINFLIP_LOSS_COOLDOWN - elapsed)
                 await safe_interaction_response(interaction, interaction.response.send_message, f"⏳ Wait **{wait_secs}** second{'s' if wait_secs != 1 else ''} before flipping again.", ephemeral=True)
                 return
-
-        if not await safe_defer(interaction, ephemeral=False):
-            return
 
         # Validate bet amount is positive
         if bet <= 0:
@@ -6209,7 +6416,7 @@ class SlotsView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ This is not your slots game!", ephemeral=True)
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your slots game!", ephemeral=True)
             return False
         return True
 
@@ -6246,23 +6453,30 @@ class SlotsView(discord.ui.View):
             item.disabled = True
         balance = get_user_balance(self.user_id)
         balance = normalize_money(balance)
-        pct = 0.001 if self.bet_type == "0.1%" else 0.01
-        self.bet = normalize_money(balance * pct)
-        if self.bet <= 0 or not can_afford_rounded(balance, self.bet):
-            embed = self.update_embed()
-            embed.set_footer(text="❌ Not enough balance to spin.")
-            self.spinning = False
-            self._update_spin_button()
-            for c in self.children:
-                c.disabled = False
-            await interaction.response.edit_message(embed=embed, view=self)
-            return
-        new_balance = normalize_money(balance - self.bet)
-        update_user_balance(self.user_id, new_balance)
+        date_est = _get_date_est()
+        use_free_spin = has_shop_item(self.user_id, "slot_token") and get_slot_token_free_spin_used_date_est(self.user_id) != date_est
+        if use_free_spin:
+            self.bet = 0
+            effective_bet = max(0.01, normalize_money(balance * 0.001))
+        else:
+            pct = 0.001 if self.bet_type == "0.1%" else 0.01
+            self.bet = normalize_money(balance * pct)
+            effective_bet = self.bet
+            if self.bet <= 0 or not can_afford_rounded(balance, self.bet):
+                embed = self.update_embed()
+                embed.set_footer(text="❌ Not enough balance to spin.")
+                self.spinning = False
+                self._update_spin_button()
+                for c in self.children:
+                    c.disabled = False
+                await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+                return
+            new_balance = normalize_money(balance - self.bet)
+            update_user_balance(self.user_id, new_balance)
         middle_only = self._middle_only()
-        self.final_grid = generate_slot_grid(bet=self.bet, balance=balance, middle_only=middle_only)
+        self.final_grid = generate_slot_grid(bet=effective_bet, balance=balance, middle_only=middle_only)
         embed = self.update_embed(is_spinning=True, status_text="🎰 All columns spinning... 🎰")
-        await interaction.response.edit_message(embed=embed, view=self)
+        await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
         spin_frames = 4
         frame_interval = 0.07
         spin_start = time.monotonic()
@@ -6282,12 +6496,14 @@ class SlotsView(discord.ui.View):
         won, line_count = check_win_5x5(self.grid, middle_only)
         self.spinning = False
         self.spun = True
+        if use_free_spin:
+            set_slot_token_free_spin_used_date_est(self.user_id, date_est)
         payout_mult = 3
-        winnings = self.bet * payout_mult * line_count if won else 0
+        winnings = effective_bet * payout_mult * line_count if won else 0
         if won:
             cap_mult = 15
             if line_count > cap_mult:
-                winnings = self.bet * payout_mult * cap_mult
+                winnings = effective_bet * payout_mult * cap_mult
             curr = get_user_balance(self.user_id)
             curr = normalize_money(curr)
             new_bal = normalize_money(curr + winnings)
@@ -6314,9 +6530,10 @@ class SlotsView(discord.ui.View):
             achievements_unlocked.append(("slots", new_slots_level))
 
         title = "🎰 SLOTS - RESULT 🎰"
+        bet_text = "**FREE SPIN** (Slot Token)" if use_free_spin else f"**${self.bet:.2f}** ({self.bet_type})"
         result_embed = discord.Embed(
             title=title,
-            description=f"Bet: **${self.bet:.2f}** ({self.bet_type})\n\n{format_slot_grid(self.grid, self.locked_columns, highlight_middle_row=middle_only)}",
+            description=f"Bet: {bet_text}\n\n{format_slot_grid(self.grid, self.locked_columns, highlight_middle_row=middle_only)}",
             color=discord.Color.green() if won else discord.Color.red(),
         )
         if won:
@@ -6326,9 +6543,10 @@ class SlotsView(discord.ui.View):
                 inline=False,
             )
         else:
+            lost_text = "Free spin used — no winnings this time." if use_free_spin else f"You lost **${self.bet:.2f}**."
             result_embed.add_field(
                 name="❌ You Lost",
-                value=f"You lost **${self.bet:.2f}**.\nBalance: **${curr_balance:.2f}**.",
+                value=f"{lost_text}\nBalance: **${curr_balance:.2f}**.",
                 inline=False,
             )
         result_embed.set_footer(text="Click SPIN to play again!")
@@ -6351,13 +6569,15 @@ class SlotsView(discord.ui.View):
     @discord.ui.button(label="Bet 0.1%", style=discord.ButtonStyle.secondary, custom_id="slots_01pct", row=0)
     async def bet_01pct(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=False):
+                return
             if self.spinning:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Spin in progress!", ephemeral=True)
                 return
             self.bet_type = "0.1%"
             self._update_spin_button()
             embed = self.update_embed()
-            await interaction.response.edit_message(embed=embed, view=self)
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
         except Exception as e:
             print(f"Error in bet_01pct: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred.", ephemeral=True)
@@ -6365,13 +6585,15 @@ class SlotsView(discord.ui.View):
     @discord.ui.button(label="Bet 1%", style=discord.ButtonStyle.secondary, custom_id="slots_1pct", row=0)
     async def bet_1pct(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=False):
+                return
             if self.spinning:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Spin in progress!", ephemeral=True)
                 return
             self.bet_type = "1%"
             self._update_spin_button()
             embed = self.update_embed()
-            await interaction.response.edit_message(embed=embed, view=self)
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
         except Exception as e:
             print(f"Error in bet_1pct: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred.", ephemeral=True)
@@ -6379,6 +6601,8 @@ class SlotsView(discord.ui.View):
     @discord.ui.button(label="🎰 SPIN 🎰", style=discord.ButtonStyle.success, emoji="🎲", custom_id="slots_spin", row=0)
     async def spin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=False):
+                return
             if self.spinning:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Spin in progress!", ephemeral=True)
                 return
@@ -6842,6 +7066,8 @@ class StealView(discord.ui.View):
 
     @discord.ui.button(label="STEAL", style=discord.ButtonStyle.danger, custom_id="steal_btn")
     async def steal_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         if interaction.user.id == self.victim_id:
             await safe_interaction_response(
                 interaction, interaction.response.send_message,
@@ -6864,32 +7090,42 @@ class StealView(discord.ui.View):
                 interaction, interaction.response.send_message,
                 "❌ You need a Planter rank to steal! Use /gather to rank up.", ephemeral=True)
             return
-        if abs(stealer_level - self.victim_planter_level) > 1:
+        stealer_id = interaction.user.id
+        if not has_shop_item(stealer_id, "bandana") and abs(stealer_level - self.victim_planter_level) > 1:
             await safe_interaction_response(
                 interaction, interaction.response.send_message,
                 "❌ You can only steal from someone with equal rank, or one rank above/below!", ephemeral=True)
             return
 
         self._stolen = True
-        stealer_id = interaction.user.id
         victim_id = self.victim_id
         payload = self.steal_payload
 
         def _do_steal():
+            # Van der Linde's Plan: +15% money from gather/harvests you steal
+            steal_value_mult = 1.15 if has_shop_item(stealer_id, "van_der_lindes_plan") else 1.0
+            stolen_value = payload["value"] if self.steal_type == "gather" else payload["total_value"]
             if self.steal_type == "gather":
+                gather_value = payload["value"] * steal_value_mult
                 steal_revert_gather(
                     victim_id, payload["value"], payload["item_name"],
                     payload["ripeness_name"], payload["category"])
                 steal_apply_gather(
-                    stealer_id, payload["value"], payload["item_name"],
+                    stealer_id, gather_value, payload["item_name"],
                     payload["ripeness_name"], payload["category"])
             else:
+                harvest_value = payload["total_value"] * steal_value_mult
                 steal_revert_harvest(
                     victim_id, payload["items_inc"], payload["ripeness_inc"],
                     payload["total_value"], payload["num_items"])
                 steal_apply_harvest(
                     stealer_id, payload["items_inc"], payload["ripeness_inc"],
-                    payload["total_value"], payload["num_items"])
+                    harvest_value, payload["num_items"])
+            # Decoys: victim gets 15% of stolen value back
+            if has_shop_item(victim_id, "decoys") and stolen_value > 0:
+                decoy_refund = round(stolen_value * 0.15, 2)
+                victim_bal = get_user_balance(victim_id)
+                update_user_balance(victim_id, victim_bal + decoy_refund)
 
         await asyncio.to_thread(_do_steal)
 
@@ -6909,6 +7145,9 @@ class StealView(discord.ui.View):
             child.disabled = True
 
         stealer_name = interaction.user.display_name
+        # Decoys: show victim's 15% back in embed if applicable
+        stolen_val = payload["value"] if self.steal_type == "gather" else payload["total_value"]
+        decoy_refund = round(stolen_val * 0.15, 2) if has_shop_item(self.victim_id, "decoys") and stolen_val > 0 else 0
         try:
             old_embed = interaction.message.embeds[0] if interaction.message.embeds else None
             if self.steal_type == "gather" and old_embed:
@@ -6921,6 +7160,8 @@ class StealView(discord.ui.View):
                 )
                 for f in old_embed.fields:
                     new_embed.add_field(name=f.name, value=f.value, inline=f.inline)
+                if decoy_refund > 0:
+                    new_embed.add_field(name="🪤 Decoys", value=f"Victim got **15%** back: **${decoy_refund:.2f}**", inline=False)
                 embed = new_embed
             elif self.steal_type == "harvest" and old_embed:
                 # Harvest: keep embed, add footer for who stole it
@@ -6979,6 +7220,8 @@ class WildAnimalView(discord.ui.View):
 
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         async with self._lock:
             if self.defeated:
                 await safe_interaction_response(
@@ -7069,6 +7312,8 @@ class BulletAntView(discord.ui.View):
 
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_ant_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         async with self._lock:
             if self.defeated:
                 await safe_interaction_response(
@@ -7165,6 +7410,8 @@ class LarvaView(discord.ui.View):
 
     @discord.ui.button(label="Break", style=discord.ButtonStyle.danger, custom_id="larva_break")
     async def break_larva(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         if self.resolved:
             await safe_interaction_response(interaction, interaction.response.send_message, "Someone already chose!", ephemeral=True)
             return
@@ -7182,6 +7429,8 @@ class LarvaView(discord.ui.View):
 
     @discord.ui.button(label="Ignore", style=discord.ButtonStyle.secondary, custom_id="larva_ignore")
     async def ignore_larva(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         if self.resolved:
             await safe_interaction_response(interaction, interaction.response.send_message, "Someone already chose!", ephemeral=True)
             return
@@ -7211,6 +7460,8 @@ class BeeView(discord.ui.View):
 
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_bee_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         async with self._lock:
             if self.defeated:
                 await safe_interaction_response(
@@ -7313,6 +7564,8 @@ class NetherStarClaimView(discord.ui.View):
 
     @discord.ui.button(label="Claim Nether Star!", style=discord.ButtonStyle.success, emoji=NETHER_STAR_EMOJI_PARTIAL, custom_id="wither_nether_star_claim")
     async def claim_nether_star(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         user_id = interaction.user.id
         if self.claimed_ref[0] is not None:
             await safe_interaction_response(
@@ -7362,6 +7615,8 @@ class BossView(discord.ui.View):
 
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_boss_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         async with self._lock:
             if self.defeated:
                 await safe_interaction_response(
@@ -7555,6 +7810,8 @@ class ObsidianTowerView(discord.ui.View):
 
     @discord.ui.button(label="⚔️ Attack", style=discord.ButtonStyle.danger, custom_id="obsidian_tower_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         async with self._lock:
             if self.defeated:
                 await safe_interaction_response(interaction, interaction.response.send_message,
@@ -7573,6 +7830,8 @@ class ObsidianTowerView(discord.ui.View):
 
     @discord.ui.button(label="Break End Crystal", style=discord.ButtonStyle.secondary, custom_id="obsidian_tower_break_crystal", disabled=True)
     async def break_crystal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         async with self._lock:
             if self.defeated:
                 await safe_interaction_response(interaction, interaction.response.send_message,
@@ -7629,6 +7888,8 @@ class EnderDragonView(discord.ui.View):
 
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_ender_dragon_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         async with self._lock:
             if self.defeated:
                 await safe_interaction_response(interaction, interaction.response.send_message,
@@ -7829,6 +8090,8 @@ class PlanteraBulbView(discord.ui.View):
 
     @discord.ui.button(label="Break", style=discord.ButtonStyle.danger, custom_id="plantera_break")
     async def break_bulb(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         if self.resolved:
             await safe_interaction_response(interaction, interaction.response.send_message, "Someone already chose!", ephemeral=True)
             return
@@ -7847,6 +8110,8 @@ class PlanteraBulbView(discord.ui.View):
 
     @discord.ui.button(label="Ignore", style=discord.ButtonStyle.secondary, custom_id="plantera_ignore")
     async def ignore_bulb(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
         if self.resolved:
             await safe_interaction_response(interaction, interaction.response.send_message, "Someone already chose!", ephemeral=True)
             return
@@ -7891,9 +8156,11 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
         base_gmo_chance += 0.07
 
     bloom_mult = 1.0 + (full_data.get("tree_rings", 0) * 0.005)
-    water_mult = 1.0 + (full_data.get("water_count", 0) * 0.01)
+    water_base = 1.0 + (full_data.get("water_count", 0) * 0.01)
+    water_mult = (1.0 + (water_base - 1.0) * 2) if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else water_base
     ach_mult = get_achievement_multiplier(user_id, full_data=full_data)
-    daily_mult = 1.0 + (full_data.get("consecutive_water_days", 0) * 0.02)
+    daily_rate = 0.04 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.02
+    daily_mult = 1.0 + (full_data.get("consecutive_water_days", 0) * daily_rate)
     rank_mult = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
     hoe_enchant = full_data.get("hoe_enchantment")
     enchant_pct = hoe_enchant.get("money_bonus", 0) if hoe_enchant else 0
@@ -7984,13 +8251,17 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
         fv *= get_beta_tester_money_multiplier(user_id)
         fv *= get_nether_star_money_multiplier(user_id)
         fv *= get_palace_treasure_money_multiplier(user_id)
-
+        fv *= get_edward_splash_money_multiplier(user_id)
         total_balance += fv
         name = item["name"]
         items_inc[name] = items_inc.get(name, 0) + 1
         ripeness_inc[rip["name"]] = ripeness_inc.get(rip["name"], 0) + 1
         display_results.append({"name": name, "value": fv})
 
+    # Paladin's Shield: 10% more money from PvE (wild animal/boss)
+    if has_shop_item(user_id, "paladins_shield"):
+        total_balance *= 1.10
+    total_balance *= get_eclipse_glasses_money_multiplier(user_id)
     # Single batched DB write
     pre_total = full_data.get("gather_stats_total_items", 0) or full_data.get("total_forage_count", 0)
     pre_bloom_cycle = full_data.get("bloom_cycle_plants", 0)
@@ -8678,11 +8949,16 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         if tractor_enchant is None or not isinstance(tractor_enchant, dict):
             tractor_enchant = get_user_tractor_attunement(user_id)
         bloom_multiplier = 1.0 + (full_data.get("tree_rings", 0) * 0.005)
-        water_multiplier = 1.0 + (full_data.get("water_count", 0) * 0.01)
+        water_base = 1.0 + (full_data.get("water_count", 0) * 0.01)
+        if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1:
+            water_multiplier = 1.0 + (water_base - 1.0) * 2
+        else:
+            water_multiplier = water_base
         plants_before_harvest = full_data.get("gather_stats_total_items", 0)
         current_balance = full_data.get("balance", 0)
         achievement_multiplier = get_achievement_multiplier(user_id, full_data=full_data)
-        daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * 0.02)
+        daily_rate = 0.04 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.02
+        daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * daily_rate)
         rank_perma_buff_mult = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
         pre_bloom_cycle = full_data.get("bloom_cycle_plants", 0)
     else:
@@ -8876,6 +9152,14 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
 
     # Palace Treasure: 1.5x money
     total_value *= get_palace_treasure_money_multiplier(user_id)
+    # Edward / Splash Potion of Luck: 1% each to all money
+    total_value *= get_edward_splash_money_multiplier(user_id)
+    total_value *= get_eclipse_glasses_money_multiplier(user_id)
+    # Work Lunch / Overtime: gardener harvest only (set_cooldown=False)
+    if not set_cooldown and has_shop_item(user_id, "work_lunch"):
+        total_value *= 1.10
+    if not set_cooldown and has_shop_item(user_id, "overtime_approval") and random.random() < 0.10:
+        total_value *= 2.0
 
     # ----- single batch write: items + ripeness + balance + counts + tree rings + cooldown -----
     num_items = total_items_to_harvest
@@ -9201,7 +9485,8 @@ async def harvest(interaction: discord.Interaction):
             embed.add_field(name="🏆 Achievement Boost",
                 value=f"+{achievement_percent:.1f}% - **+${extra_money_from_achievement:.2f}**", inline=False)
 
-        daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * 0.02)
+        daily_rate_display = 0.04 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.02
+        daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * daily_rate_display)
         extra_money_from_daily = total_base_value * (daily_bonus_multiplier - 1.0)
         if extra_money_from_daily > 0:
             daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
@@ -9423,9 +9708,9 @@ async def achievements(interaction: discord.Interaction, hidden: bool = False):
             num_green_squares = current_level
             for i in range(max_earnable):
                 if i < num_green_squares:
-                    progress_bar += "🟩"  # Green square for completed
+                    progress_bar += PROGRESS_Y  # Green square for completed
                 else:
-                    progress_bar += "⬜"  # Grey square for not completed
+                    progress_bar += PROGRESS_N  # White square for not completed
             
             # Get achievement name and description
             achievement_display_name = current_level_data["name"]
@@ -9474,15 +9759,16 @@ class BloomConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Bloom!", emoji="🌸", style=discord.ButtonStyle.success, custom_id="bloom_confirm")
     async def confirm_bloom(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=True):
+            return
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Only the user who ran /bloom can confirm.", ephemeral=True)
+            await safe_interaction_response(interaction, interaction.response.send_message, "Only the user who ran /bloom can confirm.", ephemeral=True)
             return
         if self.done:
-            await interaction.response.send_message("You already bloomed!", ephemeral=True)
+            await safe_interaction_response(interaction, interaction.response.send_message, "You already bloomed!", ephemeral=True)
             return
         self.done = True
         self.stop()
-        await interaction.response.defer(ephemeral=True)
 
         user_id = interaction.user.id
         old_rank = get_bloom_rank(user_id)
@@ -9768,7 +10054,7 @@ DAILY_SHOP_ITEMS = {
         "name": "Zenith",
         "description": "The culmination of a journey forged into the ultimate sword.",
         "cost": 275,
-        "effect": "Adds +2 ATK to Enemies",
+        "effect": "+2 ATK to Enemies",
     },
     "alchemists_pocketwatch": {
         "name": "Alchemist's Pocketwatch",
@@ -9780,25 +10066,169 @@ DAILY_SHOP_ITEMS = {
         "name": "Split Soul Katana",
         "description": "No cursed energy required!",
         "cost": 150,
-        "effect": "Adds +1 ATK to Enemies",
+        "effect": "+1 ATK to Enemies",
     },
     "inverted_spear_of_heaven": {
         "name": "Inverted Spear of Heaven",
         "description": "Your name's not Zenin? That makes me glad.",
         "cost": 200,
-        "effect": "Adds +1 ATK to Enemies",
+        "effect": "+1 ATK to Enemies",
     },
     "diamond_sword": {
         "name": "Diamond Sword",
         "description": "Do you like it?",
         "cost": 100,
-        "effect": "Adds +1 ATK to Enemies",
+        "effect": "+1 ATK to Enemies",
+    },
+    "kings_blade": {
+        "name": "King's Blade",
+        "description": "Imbued with the soul of a fierce Mimiga..",
+        "cost": 300,
+        "effect": "+3 ATK to Enemies",
+    },
+    "ancient_staff": {
+        "name": "Ancient Staff",
+        "description": "Said to be over 1000 years old, a ref staff with a gold, crescent-shaped tip, holding a red jewled orb. Ineffective against mimics!",
+        "cost": 110,
+        "effect": "+1 ATK to Enemies",
+    },
+    "reaver_karambit": {
+        "name": "Reaver Karambit",
+        "description": "Aces guaranteed!",
+        "cost": 135,
+        "effect": "+1 ATK to Enemies",
+    },
+    "nail": {
+        "name": "Nail",
+        "description": "A sharp blade wielded by a knight of hollow..",
+        "cost": 150,
+        "effect": "+1 ATK to Enemies",
     },
     "palace_treasure": {
         "name": "Palace Treasure",
         "description": "Looking cool, Joker!",
         "cost": 250,
-        "effect": "1.5x money gain, but your gathers and harvests are 3x more likely to be stealable!",
+        "effect": "1.5x money gain, but your gathers and harvests are 5x more likely to be stealable!",
+    },
+    "bodyguard": {
+        "name": "Bodyguard",
+        "description": "Just here to protect you.",
+        "cost": 200,
+        "effect": "Halves your stealable chance",
+    },
+    "presidential_motorcade": {
+        "name": "Presidential Motorcade",
+        "description": "Frankly, I have the lowest chance to be stolen from. The lowest! It's effectively zero.",
+        "cost": 300,
+        "effect": "Cannot be stolen from",
+    },
+    "golden_watering_can": {
+        "name": "Golden Watering Can",
+        "description": "Perfect for the Zen Garden!",
+        "cost": 200,
+        "effect": "Double /water streak boost and increase the daily increase from 2% per day to 4%",
+    },
+    "van_der_lindes_plan": {
+        "name": "Van der Linde's Plan",
+        "description": "We just need more money.",
+        "cost": 90,
+        "effect": "+15% money from gather/harvests you steal",
+    },
+    "edward": {
+        "name": "Edward",
+        "description": "Just a little guy!",
+        "cost": 30,
+        "effect": "1% to all money",
+    },
+    "time_machine": {
+        "name": "Time Machine",
+        "description": "Gathering in the past, present, and future!",
+        "cost": 700,
+        "effect": "You get 1 Tree Ring every 50 plants instead of 100",
+    },
+    "splash_potion_of_luck": {
+        "name": "Splash Potion of Luck",
+        "description": "Straight from a blocky world.",
+        "cost": 10,
+        "effect": "1% to all money",
+    },
+    "evoker": {
+        "name": "Evoker",
+        "description": "This strange object resembles a pistol, branded with \"S.E.E.S\".",
+        "cost": 70,
+        "effect": "+1 ATK to Enemies",
+    },
+    "decoys": {
+        "name": "Decoys",
+        "description": "Throw thieves off your trail!",
+        "cost": 50,
+        "effect": "15% back from the money stolen from you",
+    },
+    "bandana": {
+        "name": "Bandana",
+        "description": "No face, no case.",
+        "cost": 400,
+        "effect": "Steal from ANYONE — no rank restrictions",
+    },
+    "paladins_shield": {
+        "name": "Paladin's Shield",
+        "description": "A sacred shield, obtained from a fallen warrior born of the Dungeon. . .",
+        "cost": 115,
+        "effect": "10% more money from wild animal and boss fights",
+    },
+    "msi_afterburner": {
+        "name": "MSI Afterburner",
+        "description": "Overclock your GPUs!",
+        "cost": 105,
+        "effect": "20% increase to money from /sell",
+    },
+    "eclipse_glasses": {
+        "name": "Eclipse Glasses",
+        "description": "I love staring at the sun!",
+        "cost": 67,
+        "effect": "15% more money during a Solar Eclipse",
+    },
+    "work_lunch": {
+        "name": "Work Lunch",
+        "description": "Good for morale!",
+        "cost": 160,
+        "effect": "10% more money from each gardener's auto-gather and auto-harvest",
+    },
+    "overtime_approval": {
+        "name": "Overtime Approval",
+        "description": "Loyal to the farm!",
+        "cost": 200,
+        "effect": "10% chance for each gardener auto-gather to grant double money",
+    },
+    "slot_token": {
+        "name": "Slot Token",
+        "description": "Let's go gambling!",
+        "cost": 195,
+        "effect": "One free Slot Spin every day (resets midnight EST)",
+    },
+    "blanks": {
+        "name": "Blanks",
+        "description": "Is this Buckshot or Russian?",
+        "cost": 200,
+        "effect": "20% chance for a /russian bullet to be a blank when fired on you",
+    },
+    "rare_candy": {
+        "name": "Rare Candy",
+        "description": "+1 Level!",
+        "cost": 40,
+        "effect": "+2 plants from a /gathemon win",
+    },
+    "frontier_justice": {
+        "name": "Frontier Justice",
+        "description": "Need a Dispenser here!",
+        "cost": 100,
+        "effect": "+10% chance for a critical gather",
+    },
+    "best_buy_geek_squad": {
+        "name": "Best Buy Geek Squad Membership",
+        "description": "I LOVE GRAPHICAL PROCESSING UNITS!",
+        "cost": 400,
+        "effect": "Every click in /mine counts as two clicks",
     },
 }
 DAILY_SHOP_ITEM_IDS = list(DAILY_SHOP_ITEMS.keys())
@@ -10265,6 +10695,32 @@ async def userstats(interaction: discord.Interaction):
         else:
             embed.add_field(name="📈 Next Rank", value=f"**{items_needed}** more plants until **{next_rank}**", inline=False)
         
+        # Retroactive maxed_out check (e.g. if user maxed via /gear before this path called the check)
+        maxed_out_just_unlocked = check_maxed_out_achievement(user_id)
+        if maxed_out_just_unlocked:
+            await send_hidden_achievement_notification(interaction, "maxed_out")
+        
+        # Game Completion: (achievements at max level + hidden achievements) / (total achievement categories + total hidden)
+        total_achievement_categories = len(ACHIEVEMENTS)
+        total_completion_slots = total_achievement_categories + TOTAL_HIDDEN_ACHIEVEMENTS
+        completed_regular = 0
+        for ach_name, ach_data in ACHIEVEMENTS.items():
+            levels = ach_data.get("levels", [])
+            if not levels:
+                continue
+            max_level = max(l["level"] for l in levels)
+            if get_user_achievement_level(user_id, ach_name) >= max_level:
+                completed_regular += 1
+        completed_hidden = get_user_hidden_achievements_count(user_id)
+        completed_slots = completed_regular + completed_hidden
+        completion_pct = round((completed_slots / total_completion_slots) * 100) if total_completion_slots else 0
+        completion_pct = min(100, max(0, completion_pct))
+        bar_length = 15
+        filled = round((completion_pct / 100.0) * bar_length) if bar_length else 0
+        filled = min(bar_length, max(0, filled))
+        progress_bar = "\u2588" * filled + "\u2581" * (bar_length - filled)
+        embed.add_field(name="GAME COMPLETION", value=f"{progress_bar} **{completion_pct}%**", inline=False)
+        
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
     except Exception as e:
         print(f"Error in userstats command: {e}")
@@ -10328,18 +10784,22 @@ class BasketUpgradeView(discord.ui.View):
             color=discord.Color.gold()
         )
         
+        def _upgrade_bar(tier: int, max_tier: int = 10) -> str:
+            return PROGRESS_Y * tier + PROGRESS_N * (max_tier - tier)
+
         # Path 1: Baskets (Money Multiplier)
         basket_tier = upgrades["basket"]
         current_basket = "No Basket" if basket_tier == 0 else BASKET_UPGRADES[basket_tier - 1]["name"]
         current_multiplier = 1.0 if basket_tier == 0 else BASKET_UPGRADES[basket_tier - 1]["multiplier"]
+        bar_basket = _upgrade_bar(basket_tier)
         if basket_tier < 10:
             next_basket = BASKET_UPGRADES[basket_tier]["name"]
             next_multiplier = BASKET_UPGRADES[basket_tier]["multiplier"]
             next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[basket_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            basket_text = f"**Upgrade {basket_tier + 1}/10**\n**Current:** {current_basket} ({current_multiplier}x money)\n**Next:** {next_basket} ({next_multiplier}x money)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            basket_text = f"{bar_basket}\n**Current:** {current_basket} ({current_multiplier}x money)\n**Next:** {next_basket} ({next_multiplier}x money)\n**Cost:** ${next_cost:,.2f} {can_afford}"
         else:
-            basket_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_basket} ({current_multiplier}x money)"
+            basket_text = f"{bar_basket}\n**Current:** {current_basket} ({current_multiplier}x money)"
         
         embed.add_field(
             name="🧺 PATH 1: BASKETS",
@@ -10351,14 +10811,15 @@ class BasketUpgradeView(discord.ui.View):
         shoes_tier = upgrades["shoes"]
         current_shoes = "Bare Feet" if shoes_tier == 0 else SHOES_UPGRADES[shoes_tier - 1]["name"]
         current_reduction = 0 if shoes_tier == 0 else SHOES_UPGRADES[shoes_tier - 1]["reduction"]
+        bar_shoes = _upgrade_bar(shoes_tier)
         if shoes_tier < 10:
             next_shoes = SHOES_UPGRADES[shoes_tier]["name"]
             next_reduction = SHOES_UPGRADES[shoes_tier]["reduction"]
             next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[shoes_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            shoes_text = f"**Upgrade {shoes_tier + 1}/10**\n**Current:** {current_shoes} (-{current_reduction}s cooldown)\n**Next:** {next_shoes} (-{next_reduction}s cooldown)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            shoes_text = f"{bar_shoes}\n**Current:** {current_shoes} (-{current_reduction}s cooldown)\n**Next:** {next_shoes} (-{next_reduction}s cooldown)\n**Cost:** ${next_cost:,.2f} {can_afford}"
         else:
-            shoes_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_shoes} (-{current_reduction}s cooldown)"
+            shoes_text = f"{bar_shoes}\n**Current:** {current_shoes} (-{current_reduction}s cooldown)"
         
         embed.add_field(
             name="👟 PATH 2: RUNNING SHOES",
@@ -10370,14 +10831,15 @@ class BasketUpgradeView(discord.ui.View):
         gloves_tier = upgrades["gloves"]
         current_gloves = "Bare Hands" if gloves_tier == 0 else GLOVES_UPGRADES[gloves_tier - 1]["name"]
         current_chain = 0 if gloves_tier == 0 else GLOVES_UPGRADES[gloves_tier - 1]["chain_chance"] * 100
+        bar_gloves = _upgrade_bar(gloves_tier)
         if gloves_tier < 10:
             next_gloves = GLOVES_UPGRADES[gloves_tier]["name"]
             next_chain = GLOVES_UPGRADES[gloves_tier]["chain_chance"] * 100
             next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[gloves_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            gloves_text = f"**Upgrade {gloves_tier + 1}/10**\n**Current:** {current_gloves} ({current_chain}% chain chance)\n**Next:** {next_gloves} ({next_chain}% chain chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            gloves_text = f"{bar_gloves}\n**Current:** {current_gloves} ({current_chain}% chain chance)\n**Next:** {next_gloves} ({next_chain}% chain chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
         else:
-            gloves_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_gloves} ({current_chain}% chain chance)"
+            gloves_text = f"{bar_gloves}\n**Current:** {current_gloves} ({current_chain}% chain chance)"
         
         embed.add_field(
             name="🧤 PATH 3: GLOVES",
@@ -10389,14 +10851,15 @@ class BasketUpgradeView(discord.ui.View):
         soil_tier = upgrades["soil"]
         current_soil = "Regular Soil" if soil_tier == 0 else SOIL_UPGRADES[soil_tier - 1]["name"]
         current_gmo = 0 if soil_tier == 0 else round(SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] * 100, 1)
+        bar_soil = _upgrade_bar(soil_tier)
         if soil_tier < 10:
             next_soil = SOIL_UPGRADES[soil_tier]["name"]
             next_gmo = round(SOIL_UPGRADES[soil_tier]["gmo_boost"] * 100, 1)
             next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[soil_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            soil_text = f"**Upgrade {soil_tier + 1}/10**\n**Current:** {current_soil} (+{current_gmo}% GMO chance)\n**Next:** {next_soil} (+{next_gmo}% GMO chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            soil_text = f"{bar_soil}\n**Current:** {current_soil} (+{current_gmo}% GMO chance)\n**Next:** {next_soil} (+{next_gmo}% GMO chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
         else:
-            soil_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_soil} (+{current_gmo}% GMO chance)"
+            soil_text = f"{bar_soil}\n**Current:** {current_soil} (+{current_gmo}% GMO chance)"
         
         embed.add_field(
             name="🌱 PATH 4: SOIL",
@@ -10408,7 +10871,7 @@ class BasketUpgradeView(discord.ui.View):
         
         return embed
     
-    @discord.ui.button(label="🧺 Buy Basket", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="", style=discord.ButtonStyle.primary, emoji="🧺", row=0)
     async def buy_basket(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await self.handle_purchase(interaction, "basket", BASKET_UPGRADES, "Basket")
@@ -10416,7 +10879,7 @@ class BasketUpgradeView(discord.ui.View):
             print(f"Error in buy_basket: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
-    @discord.ui.button(label="👟 Buy Shoes", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="", style=discord.ButtonStyle.primary, emoji="👟", row=0)
     async def buy_shoes(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await self.handle_purchase(interaction, "shoes", SHOES_UPGRADES, "Shoes")
@@ -10424,7 +10887,7 @@ class BasketUpgradeView(discord.ui.View):
             print(f"Error in buy_shoes: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
-    @discord.ui.button(label="🧤 Buy Gloves", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="", style=discord.ButtonStyle.primary, emoji="🧤", row=1)
     async def buy_gloves(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await self.handle_purchase(interaction, "gloves", GLOVES_UPGRADES, "Gloves")
@@ -10432,7 +10895,7 @@ class BasketUpgradeView(discord.ui.View):
             print(f"Error in buy_gloves: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
-    @discord.ui.button(label="🌱 Buy Soil", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="", style=discord.ButtonStyle.primary, emoji="🌱", row=1)
     async def buy_soil(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await self.handle_purchase(interaction, "soil", SOIL_UPGRADES, "Soil")
@@ -10440,7 +10903,7 @@ class BasketUpgradeView(discord.ui.View):
             print(f"Error in buy_soil: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
-    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="", style=discord.ButtonStyle.secondary, emoji="🔄", row=2)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if interaction.user.id != self.user_id:
@@ -10482,8 +10945,14 @@ class BasketUpgradeView(discord.ui.View):
             
             next_upgrade = upgrade_list[current_tier]
             
+            # Check for Maxed Out achievement (gear was the only upgrade path that did not call this)
+            achievement_unlocked = check_maxed_out_achievement(self.user_id)
+            
             # Send quick confirmation and update the main embed
             await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
+            
+            if achievement_unlocked:
+                await send_hidden_achievement_notification(interaction, "maxed_out")
             
             embed = self.create_embed()
             try:
@@ -10530,18 +10999,22 @@ class HarvestUpgradeView(discord.ui.View):
             color=discord.Color.green()
         )
         
+        def _upgrade_bar(tier: int, max_tier: int = 10) -> str:
+            return PROGRESS_Y * tier + PROGRESS_N * (max_tier - tier)
+        
         # Path 1: Car (Extra Items)
         car_tier = upgrades["car"]
         current_car = "Just Yourself" if car_tier == 0 else HARVEST_CAR_UPGRADES[car_tier - 1]["name"]
         current_extra = 0 if car_tier == 0 else HARVEST_CAR_UPGRADES[car_tier - 1]["extra_items"]
+        bar_car = _upgrade_bar(car_tier)
         if car_tier < 10:
             next_car = HARVEST_CAR_UPGRADES[car_tier]["name"]
             next_extra = HARVEST_CAR_UPGRADES[car_tier]["extra_items"]
             next_cost = bloom_scaled_price(self.user_id, HARVEST_CAR_PRICES[car_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            car_text = f"**Upgrade {car_tier + 1}/10**\n**Current:** {current_car} (+{current_extra} extra items)\n**Next:** {next_car} (+{next_extra} extra items)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            car_text = f"{bar_car}\n**Current:** {current_car} (+{current_extra} extra items)\n**Next:** {next_car} (+{next_extra} extra items)\n**Cost:** ${next_cost:,.2f} {can_afford}"
         else:
-            car_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_car} (+{current_extra} extra items)"
+            car_text = f"{bar_car}\n**Current:** {current_car} (+{current_extra} extra items)"
         
         embed.add_field(
             name="🚗 PATH 1: VEHICLE",
@@ -10553,14 +11026,15 @@ class HarvestUpgradeView(discord.ui.View):
         chain_tier = upgrades["chain"]
         current_season = "No Season" if chain_tier == 0 else HARVEST_CHAIN_UPGRADES[chain_tier - 1]["name"]
         current_chain = 0 if chain_tier == 0 else round(HARVEST_CHAIN_UPGRADES[chain_tier - 1]["chain_chance"] * 100, 1)
+        bar_chain = _upgrade_bar(chain_tier)
         if chain_tier < 10:
             next_season = HARVEST_CHAIN_UPGRADES[chain_tier]["name"]
             next_chain = round(HARVEST_CHAIN_UPGRADES[chain_tier]["chain_chance"] * 100, 1)
             next_cost = bloom_scaled_price(self.user_id, HARVEST_CHAIN_PRICES[chain_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            chain_text = f"**Upgrade {chain_tier + 1}/10**\n**Current:** {current_season} ({current_chain}% chain chance)\n**Next:** {next_season} ({next_chain}% chain chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            chain_text = f"{bar_chain}\n**Current:** {current_season} ({current_chain}% chain chance)\n**Next:** {next_season} ({next_chain}% chain chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
         else:
-            chain_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_season} ({current_chain}% chain chance)"
+            chain_text = f"{bar_chain}\n**Current:** {current_season} ({current_chain}% chain chance)"
         
         embed.add_field(
             name="🌾 PATH 2: YIELD",
@@ -10572,14 +11046,15 @@ class HarvestUpgradeView(discord.ui.View):
         fertilizer_tier = upgrades["fertilizer"]
         current_fertilizer = "No Fertilizer" if fertilizer_tier == 0 else HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["name"]
         current_multiplier = 0 if fertilizer_tier == 0 else round(HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["multiplier"] * 100, 1)
+        bar_fertilizer = _upgrade_bar(fertilizer_tier)
         if fertilizer_tier < 10:
             next_fertilizer = HARVEST_FERTILIZER_UPGRADES[fertilizer_tier]["name"]
             next_multiplier = round(HARVEST_FERTILIZER_UPGRADES[fertilizer_tier]["multiplier"] * 100, 1)
             next_cost = bloom_scaled_price(self.user_id, HARVEST_FERTILIZER_PRICES[fertilizer_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            fertilizer_text = f"**Upgrade {fertilizer_tier + 1}/10**\n**Current:** {current_fertilizer} (+{current_multiplier}% money)\n**Next:** {next_fertilizer} (+{next_multiplier}% money)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            fertilizer_text = f"{bar_fertilizer}\n**Current:** {current_fertilizer} (+{current_multiplier}% money)\n**Next:** {next_fertilizer} (+{next_multiplier}% money)\n**Cost:** ${next_cost:,.2f} {can_afford}"
         else:
-            fertilizer_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_fertilizer} (+{current_multiplier}% money)"
+            fertilizer_text = f"{bar_fertilizer}\n**Current:** {current_fertilizer} (+{current_multiplier}% money)"
         
         embed.add_field(
             name="💩 PATH 3: FERTILIZER",
@@ -10631,8 +11106,10 @@ class HarvestUpgradeView(discord.ui.View):
                 else:
                     current_reduction_text = f"-{hours}h"
             
-            cooldown_text = f"**Upgrade {cooldown_tier + 1}/10**\n**Current:** {current_workers} ({current_reduction_text} cooldown)\n**Next:** {next_workers} ({reduction_text} cooldown)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            bar_cooldown = _upgrade_bar(cooldown_tier)
+            cooldown_text = f"{bar_cooldown}\n**Current:** {current_workers} ({current_reduction_text} cooldown)\n**Next:** {next_workers} ({reduction_text} cooldown)\n**Cost:** ${next_cost:,.2f} {can_afford}"
         else:
+            bar_cooldown = _upgrade_bar(cooldown_tier)
             if current_reduction < 60:
                 current_reduction_text = f"-{current_reduction}s"
             elif current_reduction < 3600:
@@ -10649,7 +11126,7 @@ class HarvestUpgradeView(discord.ui.View):
                     current_reduction_text = f"-{hours}h {minutes}m"
                 else:
                     current_reduction_text = f"-{hours}h"
-            cooldown_text = f"**Upgrade 10/10 (MAX)**\n**Current:** {current_workers} ({current_reduction_text} cooldown)"
+            cooldown_text = f"{bar_cooldown}\n**Current:** {current_workers} ({current_reduction_text} cooldown)"
         
         embed.add_field(
             name="⚡ PATH 4: COOLDOWN REDUCTION",
@@ -10661,7 +11138,7 @@ class HarvestUpgradeView(discord.ui.View):
         
         return embed
     
-    @discord.ui.button(label="🚗 Buy Vehicle", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="", style=discord.ButtonStyle.primary, emoji="🚗", row=0)
     async def buy_car(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await self.handle_purchase(interaction, "car", HARVEST_CAR_UPGRADES, HARVEST_CAR_PRICES, "Vehicle")
@@ -10669,7 +11146,7 @@ class HarvestUpgradeView(discord.ui.View):
             print(f"Error in buy_car: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
-    @discord.ui.button(label="🌾 Buy Yield", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="", style=discord.ButtonStyle.primary, emoji="🌾", row=0)
     async def buy_chain(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await self.handle_purchase(interaction, "chain", HARVEST_CHAIN_UPGRADES, HARVEST_CHAIN_PRICES, "Yield")
@@ -10677,7 +11154,7 @@ class HarvestUpgradeView(discord.ui.View):
             print(f"Error in buy_chain: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
-    @discord.ui.button(label="💩 Buy Fertilizer", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="", style=discord.ButtonStyle.primary, emoji="💩", row=1)
     async def buy_fertilizer(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await self.handle_purchase(interaction, "fertilizer", HARVEST_FERTILIZER_UPGRADES, HARVEST_FERTILIZER_PRICES, "Fertilizer")
@@ -10685,7 +11162,7 @@ class HarvestUpgradeView(discord.ui.View):
             print(f"Error in buy_fertilizer: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
-    @discord.ui.button(label="⚡ Buy Workers", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="", style=discord.ButtonStyle.primary, emoji="⚡", row=1)
     async def buy_cooldown(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await self.handle_purchase(interaction, "cooldown", HARVEST_COOLDOWN_UPGRADES, HARVEST_COOLDOWN_PRICES, "Workers")
@@ -10788,6 +11265,12 @@ class ImbueView(discord.ui.View):
         self.channel = channel  # For public announcement
         self.user_name = user_name
         self.cost = IMBUE_HOE_COST if tool_type == "hoe" else IMBUE_TRACTOR_COST
+        # First-ever roll: user had no attunement — cannot "keep" nothing; hide only "Keep Current"
+        if self.current_enchant is None:
+            for child in list(self.children):
+                if getattr(child, "label", None) == "Keep Current":
+                    self.remove_item(child)
+                    break
 
     def _build_embed(self) -> discord.Embed:
         """Build the ephemeral attunement choice embed."""
@@ -11064,6 +11547,8 @@ class HireView(discord.ui.View):
             has_tool = gardener.get("has_tool", False)
             tool_info = GARDENER_TOOLS.get(slot_id, {"name": "Tool", "cost": 0, "chance": 0})
             tool_chance_pct = round(tool_info["chance"] * 100, 1)  # avoid float display like 14.000000000002
+            # Show 1 decimal for small chances so 0.5% doesn't display as "0%" (.0f rounds 0.5 to 0)
+            tool_chance_str = f"{tool_chance_pct:.1f}%" if tool_chance_pct < 1 else f"{tool_chance_pct:.0f}%"
             
             embed.add_field(
                 name="Status",
@@ -11083,13 +11568,13 @@ class HireView(discord.ui.View):
             if has_tool:
                 embed.add_field(
                     name="Tool",
-                    value=f"**{tool_info['name']}** ✅ for a **{tool_chance_pct:.0f}%** chance to auto harvest",
+                    value=f"**{tool_info['name']}** ✅ for a **{tool_chance_str}** chance to auto harvest",
                     inline=False
                 )
             else:
                 embed.add_field(
                     name="Tool",
-                    value=f"Buy **{tool_info['name']}** for a **{tool_chance_pct:.0f}%** chance to auto harvest",
+                    value=f"Buy **{tool_info['name']}** for a **{tool_chance_str}** chance to auto harvest",
                     inline=False
                 )
         else:
@@ -11392,13 +11877,13 @@ class GpuView(discord.ui.View):
         
         embed = discord.Embed(
             title=f"🖥️ {gpu_name}",
-            description=f"💰 Your Balance: **${balance:,.2f}**\n\nBuy GPUs to boost your mining!",
+            description=f"💰 Balance: **${balance:,.2f}**\n\nBuy GPUs to boost your mining!",
             color=discord.Color.blue()
         )
         
         embed.add_field(
             name="Mining Boost",
-            value=f"**+{gpu_info['percent_increase']}%** amount gained",
+            value=f"**+{gpu_info['percent_increase']}%**",
             inline=True
         )
         embed.add_field(
@@ -12045,8 +12530,8 @@ async def spawn_boss(interaction: discord.Interaction, boss: str, channel: str):
 # User admin command - full dossier: userstats, items, achievements, hidden achievements, and Wild Animals spawn reference
 @bot.tree.command(name="user", description="[ADMIN] View everything about a user: stats, items, achievements, hidden achievements")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(member="The user to inspect")
-async def user_admin(interaction: discord.Interaction, member: discord.Member):
+@app_commands.describe(member="The user to inspect (defaults to yourself)")
+async def user_admin(interaction: discord.Interaction, member: discord.Member = None):
     try:
         if not await safe_defer(interaction, ephemeral=True):
             return
@@ -12054,9 +12539,14 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member):
             await safe_interaction_response(interaction, interaction.followup.send,
                 "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
             return
+        if interaction.guild is None:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: This command can only be used in a server.", ephemeral=True)
+            return
 
-        user_id = member.id
-        display_name = member.display_name or member.name
+        target = member if member is not None else interaction.user
+        user_id = target.id
+        display_name = getattr(target, "display_name", None) or getattr(target, "name", "Unknown")
 
         # ── 1. Userstats ──
         user_balance = get_user_balance(user_id)
@@ -12184,7 +12674,7 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member):
             else:
                 current_level_data = levels[-1]
             max_earnable = len(levels) - 1
-            progress_bar = "🟩" * current_level + "⬜" * (max_earnable - current_level)
+            progress_bar = PROGRESS_Y * current_level + PROGRESS_N * (max_earnable - current_level)
             achievement_display_name = current_level_data["name"]
             boost_percent = current_level_data["boost"] * 100
             embed_ach.add_field(
@@ -12580,6 +13070,80 @@ async def set_command(
         await safe_interaction_response(interaction, interaction.followup.send, "\u274c An error occurred. Please try again.", ephemeral=True)
 
 
+# Setrank admin command - set a user's BLOOM rank (PINE → REDWOOD)
+_BLOOM_RANK_TO_COUNT = {
+    "PINE I": 0, "PINE II": 1, "PINE III": 2,
+    "CEDAR I": 3, "CEDAR II": 4, "CEDAR III": 5,
+    "BIRCH I": 6, "BIRCH II": 7, "BIRCH III": 8,
+    "MAPLE I": 9, "MAPLE II": 10, "MAPLE III": 11,
+    "OAK I": 12, "OAK II": 13, "OAK III": 14,
+    "FIR I": 15, "FIR II": 16, "FIR III": 17,
+    "REDWOOD": 18,
+}
+
+
+@bot.tree.command(name="setrank", description="[ADMIN] Set a user's BLOOM rank (PINE, CEDAR, BIRCH, MAPLE, OAK, FIR, REDWOOD)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    user="The user to set the rank for",
+    rank="The BLOOM rank name (Redwood has no tier)",
+    tier="Rank tier I, II, or III (omit for Redwood)",
+)
+@app_commands.choices(rank=[
+    app_commands.Choice(name="PINE", value="PINE"),
+    app_commands.Choice(name="CEDAR", value="CEDAR"),
+    app_commands.Choice(name="BIRCH", value="BIRCH"),
+    app_commands.Choice(name="MAPLE", value="MAPLE"),
+    app_commands.Choice(name="OAK", value="OAK"),
+    app_commands.Choice(name="FIR", value="FIR"),
+    app_commands.Choice(name="REDWOOD", value="REDWOOD"),
+])
+@app_commands.choices(tier=[
+    app_commands.Choice(name="I", value="I"),
+    app_commands.Choice(name="II", value="II"),
+    app_commands.Choice(name="III", value="III"),
+])
+async def setrank(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    rank: app_commands.Choice[str],
+    tier: app_commands.Choice[str] = None,
+):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+        rank_name = rank.value
+        if rank_name == "REDWOOD":
+            rank_str = "REDWOOD"
+        else:
+            if not tier:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ **Error**: Tier (I, II, or III) is required for this rank. Redwood has no tier.", ephemeral=True)
+                return
+            rank_str = f"{rank_name} {tier.value}"
+        if rank_str not in _BLOOM_RANK_TO_COUNT:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: Invalid rank.", ephemeral=True)
+            return
+        bloom_count = _BLOOM_RANK_TO_COUNT[rank_str]
+        set_user_bloom_count(user.id, bloom_count)
+        await assign_bloom_rank_role(user, interaction.guild)
+        embed = discord.Embed(
+            title="✅ Rank Set",
+            description=f"{user.mention}'s BLOOM rank has been set to **{rank_str}**!",
+            color=discord.Color.green()
+        )
+        print(f"Admin {interaction.user.name} used /setrank to set {user.name}'s rank to {rank_str}")
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+    except Exception as e:
+        print(f"Error in setrank command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
 # Market admin command
 @bot.tree.command(name="market", description="[ADMIN] Toggle market news on/off and reset stock prices")
 @app_commands.default_permissions(administrator=True)
@@ -12670,6 +13234,21 @@ async def _giveaway_imbue_name_autocomplete(
     return [app_commands.Choice(name=n, value=n) for n in matches[:25]]
 
 
+async def _giveaway_shop_item_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    """Autocomplete for daily shop item – filters by typed text. Supports 25+ items (Discord limit is 25 static choices)."""
+    current_upper = (current or "").strip().upper()
+    choices = []
+    for item_id, info in DAILY_SHOP_ITEMS.items():
+        name = info.get("name", item_id)
+        if not current_upper or current_upper in name.upper() or current_upper in item_id.upper().replace("_", " "):
+            choices.append(app_commands.Choice(name=name, value=item_id))
+    choices.sort(key=lambda c: c.name.upper())
+    return choices[:25]
+
+
 @bot.tree.command(name="giveaway", description="[ADMIN] Give a user money, imbues, water streak, tree rings, or daily shop items")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
@@ -12679,7 +13258,7 @@ async def _giveaway_imbue_name_autocomplete(
     tool_type="Hoe or Tractor (required for imbue type)",
     rarity="Imbue rarity tier (required for imbue type)",
     imbue_name="Specific imbue name (required for imbue type) – autocompletes based on tool & rarity",
-    shop_item="Daily shop item to give (required for shop_item type)",
+    shop_item="Daily shop item to give (required for shop_item type) – type to search",
 )
 @app_commands.choices(type=[
     app_commands.Choice(name="Money", value="money"),
@@ -12687,24 +13266,6 @@ async def _giveaway_imbue_name_autocomplete(
     app_commands.Choice(name="Water Streak", value="water_streak"),
     app_commands.Choice(name="Tree Rings", value="tree_rings"),
     app_commands.Choice(name="Shop Item", value="shop_item"),
-])
-@app_commands.choices(shop_item=[
-    app_commands.Choice(name="Fuzzy Dice", value="fuzzy_dice"),
-    app_commands.Choice(name="Mutagenic Serum", value="mutagenic_serum"),
-    app_commands.Choice(name="Scarecrow", value="scarecrow"),
-    app_commands.Choice(name="Cryptobro's Shadow", value="cryptobro_shadow"),
-    app_commands.Choice(name="Bloomstone", value="bloomstone"),
-    app_commands.Choice(name="Irrigation System", value="irrigation_system"),
-    app_commands.Choice(name="Gambler's Revolver", value="gamblers_revolver"),
-    app_commands.Choice(name="Commoner's Respite", value="commoners_respite"),
-    app_commands.Choice(name="Atlas", value="atlas"),
-    app_commands.Choice(name="Nether Star", value="nether_star"),
-    app_commands.Choice(name="Zenith", value="zenith"),
-    app_commands.Choice(name="Alchemist's Pocketwatch", value="alchemists_pocketwatch"),
-    app_commands.Choice(name="Split Soul Katana", value="split_soul_katana"),
-    app_commands.Choice(name="Inverted Spear of Heaven", value="inverted_spear_of_heaven"),
-    app_commands.Choice(name="Diamond Sword", value="diamond_sword"),
-    app_commands.Choice(name="Palace Treasure", value="palace_treasure"),
 ])
 @app_commands.choices(tool_type=[
     app_commands.Choice(name="Hoe (Gather)", value="hoe"),
@@ -12721,7 +13282,7 @@ async def _giveaway_imbue_name_autocomplete(
     app_commands.Choice(name="Celestial", value="CELESTIAL"),
     app_commands.Choice(name="Secret", value="SECRET"),
 ])
-@app_commands.autocomplete(imbue_name=_giveaway_imbue_name_autocomplete)
+@app_commands.autocomplete(imbue_name=_giveaway_imbue_name_autocomplete, shop_item=_giveaway_shop_item_autocomplete)
 async def giveaway(
     interaction: discord.Interaction,
     user: discord.Member,
@@ -13071,32 +13632,30 @@ class LeaderboardView(discord.ui.View):
     @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, disabled=True)
     async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=False):
+                return
             if self.current_page > 0:
                 self.current_page -= 1
                 self.update_buttons()
                 embed = self.create_embed(self.current_page)
                 await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
-            else:
-                await safe_defer(interaction)
         except Exception as e:
             print(f"Error in previous_button (leaderboard): {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
-    
+
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not await safe_defer(interaction, ephemeral=False):
+                return
             if self.current_page < self.total_pages - 1:
                 self.current_page += 1
                 self.update_buttons()
                 embed = self.create_embed(self.current_page)
                 await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
-            else:
-                await safe_defer(interaction)
         except Exception as e:
             print(f"Error in next_button (leaderboard): {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
-        else:
-            await interaction.response.defer()
     
     def update_buttons(self):
         """Update button states based on current page."""
@@ -15334,7 +15893,9 @@ class MiningView(discord.ui.View):
             gpu_boost = float(self.gpu_percent_boost) if self.gpu_percent_boost else 0.0
             percent_multiplier = 1.0 + (gpu_boost / 100.0)
             amount = round(base_amount * percent_multiplier, 4)
-            
+            # Best Buy Geek Squad: every click counts as two
+            if has_shop_item(interaction.user.id, "best_buy_geek_squad"):
+                amount *= 2
             # Add crypto to user's holdings (NO BOOSTS APPLIED DURING MINING)
             update_user_crypto_holdings(interaction.user.id, symbol, amount)
             
@@ -15563,7 +16124,10 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             total_sale_value = subtotal + extra_from_rank
             total_sale_value *= get_beta_tester_money_multiplier(user_id)
             total_sale_value *= get_nether_star_money_multiplier(user_id)
-            
+            total_sale_value *= get_edward_splash_money_multiplier(user_id)
+            if has_shop_item(user_id, "msi_afterburner"):
+                total_sale_value *= 1.20
+            total_sale_value *= get_eclipse_glasses_money_multiplier(user_id)
             # Add money to balance (with boosts)
             current_balance = get_user_balance(user_id)
             new_balance = current_balance + total_sale_value
@@ -15694,7 +16258,10 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         sale_value = subtotal + extra_from_rank
         sale_value *= get_beta_tester_money_multiplier(user_id)
         sale_value *= get_nether_star_money_multiplier(user_id)
-        
+        sale_value *= get_edward_splash_money_multiplier(user_id)
+        if has_shop_item(user_id, "msi_afterburner"):
+            sale_value *= 1.20
+        sale_value *= get_eclipse_glasses_money_multiplier(user_id)
         # Update holdings (subtract)
         update_user_crypto_holdings(user_id, coin, -amount)
         
@@ -16251,9 +16818,9 @@ async def russian(
         view = RouletteJoinView(game_id, user_id,timeout = 300)
 
         if players == 1:
-            embed.add_field(name="ℹ️ How to Play", value="Click **Start Game** to begin your solo adventure!", inline=False)
+            embed.add_field(name="ℹ️ How to Play", value="Click **Start** to begin your solo adventure!", inline=False)
         else:
-            embed.add_field(name="ℹ️ How to Play", value=f"Waiting for {players-1} more players to join! Host can click **Start Game** when ready!", inline=False)
+            embed.add_field(name="ℹ️ How to Play", value=f"Waiting for {players-1} more players to join! Host can click **Start** when ready!", inline=False)
 
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
     except Exception as e:
@@ -16378,7 +16945,7 @@ async def gathership(interaction: discord.Interaction, user: discord.Member, bet
 
         embed = discord.Embed(
             title="⚓ MAYFLOWER ⚓",
-            description=f"{interaction.user.mention} is challenging {user.mention} to **MAYFLOWER**!\n\n{user.mention}, click **Join Game** to accept. Host can **Start Game** when ready.",
+            description=f"{interaction.user.mention} is challenging {user.mention} to **MAYFLOWER**!\n\n{user.mention}, click **Join** to accept. Host can **Start** when ready.",
             color=discord.Color.blue()
         )
         embed.add_field(name="💰 Bet", value=f"${bet:.2f} each", inline=True)
