@@ -6652,7 +6652,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.10.4 :3"
+            name="running /gather on V0.11.0"
         )
     )
     try:
@@ -6814,6 +6814,14 @@ def _plant_rare_label(ripeness: str, is_gmo: bool) -> tuple[str | None, str | No
     return label, tier
 
 
+def _rares_rarity_emoji(rarity: str) -> str:
+    """Return the IMBUE emoji for #rares display. Uses RARITY_EMOJI; fallback to [RARITY] for new tiers so they still display."""
+    if not (rarity or "").strip():
+        return ""
+    r = (rarity or "").strip().upper()
+    return RARITY_EMOJI.get(r, f"[{r}]")
+
+
 async def _post_to_rares_channel(guild: discord.Guild, content: str) -> None:
     """Send a message to the #rares channel if it exists. Swallows errors."""
     if not guild:
@@ -6833,7 +6841,7 @@ async def _post_rares_plant(guild: discord.Guild, user: discord.Member, source: 
     label, tier = _plant_rare_label(ripeness, is_gmo)
     if not label:
         return
-    rarity_emoji = RARITY_EMOJI.get(tier, "")
+    rarity_emoji = _rares_rarity_emoji(tier)
     # Use get_item_display_emoji so Flowey/Raspberry (custom server emojis) display correctly in #rares
     item_emoji = get_item_display_emoji(item_name)
     # Avoid double emoji when item name already includes it (e.g. "Daffodil 🌼")
@@ -6857,7 +6865,7 @@ async def _post_rares_imbue(guild: discord.Guild, user: discord.Member,
     rarity = (enchant.get("rarity") or "").upper()
     if rarity not in IMBUE_RARES_RARITIES:
         return
-    rarity_emoji = RARITY_EMOJI.get(rarity, "")
+    rarity_emoji = _rares_rarity_emoji(rarity)
     tool_text = "**hoe imbue**" if tool_type == "hoe" else "**tractor imbue**"
     name = enchant.get("name", "Unknown")
     # Leading rarity emoji, rarity in caps, tool type next, imbue name bold+italic, sparkle at end
