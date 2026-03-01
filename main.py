@@ -11140,7 +11140,7 @@ class HarvestUpgradeView(discord.ui.View):
             print(f"Error in buy_cooldown: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
-    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="", style=discord.ButtonStyle.secondary, emoji="🔄", row=2)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if interaction.user.id != self.user_id:
