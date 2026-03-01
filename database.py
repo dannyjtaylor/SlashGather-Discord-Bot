@@ -1747,6 +1747,22 @@ def set_user_achievement_level(user_id: int, achievement_name: str, level: int) 
     )
 
 
+def get_user_achievements_display_data(user_id: int) -> dict | None:
+    """Fetch all data needed for /achievements in one DB read. Returns dict with 'achievements' and 'total_items', or None if no doc."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one(
+        {"_id": int(user_id)},
+        {"achievements": 1, "gather_stats.total_items": 1},
+    )
+    if not doc:
+        return None
+    achievements = doc.get("achievements", {})
+    gather_stats = doc.get("gather_stats", {})
+    total_items = int(gather_stats.get("total_items", 0))
+    return {"achievements": achievements, "total_items": total_items}
+
+
 def get_user_hidden_achievements_count(user_id: int) -> int:
     """Get user's count of hidden achievements discovered."""
     users = _get_users_collection()
@@ -2528,6 +2544,91 @@ def get_user_harvest_full_data(user_id: int) -> Dict:
         "unlocked_areas": _merge_bloom_auto_unlock(doc.get("unlocked_areas", {}), int(doc.get("bloom_count", 0))),
         "harvest_command_count": int(doc.get("harvest_command_count", 0)),
         "shop_inventory": dict(doc.get("shop_inventory", {})),
+    }
+
+
+def get_user_dossier(user_id: int) -> Dict:
+    """
+    Fetch all fields needed for /user (admin) and /userstats in one DB round-trip.
+    Replaces 25+ individual queries with a single find_one.
+    Returns a normalized dict with defaults for missing keys.
+    """
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+
+    doc = users.find_one(
+        {"_id": int(user_id)},
+        {
+            "balance": 1,
+            "gather_stats": 1,
+            "bloom_cycle_plants": 1,
+            "bloom_count": 1,
+            "tree_rings": 1,
+            "consecutive_water_days": 1,
+            "achievements": 1,
+            "items": 1,
+            "shop_inventory": 1,
+            "hoe_enchantment": 1,
+            "tractor_enchantment": 1,
+            "gardeners": 1,
+            "gpus": 1,
+            "basket_upgrades": 1,
+            "harvest_upgrades": 1,
+        },
+    )
+
+    if not doc:
+        return {
+            "balance": _get_default_balance(),
+            "gather_stats_total_items": 0,
+            "gather_stats_items": {},
+            "bloom_cycle_plants": 0,
+            "bloom_count": 0,
+            "tree_rings": 0,
+            "consecutive_water_days": 0,
+            "achievements": {},
+            "items": {},
+            "shop_inventory": {},
+            "hoe_enchantment": None,
+            "tractor_enchantment": None,
+            "gardeners": [],
+            "gpus": [],
+            "basket_upgrades": {"basket": 0, "shoes": 0, "gloves": 0, "soil": 0},
+            "harvest_upgrades": {"car": 0, "chain": 0, "fertilizer": 0, "cooldown": 0},
+        }
+
+    gs = doc.get("gather_stats") or {}
+    basket = doc.get("basket_upgrades") or {}
+    harvest = doc.get("harvest_upgrades") or {}
+    achievements = doc.get("achievements") or {}
+
+    return {
+        "balance": float(doc.get("balance", _get_default_balance())),
+        "gather_stats_total_items": int(gs.get("total_items", 0)),
+        "gather_stats_items": dict(gs.get("items", {})),
+        "bloom_cycle_plants": int(doc.get("bloom_cycle_plants", 0)),
+        "bloom_count": int(doc.get("bloom_count", 0)),
+        "tree_rings": int(doc.get("tree_rings", 0)),
+        "consecutive_water_days": int(doc.get("consecutive_water_days", 0)),
+        "achievements": achievements,
+        "items": dict(doc.get("items", {})),
+        "shop_inventory": dict(doc.get("shop_inventory", {})),
+        "hoe_enchantment": doc.get("hoe_enchantment"),
+        "tractor_enchantment": doc.get("tractor_enchantment"),
+        "gardeners": list(doc.get("gardeners", [])),
+        "gpus": list(doc.get("gpus", [])),
+        "basket_upgrades": {
+            "basket": basket.get("basket", 0),
+            "shoes": basket.get("shoes", 0),
+            "gloves": basket.get("gloves", 0),
+            "soil": basket.get("soil", 0),
+        },
+        "harvest_upgrades": {
+            "car": harvest.get("car", 0),
+            "chain": harvest.get("chain", 0),
+            "fertilizer": harvest.get("fertilizer", 0),
+            "cooldown": harvest.get("cooldown", 0),
+        },
     }
 
 

@@ -134,6 +134,7 @@ from database import (
     _get_users_collection,
     get_user_achievement_level,
     set_user_achievement_level,
+    get_user_achievements_display_data,
     get_user_hidden_achievements_count,
     increment_hidden_achievements_count,
     has_hidden_achievement,
@@ -182,6 +183,7 @@ from database import (
     refund_balance,
     get_user_gather_full_data,
     get_user_harvest_full_data,
+    get_user_dossier,
     perform_harvest_batch_update,
     get_user_shop_inventory,
     has_shop_item,
@@ -2937,50 +2939,52 @@ HIDDEN_ACHIEVEMENTS = {
     }
 }
 
-# Total number of hidden achievements
-TOTAL_HIDDEN_ACHIEVEMENTS = 40
+# Total number of hidden achievements (must match len(HIDDEN_ACHIEVEMENTS))
+TOTAL_HIDDEN_ACHIEVEMENTS = len(HIDDEN_ACHIEVEMENTS)
 
 
-def check_maxed_out_achievement(user_id: int) -> bool:
+def check_maxed_out_achievement(user_id: int, dossier: dict = None) -> bool:
     """Check if user has all upgrades maxed (all GPUs, all gardeners, all gear upgrades, all orchard upgrades).
-    Returns True if achievement was newly unlocked, False otherwise."""
-    # Check all GPUs (10 total)
-    user_gpus = get_user_gpus(user_id)
+    Returns True if achievement was newly unlocked, False otherwise.
+    When dossier is provided (e.g. from get_user_dossier), uses it to avoid extra DB calls."""
+    if dossier is not None:
+        user_gpus = dossier.get("gpus", [])
+        user_gardeners = dossier.get("gardeners", [])
+        basket_upgrades = dossier.get("basket_upgrades", {})
+        harvest_upgrades = dossier.get("harvest_upgrades", {})
+    else:
+        user_gpus = get_user_gpus(user_id)
+        user_gardeners = get_user_gardeners(user_id)
+        basket_upgrades = get_user_basket_upgrades(user_id)
+        harvest_upgrades = get_user_harvest_upgrades(user_id)
+
     all_gpu_names = [gpu["name"] for gpu in GPU_SHOP]
     has_all_gpus = all(gpu_name in user_gpus for gpu_name in all_gpu_names)
-    
-    # Check all gardeners (5 total, with tools)
-    user_gardeners = get_user_gardeners(user_id)
+
     has_all_gardeners = len(user_gardeners) >= 5
     if has_all_gardeners:
-        # Check that all gardeners have tools
         for gardener in user_gardeners:
             if not gardener.get("has_tool", False):
                 has_all_gardeners = False
                 break
-    
-    # Check all gear upgrades (basket, shoes, gloves, soil - all at tier 10)
-    basket_upgrades = get_user_basket_upgrades(user_id)
+
     all_gear_maxed = (
-        basket_upgrades["basket"] >= 10 and
-        basket_upgrades["shoes"] >= 10 and
-        basket_upgrades["gloves"] >= 10 and
-        basket_upgrades["soil"] >= 10
+        basket_upgrades.get("basket", 0) >= 10 and
+        basket_upgrades.get("shoes", 0) >= 10 and
+        basket_upgrades.get("gloves", 0) >= 10 and
+        basket_upgrades.get("soil", 0) >= 10
     )
-    
-    # Check all orchard upgrades (car, chain, fertilizer, cooldown - all at tier 10)
-    harvest_upgrades = get_user_harvest_upgrades(user_id)
+
     all_orchard_maxed = (
-        harvest_upgrades["car"] >= 10 and
-        harvest_upgrades["chain"] >= 10 and
-        harvest_upgrades["fertilizer"] >= 10 and
-        harvest_upgrades["cooldown"] >= 10
+        harvest_upgrades.get("car", 0) >= 10 and
+        harvest_upgrades.get("chain", 0) >= 10 and
+        harvest_upgrades.get("fertilizer", 0) >= 10 and
+        harvest_upgrades.get("cooldown", 0) >= 10
     )
-    
-    # If all conditions are met, unlock the achievement
+
     if has_all_gpus and has_all_gardeners and all_gear_maxed and all_orchard_maxed:
         return unlock_hidden_achievement(user_id, "maxed_out")
-    
+
     return False
 
 
@@ -6765,11 +6769,15 @@ async def on_member_join(member):
         except Exception as e:
             print(f"[Invites] Error sending welcome message in {guild.name}: {e}")
     
-    # Assign gatherer role
+    # Assign gatherer role (PLANTER I for new users) and Bloom rank role (PINE I for new users)
     try:
         await assign_gatherer_role(member, guild)
     except Exception as e:
         print(f"Error assigning gatherer role to user {member.id}: {e}")
+    try:
+        await assign_bloom_rank_role(member, guild)
+    except Exception as e:
+        print(f"Error assigning bloom rank role to user {member.id}: {e}")
 
 
 @bot.event
@@ -9639,118 +9647,71 @@ async def achievements(interaction: discord.Interaction, hidden: bool = False):
             return
         
         user_id = interaction.user.id
-        total_items = get_user_total_items(user_id)
-        hidden_achievements_count = get_user_hidden_achievements_count(user_id)
+        # Single DB read for all achievement data (avoids 66+ round-trips); run in thread to not block event loop
+        data = await asyncio.to_thread(get_user_achievements_display_data, user_id)
+        if data is None:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Could not load your data. Please try again.", ephemeral=True)
+            return
+
+        achievements_data = data["achievements"]
+        total_items = data["total_items"]
+        hidden_achievements_map = achievements_data.get("hidden_achievements", {})
+        hidden_achievements_count = int(achievements_data.get("hidden_achievements_discovered", 0))
+        full_data = {"achievements": achievements_data}
         
-        # If hidden=True, show only hidden achievements list
+        # If hidden=True, show only hidden achievements list (all from in-memory data)
         if hidden:
-            # Build list of hidden achievement fields
             hidden_fields = []
-            for key, data in HIDDEN_ACHIEVEMENTS.items():
-                name = data["name"]
-                if has_hidden_achievement(user_id, key):
-                    desc = data["description"]
-                else:
-                    desc = "???????"
+            for key, h_data in HIDDEN_ACHIEVEMENTS.items():
+                name = h_data["name"]
+                desc = h_data["description"] if hidden_achievements_map.get(key, False) else "???????"
                 hidden_fields.append((name, desc))
 
-            # Discord allows a maximum of 25 fields per embed, so chunk if needed
             MAX_FIELDS_PER_EMBED = 25
             embeds = []
             for i in range(0, len(hidden_fields), MAX_FIELDS_PER_EMBED):
                 chunk = hidden_fields[i:i + MAX_FIELDS_PER_EMBED]
-
-                if i == 0:
-                    title = f"🔒 {interaction.user.name}'s Hidden Achievements"
-                else:
-                    page = i // MAX_FIELDS_PER_EMBED + 1
-                    title = f"🔒 {interaction.user.name}'s Hidden Achievements (Page {page})"
-
-                embed = discord.Embed(
-                    title=title,
-                    color=discord.Color.dark_gray()
-                )
+                title = f"🔒 {interaction.user.name}'s Hidden Achievements" if i == 0 else f"🔒 {interaction.user.name}'s Hidden Achievements (Page {i // MAX_FIELDS_PER_EMBED + 1})"
+                embed = discord.Embed(title=title, color=discord.Color.dark_gray())
                 for name, desc in chunk:
                     embed.add_field(name=name, value=desc, inline=False)
-
                 embed.set_footer(text=f"Discovered: {hidden_achievements_count}/{TOTAL_HIDDEN_ACHIEVEMENTS}")
                 embeds.append(embed)
 
-            # Send embeds, respecting Discord limits (max 10 embeds per message)
             if len(embeds) <= 10:
                 await safe_interaction_response(interaction, interaction.followup.send, embeds=embeds)
             else:
                 for i in range(0, len(embeds), 10):
-                    await safe_interaction_response(
-                        interaction,
-                        interaction.followup.send,
-                        embeds=embeds[i:i + 10],
-                    )
+                    await safe_interaction_response(interaction, interaction.followup.send, embeds=embeds[i:i + 10])
             return
         
-        # Create embed
+        # Main achievements embed: use in-memory multiplier and levels (no extra DB calls)
+        total_boost_multiplier = get_achievement_multiplier(user_id, full_data=full_data)
+        total_boost_percent = (total_boost_multiplier - 1.0) * 100
+        
         embed = discord.Embed(
             title=f"🏆 {interaction.user.name}'s Achievements",
             color=discord.Color.gold()
         )
         
-        # Calculate total boost
-        total_boost_multiplier = get_achievement_multiplier(user_id)
-        total_boost_percent = (total_boost_multiplier - 1.0) * 100
-        
-        # Process each achievement category
         for achievement_name, achievement_data in ACHIEVEMENTS.items():
-            current_level = get_user_achievement_level(user_id, achievement_name)
+            current_level = int(achievements_data.get(achievement_name, 0))
             levels = achievement_data["levels"]
-            
-            # Get the current level data
-            if current_level < len(levels):
-                current_level_data = levels[current_level]
-            else:
-                current_level_data = levels[-1]  # Use max level if somehow exceeded
-            
-            # Build progress bar (squares = max earnable levels, excluding level 0)
-            # e.g. 10 levels (1-10) = 10 squares, 7 levels (1-7) = 7 squares
-            max_earnable = len(levels) - 1  # Exclude level 0
-            progress_bar = ""
+            current_level_data = levels[current_level] if current_level < len(levels) else levels[-1]
+            max_earnable = len(levels) - 1
             num_green_squares = current_level
-            for i in range(max_earnable):
-                if i < num_green_squares:
-                    progress_bar += PROGRESS_Y  # Green square for completed
-                else:
-                    progress_bar += PROGRESS_N  # White square for not completed
-            
-            # Get achievement name and description
-            achievement_display_name = current_level_data["name"]
-            achievement_description = current_level_data["description"]
+            progress_bar = "".join(PROGRESS_Y if i < num_green_squares else PROGRESS_N for i in range(max_earnable))
             boost_percent = current_level_data["boost"] * 100
-            
-            # Build field value with bold description
-            field_value = f"**{achievement_description}**\n{progress_bar}\n"
-            if current_level > 0:
-                field_value += f"💰 Boost: **{boost_percent:.1f}%**"
-            else:
-                field_value += "💰 Boost: **0%**"
-            
+            field_value = f"**{current_level_data['description']}**\n{progress_bar}\n"
+            field_value += f"💰 Boost: **{boost_percent:.1f}%**" if current_level > 0 else "💰 Boost: **0%**"
             embed.add_field(
-                name=achievement_display_name,
+                name=current_level_data["name"],
                 value=field_value,
                 inline=False
             )
         
-        # Add total boost at the bottom
-        embed.add_field(
-            name="━━━━━━━━━━━━━━━━━━━━",
-            value=f"💰 **Total Boost: {total_boost_percent:.1f}%**",
-            inline=False
-        )
-        
-        # Add hidden achievements count at the end
-        embed.add_field(
-            name="━━━━━━━━━━━━━━━━━━━━",
-            value=f"**Hidden Achievements:** {hidden_achievements_count}/{TOTAL_HIDDEN_ACHIEVEMENTS}",
-            inline=False
-        )
+        embed.add_field(name="━━━━━━━━━━━━━━━━━━━━", value=f"💰 **Total Boost: {total_boost_percent:.1f}%**", inline=False)
+        embed.add_field(name="━━━━━━━━━━━━━━━━━━━━", value=f"**Hidden Achievements:** {hidden_achievements_count}/{TOTAL_HIDDEN_ACHIEVEMENTS}", inline=False)
         
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
     except Exception as e:
@@ -10601,23 +10562,23 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
 #     await interaction.followup.send(f"{interaction.user.name}, you have **${user_balance:.2f}**.")
 
 
-# userstats command
+# userstats command (single DB read via get_user_dossier)
 @bot.tree.command(name="userstats", description="View your statistics!")
 async def userstats(interaction: discord.Interaction):
     try:
         if not await safe_defer(interaction, ephemeral=False):
             return
-        
-        user_id = interaction.user.id
-        user_balance = get_user_balance(user_id)
-        total_items = get_user_total_items(user_id)
-        cycle_plants = get_user_bloom_cycle_plants(user_id)
-        bloom_count = get_user_bloom_count(user_id)
 
-        # Calculate items needed for next rankup (based on bloom cycle plants, not lifetime)
+        user_id = interaction.user.id
+        doc = await asyncio.to_thread(get_user_dossier, user_id)
+
+        user_balance = doc["balance"]
+        total_items = doc["gather_stats_total_items"]
+        cycle_plants = doc["bloom_cycle_plants"]
+        bloom_count = doc["bloom_count"]
+
         items_needed = None
         next_rank = None
-        
         if cycle_plants < 50:
             items_needed = 50 - cycle_plants
             next_rank = "PLANTER II"
@@ -10646,80 +10607,66 @@ async def userstats(interaction: discord.Interaction):
             items_needed = 15000 - cycle_plants
             next_rank = "PLANTER X"
         else:
-            # Max rank achieved this cycle
             items_needed = 0
             next_rank = "MAX RANK"
-        
+
+        bloom_rank = _bloom_count_to_rank(bloom_count)
+        tree_rings = doc["tree_rings"]
+        bloom_multiplier = 1.0 + (tree_rings * 0.005)
+        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data={"bloom_count": bloom_count})
+        water_streak = doc["consecutive_water_days"]
+        daily_rate = 0.04 if doc["shop_inventory"].get("golden_watering_can", 0) >= 1 else 0.02
+        daily_bonus_multiplier = 1.0 + (water_streak * daily_rate)
+        ach_data = doc["achievements"]
+        hoe_attunement = doc["hoe_enchantment"]
+        tractor_attunement = doc["tractor_enchantment"]
+
         embed = discord.Embed(
             title=f"📊 {interaction.user.name}'s Stats",
             color=discord.Color.blue()
         )
-        
         embed.add_field(name="💰 Balance", value=f"**${user_balance:.2f}**", inline=True)
         embed.add_field(name="🌱 Plants Gathered (Total)", value=f"**{total_items}** plants", inline=True)
         if bloom_count > 0:
             embed.add_field(name="🌿 Plants Gathered (This Bloom)", value=f"**{cycle_plants}** plants", inline=True)
-        
-        # Add Bloom Rank and Tree Rings
-        bloom_rank = get_bloom_rank(user_id)
-        tree_rings = get_user_tree_rings(user_id)
-        bloom_multiplier = get_bloom_multiplier(user_id)
         embed.add_field(name="🌲 Bloom Rank", value=f"**{bloom_rank}**", inline=True)
         embed.add_field(name="<:TreeRing:1474244868288282817> Tree Rings", value=f"**{tree_rings}** ({bloom_multiplier:.2f}x)", inline=True)
-        
-        # Add Rank Perma Buff (only if not PINE I) - 1.2x per rank-up
-        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
         if bloom_rank != "PINE I":
             embed.add_field(name="⭐ Rank Boost", value=f"**{rank_perma_buff_multiplier:.2f}x**", inline=True)
-        
-        # Add Water Streak
-        water_streak = get_user_consecutive_water_days(user_id)
-        daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
         day_text = "day" if water_streak == 1 else "days"
         embed.add_field(name="💧 Water Streak", value=f"**{water_streak}** {day_text} ({daily_bonus_multiplier:.2f}x)", inline=True)
-        
-        # Add Gather Attunement (Hoe)
-        hoe_attunement = get_user_hoe_attunement(user_id)
         if hoe_attunement:
             hoe_name = hoe_attunement.get("name", "Unknown")
             hoe_rarity = hoe_attunement.get("rarity", "COMMON")
-            hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]")
-            embed.add_field(name="✨ Gather Attunement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=True)
+            embed.add_field(name="✨ Gather Attunement", value=f"**{hoe_name}** {RARITY_EMOJI.get(hoe_rarity, f'[{hoe_rarity}]')}", inline=True)
         else:
             embed.add_field(name="✨ Gather Attunement", value="**None**", inline=True)
-        
-        # Add Harvest Attunement (Tractor)
-        tractor_attunement = get_user_tractor_attunement(user_id)
         if tractor_attunement:
             tractor_name = tractor_attunement.get("name", "Unknown")
             tractor_rarity = tractor_attunement.get("rarity", "COMMON")
-            tractor_rarity_display = RARITY_EMOJI.get(tractor_rarity, f"[{tractor_rarity}]")
-            embed.add_field(name="✨ Harvest Attunement", value=f"**{tractor_name}** {tractor_rarity_display}", inline=True)
+            embed.add_field(name="✨ Harvest Attunement", value=f"**{tractor_name}** {RARITY_EMOJI.get(tractor_rarity, f'[{tractor_rarity}]')}", inline=True)
         else:
             embed.add_field(name="✨ Harvest Attunement", value="**None**", inline=True)
-        
         if items_needed == 0:
             embed.add_field(name="🏆 Rank Status", value=f"**{next_rank}** - You've reached **PLANTER X**!", inline=False)
         else:
             embed.add_field(name="📈 Next Rank", value=f"**{items_needed}** more plants until **{next_rank}**", inline=False)
-        
-        # Retroactive maxed_out check (e.g. if user maxed via /gear before this path called the check)
-        maxed_out_just_unlocked = check_maxed_out_achievement(user_id)
+
+        maxed_out_just_unlocked = check_maxed_out_achievement(user_id, dossier=doc)
         if maxed_out_just_unlocked:
             await send_hidden_achievement_notification(interaction, "maxed_out")
-        
-        # Game Completion: (achievements at max level + hidden achievements) / (total achievement categories + total hidden)
+
         total_achievement_categories = len(ACHIEVEMENTS)
         total_completion_slots = total_achievement_categories + TOTAL_HIDDEN_ACHIEVEMENTS
         completed_regular = 0
-        for ach_name, ach_data in ACHIEVEMENTS.items():
-            levels = ach_data.get("levels", [])
+        for ach_name, ach_def in ACHIEVEMENTS.items():
+            levels = ach_def.get("levels", [])
             if not levels:
                 continue
             max_level = max(l["level"] for l in levels)
-            if get_user_achievement_level(user_id, ach_name) >= max_level:
+            if int(ach_data.get(ach_name, 0)) >= max_level:
                 completed_regular += 1
-        completed_hidden = get_user_hidden_achievements_count(user_id)
+        completed_hidden = int(ach_data.get("hidden_achievements_discovered", 0))
         completed_slots = completed_regular + completed_hidden
         completion_pct = round((completed_slots / total_completion_slots) * 100) if total_completion_slots else 0
         completion_pct = min(100, max(0, completion_pct))
@@ -10728,7 +10675,7 @@ async def userstats(interaction: discord.Interaction):
         filled = min(bar_length, max(0, filled))
         progress_bar = "\u2588" * filled + "\u2581" * (bar_length - filled)
         embed.add_field(name="GAME COMPLETION", value=f"{progress_bar} **{completion_pct}%**", inline=False)
-        
+
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
     except Exception as e:
         print(f"Error in userstats command: {e}")
@@ -10739,7 +10686,7 @@ async def userstats(interaction: discord.Interaction):
 @bot.tree.command(name="almanac", description="View your collection of your gathered items!")
 async def almanac(interaction: discord.Interaction):
     try:
-        if not await safe_defer(interaction, ephemeral=False):
+        if not await safe_defer(interaction, ephemeral=True):
             return
         
         user_id = interaction.user.id
@@ -10751,7 +10698,7 @@ async def almanac(interaction: discord.Interaction):
                 description="Your collection is empty! Start gathering items with `/gather` or `/harvest` to fill it up!",
                 color=discord.Color.orange()
             )
-            await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
             return
         
         # Build the almanac text
@@ -10759,8 +10706,11 @@ async def almanac(interaction: discord.Interaction):
         for item_name, count in user_items.items():
             # Get description or use a default one
             description = ITEM_DESCRIPTIONS.get(item_name, "A mysterious item from nature!")
-            # Format: [ ITEM NAME ] xCount : "Description"
-            almanac_text += f"[ {item_name.upper()} ] x{count} : \"{description}\"\n"
+            # Use custom emoji for Flowey/Raspberry/Golden Apple/Enchanted Golden Apple, else from name
+            emoji = get_item_display_emoji(item_name)
+            emoji_prefix = f"{emoji} " if emoji else ""
+            # Format: emoji [ ITEM NAME ] xCount : "Description"
+            almanac_text += f"{emoji_prefix}[ {item_name.upper()} ] x{count} : \"{description}\"\n"
         
         embed = discord.Embed(
             title=f"{interaction.user.name}'s Almanac",
@@ -10768,7 +10718,7 @@ async def almanac(interaction: discord.Interaction):
             color=discord.Color.green()
         )
         
-        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
     except Exception as e:
         print(f"Error in almanac command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
@@ -12556,10 +12506,12 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
         user_id = target.id
         display_name = getattr(target, "display_name", None) or getattr(target, "name", "Unknown")
 
-        # ── 1. Userstats ──
-        user_balance = get_user_balance(user_id)
-        total_items = get_user_total_items(user_id)
-        cycle_plants = get_user_bloom_cycle_plants(user_id)
+        # Single DB read for full user dossier (replaces 25+ individual queries)
+        doc = await asyncio.to_thread(get_user_dossier, user_id)
+
+        user_balance = doc["balance"]
+        total_items = doc["gather_stats_total_items"]
+        cycle_plants = doc["bloom_cycle_plants"]
         items_needed = None
         next_rank = None
         if cycle_plants < 50:
@@ -12593,6 +12545,23 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
             items_needed = 0
             next_rank = "MAX RANK"
 
+        bloom_rank = _bloom_count_to_rank(doc["bloom_count"])
+        tree_rings = doc["tree_rings"]
+        bloom_multiplier = 1.0 + (tree_rings * 0.005)
+        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data={"bloom_count": doc["bloom_count"]})
+        water_streak = doc["consecutive_water_days"]
+        daily_rate = 0.04 if doc["shop_inventory"].get("golden_watering_can", 0) >= 1 else 0.02
+        daily_bonus_multiplier = 1.0 + (water_streak * daily_rate)
+        hoe_attunement = doc["hoe_enchantment"]
+        tractor_attunement = doc["tractor_enchantment"]
+        ach_data = doc["achievements"]
+        hidden_map = ach_data.get("hidden_achievements", {})
+        hidden_achievements_count = int(ach_data.get("hidden_achievements_discovered", 0))
+        full_data_ach = {"achievements": ach_data}
+        total_boost_multiplier = get_achievement_multiplier(user_id, full_data=full_data_ach)
+        total_boost_percent = (total_boost_multiplier - 1.0) * 100
+
+        # ── 1. Userstats embed ──
         embed_stats = discord.Embed(
             title=f"📊 {display_name}'s Stats (userstats)",
             color=discord.Color.blue()
@@ -12600,19 +12569,12 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
         embed_stats.add_field(name="💰 Balance", value=f"**${user_balance:.2f}**", inline=True)
         embed_stats.add_field(name="🌱 Plants Gathered (Total)", value=f"**{total_items}** plants", inline=True)
         embed_stats.add_field(name="🌿 Plants Gathered (This Bloom)", value=f"**{cycle_plants}** plants", inline=True)
-        bloom_rank = get_bloom_rank(user_id)
-        tree_rings = get_user_tree_rings(user_id)
-        bloom_multiplier = get_bloom_multiplier(user_id)
         embed_stats.add_field(name="🌲 Bloom Rank", value=f"**{bloom_rank}**", inline=True)
         embed_stats.add_field(name="<:TreeRing:1474244868288282817> Tree Rings", value=f"**{tree_rings}** ({bloom_multiplier:.2f}x)", inline=True)
-        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
         if bloom_rank != "PINE I":
             embed_stats.add_field(name="⭐ Rank Boost", value=f"**{rank_perma_buff_multiplier:.2f}x**", inline=True)
-        water_streak = get_user_consecutive_water_days(user_id)
-        daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
         day_text = "day" if water_streak == 1 else "days"
         embed_stats.add_field(name="💧 Water Streak", value=f"**{water_streak}** {day_text} ({daily_bonus_multiplier:.2f}x)", inline=True)
-        hoe_attunement = get_user_hoe_attunement(user_id)
         if hoe_attunement:
             hoe_name = hoe_attunement.get("name", "Unknown")
             hoe_rarity = hoe_attunement.get("rarity", "COMMON")
@@ -12620,7 +12582,6 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
             embed_stats.add_field(name="✨ Gather Attunement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=True)
         else:
             embed_stats.add_field(name="✨ Gather Attunement", value="**None**", inline=True)
-        tractor_attunement = get_user_tractor_attunement(user_id)
         if tractor_attunement:
             tractor_name = tractor_attunement.get("name", "Unknown")
             tractor_rarity = tractor_attunement.get("rarity", "COMMON")
@@ -12634,11 +12595,10 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
             embed_stats.add_field(name="📈 Next Rank", value=f"**{items_needed}** more plants until **{next_rank}**", inline=False)
 
         # ── 2. Gathered items (almanac) ──
-        user_items = get_user_items(user_id)
+        user_items = doc["items"]
         if user_items:
-            almanac_lines = []
-            for item_name, count in user_items.items():
-                almanac_lines.append(f"[ {item_name.upper()} ] x{count}")
+            sorted_items = sorted(user_items.items(), key=lambda x: x[1], reverse=True)
+            almanac_lines = [f"[ {name.upper()} ] x{count}" for name, count in sorted_items]
             embed_items = discord.Embed(
                 title=f"📚 {display_name}'s Gathered Items (Almanac)",
                 description="\n".join(almanac_lines)[:4000] or "—",
@@ -12652,7 +12612,7 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
             )
 
         # ── 3. Shop inventory ──
-        shop_inv = get_user_shop_inventory(user_id)
+        shop_inv = doc["shop_inventory"]
         if shop_inv:
             shop_lines = [f"**{k}**: {v}" for k, v in shop_inv.items()]
             embed_shop = discord.Embed(
@@ -12668,14 +12628,12 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
             )
 
         # ── 4. Achievements ──
-        total_boost_multiplier = get_achievement_multiplier(user_id)
-        total_boost_percent = (total_boost_multiplier - 1.0) * 100
         embed_ach = discord.Embed(
             title=f"🏆 {display_name}'s Achievements",
             color=discord.Color.gold()
         )
         for achievement_name, achievement_data in ACHIEVEMENTS.items():
-            current_level = get_user_achievement_level(user_id, achievement_name)
+            current_level = int(ach_data.get(achievement_name, 0))
             levels = achievement_data["levels"]
             if current_level < len(levels):
                 current_level_data = levels[current_level]
@@ -12693,7 +12651,6 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
         embed_ach.add_field(name="━━━ Total Boost ━━━", value=f"**{total_boost_percent:.1f}%**", inline=False)
 
         # ── 5. Hidden achievements ──
-        hidden_achievements_count = get_user_hidden_achievements_count(user_id)
         embed_hidden = discord.Embed(
             title=f"🔒 {display_name}'s Hidden Achievements",
             description=f"Discovered: **{hidden_achievements_count}/{TOTAL_HIDDEN_ACHIEVEMENTS}**",
@@ -12701,9 +12658,8 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
         )
         for key, data in HIDDEN_ACHIEVEMENTS.items():
             name = data["name"]
-            if has_hidden_achievement(user_id, key):
-                desc = data["description"]
-                embed_hidden.add_field(name=name, value=desc, inline=False)
+            if hidden_map.get(key, False):
+                embed_hidden.add_field(name=name, value=data["description"], inline=False)
             else:
                 embed_hidden.add_field(name=name, value="???????", inline=False)
 
@@ -16954,7 +16910,7 @@ async def gathership(interaction: discord.Interaction, user: discord.Member, bet
         embed = discord.Embed(
             title="⚓ MAYFLOWER ⚓",
             description=f"{interaction.user.mention} is challenging {user.mention} to **MAYFLOWER**!\n\n{user.mention}, click **Join** to accept. Host can **Start** when ready.",
-            color=discord.Color.blue()
+git a            color=discord.Color.blue()
         )
         embed.add_field(name="💰 Bet", value=f"${bet:.2f} each", inline=True)
         embed.add_field(name="🚢 Ships", value=str(ships), inline=True)
