@@ -6656,7 +6656,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.11.0"
+            name="running /gather on V0.11.1"
         )
     )
     try:
@@ -16910,7 +16910,7 @@ async def gathership(interaction: discord.Interaction, user: discord.Member, bet
         embed = discord.Embed(
             title="⚓ MAYFLOWER ⚓",
             description=f"{interaction.user.mention} is challenging {user.mention} to **MAYFLOWER**!\n\n{user.mention}, click **Join** to accept. Host can **Start** when ready.",
-git a            color=discord.Color.blue()
+            color=discord.Color.blue()
         )
         embed.add_field(name="💰 Bet", value=f"${bet:.2f} each", inline=True)
         embed.add_field(name="🚢 Ships", value=str(ships), inline=True)
