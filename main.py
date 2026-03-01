@@ -6688,9 +6688,9 @@ async def on_ready():
     bot.loop.create_task(send_market_news_loop())
     print("Started automatic market news alerts")
     
-    # Start the coinbase update task
+    # Start the fernbase update task
     bot.loop.create_task(update_all_coinbase())
-    print("Started automatic coinbase updates")
+    print("Started automatic fernbase updates")
     
     # Start the gardener background task
     bot.loop.create_task(gardener_background_task())
@@ -14650,11 +14650,11 @@ def get_crypto_change_emoji(change_5min: float) -> str:
         return "🟢"
 
 async def update_coinbase_message(guild: discord.Guild):
-    """Update or create the coinbase message in #coinbase channel."""
-    # Find the coinbase channel
-    coinbase_channel = discord.utils.get(guild.text_channels, name="coinbase")
+    """Update or create the crypto market message in #fernbase channel."""
+    # Find the fernbase channel
+    fernbase_channel = discord.utils.get(guild.text_channels, name="fernbase")
     
-    if not coinbase_channel:
+    if not fernbase_channel:
         return  # Channel doesn't exist, skip
     
     try:
@@ -14706,25 +14706,25 @@ async def update_coinbase_message(guild: discord.Guild):
         embed.timestamp = discord.utils.utcnow()
         
         # Try to edit existing message, or create new one
-        async for message in coinbase_channel.history(limit=50):
+        async for message in fernbase_channel.history(limit=50):
             if message.author == bot.user and message.embeds and message.embeds[0].title == "💰 CRYPTO MARKET 💰":
                 await message.edit(embed=embed)
                 return
         
         # No existing message found, create new one
-        await coinbase_channel.send(embed=embed)
+        await fernbase_channel.send(embed=embed)
         
     except Exception as e:
-        print(f"Error updating coinbase in {guild.name}: {e}")
+        print(f"Error updating fernbase in {guild.name}: {e}")
 
 async def update_all_coinbase():
-    """Background task to update all coinbase channels every minute."""
+    """Background task to update all #fernbase channels every minute."""
     await bot.wait_until_ready()
     
     # Wait a bit for guilds to fully load
     await asyncio.sleep(5)
     
-    logging.info("Coinbase update task started")
+    logging.info("Fernbase update task started")
     
     while not bot.is_closed():
         try:
@@ -14732,12 +14732,12 @@ async def update_all_coinbase():
             logging.info("Starting crypto price update...")
             await update_crypto_prices_market()
             
-            # Update coinbase channels for all guilds the bot is in
+            # Update fernbase channels for all guilds the bot is in
             for guild in bot.guilds:
                 await update_coinbase_message(guild)
                 await asyncio.sleep(1)  # Small delay between updates
         except Exception as e:
-            logging.error(f"Error in coinbase update task: {e}", exc_info=True)
+            logging.error(f"Error in fernbase update task: {e}", exc_info=True)
         
         # Wait 60 seconds before next update
         await asyncio.sleep(60)
