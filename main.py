@@ -102,6 +102,7 @@ from database import (
     get_active_events,
     get_active_events_cached,
     get_active_event_by_type,
+    get_expired_events,
     set_active_event,
     clear_event,
     clear_expired_events,
@@ -6656,7 +6657,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.11.1"
+            name="running /gather on V0.11.1 :3"
         )
     )
     try:
@@ -6664,7 +6665,16 @@ async def on_ready():
         print(f"Synced {len(synced)} commands")
     except Exception as e:
         print(f"Error syncing commands: {e}")
-    
+
+    # If bot restarted during an event, send end embeds for any expired events so #events channel stays consistent
+    try:
+        await _send_end_embeds_for_expired_events()
+        print("Event recovery at startup completed")
+    except Exception as e:
+        print(f"Error during event recovery at startup: {e}")
+        import traceback
+        traceback.print_exc()
+
     # Start the leaderboard update task
     bot.loop.create_task(update_all_leaderboards())
     print("Started automatic leaderboard updates")
@@ -10709,8 +10719,10 @@ async def almanac(interaction: discord.Interaction):
             # Use custom emoji for Flowey/Raspberry/Golden Apple/Enchanted Golden Apple, else from name
             emoji = get_item_display_emoji(item_name)
             emoji_prefix = f"{emoji} " if emoji else ""
-            # Format: emoji [ ITEM NAME ] xCount : "Description"
-            almanac_text += f"{emoji_prefix}[ {item_name.upper()} ] x{count} : \"{description}\"\n"
+            # Plant name without the trailing emoji (avoid double emoji)
+            display_name = (item_name.replace(emoji, "").strip() if emoji else item_name).upper()
+            # Format: emoji PLANT NAME xCount : "Description"
+            almanac_text += f"{emoji_prefix}{display_name} x{count} : \"{description}\"\n"
         
         embed = discord.Embed(
             title=f"{interaction.user.name}'s Almanac",
@@ -15282,10 +15294,10 @@ async def hourly_event_check():
     
     while not bot.is_closed():
         try:
-            # CRITICAL: Clean up expired events BEFORE checking for existing events
-            # This prevents stuck/expired events from blocking new events
+            # CRITICAL: Send end embeds for any expired events first (e.g. after bot restart), then clear from DB
+            await _send_end_embeds_for_expired_events()
             clear_expired_events()
-            
+
             # Check if there's already an active hourly event
             existing_hourly = get_active_event_by_type("hourly")
             if existing_hourly:
@@ -15403,10 +15415,10 @@ async def daily_event_check():
     
     while not bot.is_closed():
         try:
-            # CRITICAL: Clean up expired events BEFORE checking for existing events
-            # This prevents stuck/expired events from blocking new events
+            # CRITICAL: Send end embeds for any expired events first (e.g. after bot restart), then clear from DB
+            await _send_end_embeds_for_expired_events()
             clear_expired_events()
-            
+
             # Check if there's already an active daily event
             existing_daily = get_active_event_by_type("daily")
             if existing_daily:
@@ -15509,13 +15521,13 @@ async def daily_event_check():
 
 
 async def event_cleanup_task():
-    """Background task to clean up any orphaned expired events."""
+    """Background task to clean up any orphaned expired events. Sends end embeds to #events before clearing."""
     await bot.wait_until_ready()
     await asyncio.sleep(5)
-    
+
     while not bot.is_closed():
         try:
-            # Clean up any expired events in database (shouldn't be needed with timing-based approach, but safety net)
+            await _send_end_embeds_for_expired_events()
             clear_expired_events()
             await asyncio.sleep(60)  # Check every minute
         except Exception as e:
@@ -15533,6 +15545,20 @@ async def _end_active_event_for_all_guilds(event: dict):
     clear_event(event.get("event_id", ""))
 
 
+async def _send_end_embeds_for_expired_events():
+    """Get any events that have already ended, send their end embeds to #events in all guilds, then clear them. Call on startup and before clear_expired_events() in loops."""
+    expired = get_expired_events()
+    for event in expired:
+        try:
+            await _end_active_event_for_all_guilds(event)
+            print(f"Event recovery: sent end embed for {event.get('event_type')} '{event.get('event_name')}'")
+        except Exception as e:
+            print(f"Error sending end embed for expired event {event.get('event_id')}: {e}")
+            clear_event(event.get("event_id", ""))
+    if expired:
+        clear_expired_events()
+
+
 async def celestial_event_check():
     """At 4:30 EST roll 50% for Solar Eclipse (until 19:30 EST). At 19:30 EST roll 50% for Blood Moon (until 4:30 EST next day). Start/end embeds in #events."""
     from zoneinfo import ZoneInfo
@@ -15543,6 +15569,7 @@ async def celestial_event_check():
     est = ZoneInfo("America/New_York")
     while not bot.is_closed():
         try:
+            await _send_end_embeds_for_expired_events()
             clear_expired_events()
             now_utc = datetime.datetime.now(datetime.timezone.utc)
             now_est = now_utc.astimezone(est)

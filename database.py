@@ -1453,6 +1453,24 @@ def clear_event(event_id: str) -> None:
     _clear_events_cache()
 
 
+def get_expired_events() -> list:
+    """Return all events that have already ended (end_time <= now). Used to send end embeds before clearing."""
+    events = _get_events_collection()
+    current_time = time.time()
+    cursor = events.find({"end_time": {"$lte": current_time}})
+    results = []
+    for doc in cursor:
+        results.append({
+            "event_id": doc.get("event_id"),
+            "event_type": doc.get("event_type"),
+            "event_name": doc.get("event_name"),
+            "start_time": float(doc.get("start_time", 0)),
+            "end_time": float(doc.get("end_time", 0)),
+            "effects": doc.get("effects", {})
+        })
+    return results
+
+
 def clear_expired_events() -> None:
     """Remove all expired events."""
     events = _get_events_collection()
