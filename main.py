@@ -12513,6 +12513,11 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
             await safe_interaction_response(interaction, interaction.followup.send,
                 "❌ **Error**: This command can only be used in a server.", ephemeral=True)
             return
+        if not hasattr(interaction.channel, 'name') or interaction.channel.name != "hidden":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
+                ephemeral=True)
+            return
 
         target = member if member is not None else interaction.user
         user_id = target.id
@@ -12562,11 +12567,12 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
         bloom_multiplier = 1.0 + (tree_rings * 0.005)
         rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data={"bloom_count": doc["bloom_count"]})
         water_streak = doc["consecutive_water_days"]
-        daily_rate = 0.04 if doc["shop_inventory"].get("golden_watering_can", 0) >= 1 else 0.02
+        shop_inv = doc.get("shop_inventory") or {}
+        daily_rate = 0.04 if shop_inv.get("golden_watering_can", 0) >= 1 else 0.02
         daily_bonus_multiplier = 1.0 + (water_streak * daily_rate)
-        hoe_attunement = doc["hoe_enchantment"]
-        tractor_attunement = doc["tractor_enchantment"]
-        ach_data = doc["achievements"]
+        hoe_attunement = doc.get("hoe_enchantment")
+        tractor_attunement = doc.get("tractor_enchantment")
+        ach_data = doc.get("achievements") or {}
         hidden_map = ach_data.get("hidden_achievements", {})
         hidden_achievements_count = int(ach_data.get("hidden_achievements_discovered", 0))
         full_data_ach = {"achievements": ach_data}
@@ -12607,7 +12613,7 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
             embed_stats.add_field(name="📈 Next Rank", value=f"**{items_needed}** more plants until **{next_rank}**", inline=False)
 
         # ── 2. Gathered items (almanac) ──
-        user_items = doc["items"]
+        user_items = doc.get("items") or {}
         if user_items:
             sorted_items = sorted(user_items.items(), key=lambda x: x[1], reverse=True)
             almanac_lines = [f"[ {name.upper()} ] x{count}" for name, count in sorted_items]
@@ -12624,7 +12630,6 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
             )
 
         # ── 3. Shop inventory ──
-        shop_inv = doc["shop_inventory"]
         if shop_inv:
             shop_lines = [f"**{k}**: {v}" for k, v in shop_inv.items()]
             embed_shop = discord.Embed(
@@ -12703,9 +12708,11 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
         )
 
         await safe_interaction_response(interaction, interaction.followup.send,
-            embeds=[embed_stats, embed_items, embed_shop, embed_ach, embed_hidden, embed_ref])
+            embeds=[embed_stats, embed_items, embed_shop, embed_ach, embed_hidden, embed_ref], ephemeral=True)
     except Exception as e:
+        import traceback
         print(f"Error in user admin command: {e}")
+        traceback.print_exc()
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
