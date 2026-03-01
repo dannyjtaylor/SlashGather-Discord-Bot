@@ -514,16 +514,16 @@ GARDENER_TOOLS = {
 
 # GPU shop definitions
 GPU_SHOP = [
-    {"name": "NATIVIDIA RooTX 3050", "percent_increase": 30, "seconds_increase": 3, "price": 600},
-    {"name": "NATIVIDIA RooTX 2060", "percent_increase": 40, "seconds_increase": 4, "price": 1500},
-    {"name": "Plantel Barc B580", "percent_increase": 60, "seconds_increase": 5, "price": 4000},
-    {"name": "NATIVIDIA RooTX 3070", "percent_increase": 90, "seconds_increase": 8, "price": 10000},
-    {"name": "RayMD RX 5700XT", "percent_increase": 180, "seconds_increase": 12, "price": 50000},
-    {"name": "NATIVIDIA GrowTX 1080-Ti", "percent_increase": 300, "seconds_increase": 20, "price": 110000},
-    {"name": "RayMD RX 9060-XT", "percent_increase": 540, "seconds_increase": 30, "price": 200000},
-    {"name": "NATIVIDIA RooTX 4070 Ti Super", "percent_increase": 900, "seconds_increase": 45, "price": 400000},
-    {"name": "NATIVIDIA RooTX 4090", "percent_increase": 1500, "seconds_increase": 60, "price": 1000000},
-    {"name": "NATIVIDIA RooTX 5090", "percent_increase": 5000, "seconds_increase": 100, "price": 2000000},
+    {"name": "NATIVIDIA RooTX 3050", "percent_increase": 50, "seconds_increase": 3, "price": 600},
+    {"name": "NATIVIDIA RooTX 2060", "percent_increase": 70, "seconds_increase": 4, "price": 1500},
+    {"name": "Plantel Barc B580", "percent_increase": 100, "seconds_increase": 5, "price": 4000},
+    {"name": "NATIVIDIA RooTX 3070", "percent_increase": 150, "seconds_increase": 8, "price": 10000},
+    {"name": "RayMD RX 5700XT", "percent_increase": 300, "seconds_increase": 12, "price": 50000},
+    {"name": "NATIVIDIA GrowTX 1080-Ti", "percent_increase": 500, "seconds_increase": 20, "price": 110000},
+    {"name": "RayMD RX 9060-XT", "percent_increase": 750, "seconds_increase": 30, "price": 200000},
+    {"name": "NATIVIDIA RooTX 4070 Ti Super", "percent_increase": 1200, "seconds_increase": 45, "price": 400000},
+    {"name": "NATIVIDIA RooTX 4090", "percent_increase": 2000, "seconds_increase": 60, "price": 1000000},
+    {"name": "NATIVIDIA RooTX 5090", "percent_increase": 6000, "seconds_increase": 100, "price": 2000000},
 ]
 
 # BASKET UPGRADE PATHS
@@ -1147,7 +1147,7 @@ async def assign_bloom_rank_role(member: discord.Member, guild: discord.Guild) -
     return previous_role_name, target_role_name
 
 
-async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> tuple[str | None, str | None]:
+async def assign_gatherer_role(member: discord.Member, guild: discord.Guild, force_planter_role: str | None = None) -> tuple[str | None, str | None]:
     #assign gatherer role to the user based on bloom cycle plants (resets per bloom)
     #PLANTER I - 0-49 items gathered this cycle
     #PLANTER II - 50-149 items gathered this cycle
@@ -1159,6 +1159,7 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
     #PLANTER VIII - 4000-9999 items gathered this cycle
     #PLANTER IX - 10000-14999 items gathered this cycle
     #PLANTER X - 15000+ items gathered this cycle
+    # When force_planter_role is set (e.g. "PLANTER I" after bloom), use it instead of DB cycle_plants so reset is guaranteed.
 
     user_id = member.id
     # Refetch member so we see current Discord roles (avoids double rank-up when gather and harvest run close together)
@@ -1166,34 +1167,37 @@ async def assign_gatherer_role(member: discord.Member, guild: discord.Guild) -> 
         member = await guild.fetch_member(user_id)
     except Exception:
         pass  # use passed-in member if fetch fails
-    cycle_plants = get_user_bloom_cycle_plants(user_id)  # Use bloom cycle counter (resets per bloom)
     planter_roles = ["PLANTER I", "PLANTER II", "PLANTER III", "PLANTER IV", "PLANTER V", "PLANTER VI", "PLANTER VII", "PLANTER VIII", "PLANTER IX", "PLANTER X"]
 
     # Find the user's current planter role
     previous_role_name = next((role.name for role in member.roles if role.name in planter_roles), None)
-    
-    # Determine the target role based on bloom cycle plants gathered
-    target_role_name = None
-    if cycle_plants < 50:
-        target_role_name = "PLANTER I"
-    elif cycle_plants < 150:
-        target_role_name = "PLANTER II"
-    elif cycle_plants < 300:
-        target_role_name = "PLANTER III"
-    elif cycle_plants < 500:
-        target_role_name = "PLANTER IV"
-    elif cycle_plants < 1000:
-        target_role_name = "PLANTER V"
-    elif cycle_plants < 2000:
-        target_role_name = "PLANTER VI"
-    elif cycle_plants < 4000:
-        target_role_name = "PLANTER VII"
-    elif cycle_plants < 10000:
-        target_role_name = "PLANTER VIII"
-    elif cycle_plants < 15000:
-        target_role_name = "PLANTER IX"
-    else: #15000+
-        target_role_name = "PLANTER X"
+
+    # Target role: forced (e.g. after bloom) or derived from bloom_cycle_plants
+    if force_planter_role and force_planter_role in planter_roles:
+        target_role_name = force_planter_role
+    else:
+        cycle_plants = get_user_bloom_cycle_plants(user_id)  # Use bloom cycle counter (resets per bloom)
+        target_role_name = None
+        if cycle_plants < 50:
+            target_role_name = "PLANTER I"
+        elif cycle_plants < 150:
+            target_role_name = "PLANTER II"
+        elif cycle_plants < 300:
+            target_role_name = "PLANTER III"
+        elif cycle_plants < 500:
+            target_role_name = "PLANTER IV"
+        elif cycle_plants < 1000:
+            target_role_name = "PLANTER V"
+        elif cycle_plants < 2000:
+            target_role_name = "PLANTER VI"
+        elif cycle_plants < 4000:
+            target_role_name = "PLANTER VII"
+        elif cycle_plants < 10000:
+            target_role_name = "PLANTER VIII"
+        elif cycle_plants < 15000:
+            target_role_name = "PLANTER IX"
+        else:  # 15000+
+            target_role_name = "PLANTER X"
     # If the target role is the same as current role, no changes needed
     if target_role_name == previous_role_name:
         return previous_role_name, None
@@ -9486,8 +9490,9 @@ class BloomConfirmView(discord.ui.View):
         perform_bloom(user_id)
         new_rank = get_bloom_rank(user_id)
 
+        # Force planter role to PLANTER I after bloom (guarantees Discord role reset; DB bloom_cycle_plants is already 0)
         try:
-            await assign_gatherer_role(interaction.user, interaction.guild)
+            await assign_gatherer_role(interaction.user, interaction.guild, force_planter_role="PLANTER I")
         except Exception as e:
             print(f"Error resetting planter role for user {user_id}: {e}")
         try:
@@ -11387,7 +11392,7 @@ class GpuView(discord.ui.View):
         
         embed = discord.Embed(
             title=f"🖥️ {gpu_name}",
-            description=f"💰 Your Balance: **${balance:,.2f}**\n\nBuy GPUs to boost your mining! You can own one of each GPU.",
+            description=f"💰 Your Balance: **${balance:,.2f}**\n\nBuy GPUs to boost your mining!",
             color=discord.Color.blue()
         )
         
@@ -15174,12 +15179,12 @@ class MiningView(discord.ui.View):
         session_summary = ""
         for sym, amt in self.session_mined.items():
             coin_name = next(c["name"] for c in CRYPTO_COINS if c["symbol"] == sym)
-            session_summary += f"{coin_name} ({sym}): {amt:.4f}\n"
+            session_summary += f"{coin_name} ({sym}): **{amt:.4f}**\n"
         
         # Create GPU info text
         gpu_text = ""
         if self.gpus_used:
-            gpu_text = "\n".join(self.gpus_used)
+            gpu_text = "\n".join(f"**{g}**" for g in self.gpus_used)
         
         # Create description with countdown timer
         description_text = f"Click the button as many times as you can in {max_time} seconds!"
@@ -15194,12 +15199,12 @@ class MiningView(discord.ui.View):
             description=description_text,
             color=discord.Color.light_grey()
         )
-        success_embed.add_field(name="This Session", value=f"Total Mines: **{self.total_mines}**", inline=True)
+        success_embed.add_field(name="**Total Mines**", value=f"**{self.total_mines}**", inline=True)
         if gpu_text:
-            success_embed.add_field(name="GPUs Active", value=gpu_text, inline=False)
+            success_embed.add_field(name="**GPUs Active**", value=gpu_text, inline=False)
         if session_summary:
-            success_embed.add_field(name="Session Mined", value=session_summary.strip(), inline=False)
-        success_embed.set_footer(text="Keep clicking! (Use /sell to sell your cryptocurrency!)")
+            success_embed.add_field(name="Mined", value=session_summary.strip(), inline=False)
+        success_embed.set_footer(text="Keep clicking!")
         
         try:
             await self.message.edit(embed=success_embed, view=self)
@@ -15228,35 +15233,35 @@ class MiningView(discord.ui.View):
         
         # Create timeout embed
         timeout_embed = discord.Embed(
-            title="⏰ Mining Session Expired",
-            description="Time's up! Your mining session has ended.",
+            title="⏰ Mine Session Over",
+            description="Time's up!",
             color=discord.Color.orange()
         )
         
         if self.total_mines > 0:
             timeout_embed.add_field(
-                name="Session Summary",
+                name="\u200b",
                 value=f"Total Mines: **{self.total_mines}**",
                 inline=False
             )
             
             # Add GPU info if GPUs were used
             if self.gpus_used:
-                timeout_embed.add_field(name="GPUs Used", value="\n".join(self.gpus_used), inline=False)
+                timeout_embed.add_field(name="GPUs Used", value="\n".join(f"**{g}**" for g in self.gpus_used), inline=False)
             
             session_summary = ""
             for sym, amt in self.session_mined.items():
                 coin_name = next(c["name"] for c in CRYPTO_COINS if c["symbol"] == sym)
-                session_summary += f"{coin_name} ({sym}): {amt:.4f}\n"
+                session_summary += f"{coin_name} ({sym}): **{amt:.4f}**\n"
             
             if session_summary:
-                timeout_embed.add_field(name="Mined This Session", value=session_summary.strip(), inline=False)
+                timeout_embed.add_field(name="Crypto Mined", value=session_summary.strip(), inline=False)
             
             # Add hidden achievement message if unlocked
             if self.blockchain_achievement_unlocked:
                 timeout_embed.add_field(name="🎉 Hidden Achievement Unlocked!", value="**Blockchain**", inline=False)
 
-            timeout_embed.set_footer(text="Use /sell to sell your cryptocurrency!")
+            timeout_embed.set_footer(text="Use /sell to sell your crypto")
         else:
             timeout_embed.description = "Time's up! You didn't mine anything this session."
         
@@ -15481,7 +15486,7 @@ async def mine(interaction: discord.Interaction):
         
         # Add GPU info if user has GPUs
         if gpus_used:
-            embed.add_field(name="GPUs Active", value="\n".join(gpus_used), inline=False)
+            embed.add_field(name="GPUs Active", value="\n".join(f"**{g}**" for g in gpus_used), inline=False)
         
         view = MiningView(user_id, timeout=total_time, gpu_percent_boost=total_percent_boost, gpu_seconds_boost=total_seconds_boost, gpus_used=gpus_used)
         message = await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
