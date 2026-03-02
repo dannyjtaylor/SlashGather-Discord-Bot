@@ -13314,13 +13314,26 @@ _BLOOM_RANK_TO_COUNT = {
 }
 
 
-@bot.tree.command(name="setrank", description="[ADMIN] Set a user's BLOOM rank (PINE, CEDAR, BIRCH, MAPLE, OAK, FIR, REDWOOD)")
+# Planter rank (PLANTER I–X) minimum bloom_cycle_plants so DB and Discord stay in sync when admin sets rank
+_PLANTER_RANK_MIN_CYCLE_PLANTS = {
+    "PLANTER I": 0, "PLANTER II": 50, "PLANTER III": 150, "PLANTER IV": 300, "PLANTER V": 500,
+    "PLANTER VI": 1000, "PLANTER VII": 2000, "PLANTER VIII": 4000, "PLANTER IX": 10000, "PLANTER X": 15000,
+}
+
+
+@bot.tree.command(name="setrank", description="[ADMIN] Set a user's BLOOM rank (PINE–REDWOOD) or PLANTER rank (1–10). Use in #hidden.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     user="The user to set the rank for",
-    rank="The BLOOM rank name (Redwood has no tier)",
-    tier="Rank tier I, II, or III (omit for Redwood)",
+    rank_type="BLOOM (tree rank) or PLANTER (gatherer rank I–X)",
+    rank="BLOOM rank name (required when rank_type is BLOOM)",
+    tier="BLOOM tier I, II, or III (required when rank_type is BLOOM; omit for Redwood)",
+    planter="PLANTER level 1–10 (required when rank_type is PLANTER)",
 )
+@app_commands.choices(rank_type=[
+    app_commands.Choice(name="BLOOM", value="BLOOM"),
+    app_commands.Choice(name="PLANTER", value="PLANTER"),
+])
 @app_commands.choices(rank=[
     app_commands.Choice(name="PINE", value="PINE"),
     app_commands.Choice(name="CEDAR", value="CEDAR"),
@@ -13335,11 +13348,25 @@ _BLOOM_RANK_TO_COUNT = {
     app_commands.Choice(name="II", value="II"),
     app_commands.Choice(name="III", value="III"),
 ])
+@app_commands.choices(planter=[
+    app_commands.Choice(name="1", value="1"),
+    app_commands.Choice(name="2", value="2"),
+    app_commands.Choice(name="3", value="3"),
+    app_commands.Choice(name="4", value="4"),
+    app_commands.Choice(name="5", value="5"),
+    app_commands.Choice(name="6", value="6"),
+    app_commands.Choice(name="7", value="7"),
+    app_commands.Choice(name="8", value="8"),
+    app_commands.Choice(name="9", value="9"),
+    app_commands.Choice(name="10", value="10"),
+])
 async def setrank(
     interaction: discord.Interaction,
     user: discord.Member,
-    rank: app_commands.Choice[str],
+    rank_type: app_commands.Choice[str],
+    rank: app_commands.Choice[str] = None,
     tier: app_commands.Choice[str] = None,
+    planter: app_commands.Choice[str] = None,
 ):
     try:
         if not await safe_defer(interaction, ephemeral=True):
@@ -13348,13 +13375,51 @@ async def setrank(
             await safe_interaction_response(interaction, interaction.followup.send,
                 "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
             return
+        if interaction.guild is None:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: This command must be used in a server.", ephemeral=True)
+            return
+        if not hasattr(interaction.channel, "name") or interaction.channel.name != "hidden":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
+                ephemeral=True)
+            return
+
+        if rank_type.value == "PLANTER":
+            if planter is None:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ **Error**: When rank_type is PLANTER, choose planter (1–10).", ephemeral=True)
+                return
+            level = int(planter.value)
+            rank_name = f"PLANTER {['I','II','III','IV','V','VI','VII','VIII','IX','X'][level - 1]}"
+            min_plants = _PLANTER_RANK_MIN_CYCLE_PLANTS.get(rank_name, 0)
+            set_user_bloom_cycle_plants(user.id, min_plants)
+            try:
+                member = await interaction.guild.fetch_member(user.id)
+            except Exception:
+                member = user
+            await assign_gatherer_role(member, interaction.guild, force_planter_role=rank_name)
+            embed = discord.Embed(
+                title="✅ Planter rank set",
+                description=f"{user.mention}'s PLANTER rank has been set to **{rank_name}** (cycle plants set to {min_plants:,}).",
+                color=discord.Color.green()
+            )
+            print(f"Admin {interaction.user.name} used /setrank PLANTER to set {user.name} to {rank_name}")
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+            return
+
+        # BLOOM
+        if rank is None:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: When rank_type is BLOOM, choose rank (PINE, CEDAR, …).", ephemeral=True)
+            return
         rank_name = rank.value
         if rank_name == "REDWOOD":
             rank_str = "REDWOOD"
         else:
             if not tier:
                 await safe_interaction_response(interaction, interaction.followup.send,
-                    "❌ **Error**: Tier (I, II, or III) is required for this rank. Redwood has no tier.", ephemeral=True)
+                    "❌ **Error**: Tier (I, II, or III) is required for this BLOOM rank. Redwood has no tier.", ephemeral=True)
                 return
             rank_str = f"{rank_name} {tier.value}"
         if rank_str not in _BLOOM_RANK_TO_COUNT:
@@ -13373,68 +13438,6 @@ async def setrank(
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
     except Exception as e:
         print(f"Error in setrank command: {e}")
-        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
-
-
-# Planter rank (PLANTER I–X) minimum bloom_cycle_plants so DB and Discord stay in sync when admin sets rank
-_PLANTER_RANK_MIN_CYCLE_PLANTS = {
-    "PLANTER I": 0, "PLANTER II": 50, "PLANTER III": 150, "PLANTER IV": 300, "PLANTER V": 500,
-    "PLANTER VI": 1000, "PLANTER VII": 2000, "PLANTER VIII": 4000, "PLANTER IX": 10000, "PLANTER X": 15000,
-}
-
-
-@bot.tree.command(name="setplanterrank", description="[ADMIN] Set a user's PLANTER rank (I–X). Use to fix planter rank e.g. after a bloom that didn't reset.")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(
-    user="The user to set the planter rank for",
-    rank="The PLANTER rank (I through X)",
-)
-@app_commands.choices(rank=[
-    app_commands.Choice(name="PLANTER I", value="PLANTER I"),
-    app_commands.Choice(name="PLANTER II", value="PLANTER II"),
-    app_commands.Choice(name="PLANTER III", value="PLANTER III"),
-    app_commands.Choice(name="PLANTER IV", value="PLANTER IV"),
-    app_commands.Choice(name="PLANTER V", value="PLANTER V"),
-    app_commands.Choice(name="PLANTER VI", value="PLANTER VI"),
-    app_commands.Choice(name="PLANTER VII", value="PLANTER VII"),
-    app_commands.Choice(name="PLANTER VIII", value="PLANTER VIII"),
-    app_commands.Choice(name="PLANTER IX", value="PLANTER IX"),
-    app_commands.Choice(name="PLANTER X", value="PLANTER X"),
-])
-async def setplanterrank(interaction: discord.Interaction, user: discord.Member, rank: app_commands.Choice[str]):
-    try:
-        if not await safe_defer(interaction, ephemeral=True):
-            return
-        if not interaction.user.guild_permissions.administrator:
-            await safe_interaction_response(interaction, interaction.followup.send,
-                "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
-            return
-        if interaction.guild is None:
-            await safe_interaction_response(interaction, interaction.followup.send,
-                "❌ **Error**: This command must be used in a server.", ephemeral=True)
-            return
-        if not hasattr(interaction.channel, "name") or interaction.channel.name != "hidden":
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
-                ephemeral=True)
-            return
-        rank_name = rank.value
-        min_plants = _PLANTER_RANK_MIN_CYCLE_PLANTS.get(rank_name, 0)
-        set_user_bloom_cycle_plants(user.id, min_plants)
-        try:
-            member = await interaction.guild.fetch_member(user.id)
-        except Exception:
-            member = user
-        await assign_gatherer_role(member, interaction.guild, force_planter_role=rank_name)
-        embed = discord.Embed(
-            title="✅ Planter rank set",
-            description=f"{user.mention}'s PLANTER rank has been set to **{rank_name}** (cycle plants set to {min_plants:,}).",
-            color=discord.Color.green()
-        )
-        print(f"Admin {interaction.user.name} used /setplanterrank to set {user.name} to {rank_name}")
-        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
-    except Exception as e:
-        print(f"Error in setplanterrank command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 

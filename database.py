@@ -658,7 +658,7 @@ def add_user_bloom_cycle_plants(user_id: int, amount: int) -> None:
 
 
 def set_user_bloom_cycle_plants(user_id: int, value: int) -> None:
-    """Set user's bloom cycle plants to an exact value (e.g. for admin /setplanterrank or post-bloom sync)."""
+    """Set user's bloom cycle plants to an exact value (e.g. for admin /setrank PLANTER or post-bloom sync)."""
     users = _get_users_collection()
     _ensure_user_document(user_id)
     users.update_one(
