@@ -13507,6 +13507,39 @@ async def market_admin(interaction: discord.Interaction, news: app_commands.Choi
         await safe_interaction_response(interaction, interaction.followup.send, "\u274c An error occurred. Please try again.", ephemeral=True)
 
 
+# Shutdown command (bot owner only)
+def _get_bot_owner_ids() -> set[int]:
+    """Return set of Discord user IDs allowed to use /shutdown (from env BOT_OWNER_ID, comma-separated)."""
+    raw = os.getenv("BOT_OWNER_ID", "").strip()
+    if not raw:
+        return set()
+    return {int(x.strip()) for x in raw.split(",") if x.strip().isdigit()}
+
+
+@bot.tree.command(name="shutdown", description="[OWNER] Gracefully stop the bot. Only the bot owner can use this.")
+async def shutdown(interaction: discord.Interaction):
+    try:
+        owner_ids = _get_bot_owner_ids()
+        if not owner_ids:
+            await safe_interaction_response(interaction, interaction.response.send_message,
+                "❌ Shutdown is disabled: `BOT_OWNER_ID` is not set in the environment.", ephemeral=True)
+            return
+        if interaction.user.id not in owner_ids:
+            await safe_interaction_response(interaction, interaction.response.send_message,
+                "❌ Only the bot owner can shut down the bot.", ephemeral=True)
+            return
+        await safe_interaction_response(interaction, interaction.response.send_message,
+            "🛑 Shutting down the bot...", ephemeral=True)
+        print(f"Bot shutdown requested by {interaction.user} ({interaction.user.id})")
+        await bot.close()
+    except Exception as e:
+        print(f"Error in shutdown command: {e}")
+        try:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Shutdown failed.", ephemeral=True)
+        except Exception:
+            pass
+
+
 # ── Giveaway admin command ──────────────────────────────────────────────
 async def _giveaway_imbue_name_autocomplete(
     interaction: discord.Interaction,
