@@ -15168,6 +15168,9 @@ async def gardener_background_task():
                                                     prefix = f"{rip_em} " if rip_em else ""
                                                     lines.append(f"{prefix}{emoji} ({item['ripeness']}){gmo}")
                                                 items_display = "\n".join(lines) or "No items"
+                                                # Discord embed field value limit is 1024 characters
+                                                if len(items_display) > 1024:
+                                                    items_display = items_display[:1021] + "..."
                                                 embed.add_field(name="📦 Items Harvested", value=items_display, inline=False)
                                                 embed.add_field(name="💰 Total Value", value=f"**${total_value:,.2f}**", inline=True)
                                                 embed.add_field(name="💵 New Balance", value=f"**${current_balance:,.2f}**", inline=True)
