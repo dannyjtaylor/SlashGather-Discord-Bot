@@ -411,6 +411,24 @@ def set_user_beta_tester(user_id: int, value: bool) -> None:
     )
 
 
+def get_user_server_booster(user_id: int) -> bool:
+    """Return True if user is a server booster (cached in DB, synced from member.premium_since)."""
+    users = _get_users_collection()
+    doc = users.find_one({"_id": int(user_id)}, {"server_booster": 1})
+    return bool(doc.get("server_booster", False) if doc else False)
+
+
+def set_user_server_booster(user_id: int, value: bool) -> None:
+    """Set the cached server booster flag for the user (synced from Discord member.premium_since)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"server_booster": bool(value)}},
+        upsert=True,
+    )
+
+
 def increment_forage_count(user_id: int) -> None:
     users = _get_users_collection()
     users.update_one(

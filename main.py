@@ -201,6 +201,8 @@ from database import (
     steal_apply_harvest,
     get_user_beta_tester,
     set_user_beta_tester,
+    get_user_server_booster,
+    set_user_server_booster,
 )
 
 try:
@@ -3172,6 +3174,23 @@ def get_beta_tester_money_multiplier(user_id: int) -> float:
     return BETA_TESTER_MONEY_MULTIPLIER if get_user_beta_tester(user_id) else 1.0
 
 
+SERVER_BOOSTER_MONEY_MULTIPLIER = 1.50
+SERVER_BOOSTER_EMOJI = "<:ServerBoost:1477896878338347160>"
+
+
+def sync_server_booster_from_member(member: discord.Member) -> None:
+    """Sync the user's server booster status from Discord to the database cache (member.premium_since)."""
+    if member is None:
+        return
+    is_booster = member.premium_since is not None
+    set_user_server_booster(member.id, is_booster)
+
+
+def get_server_booster_money_multiplier(user_id: int) -> float:
+    """Return 1.50 if user is a server booster (cached in DB), else 1.0."""
+    return SERVER_BOOSTER_MONEY_MULTIPLIER if get_user_server_booster(user_id) else 1.0
+
+
 NETHER_STAR_MONEY_MULTIPLIER = 1.15
 
 
@@ -3607,6 +3626,11 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     final_value *= beta_tester_mult
     extra_money_from_beta_tester = final_value * (beta_tester_mult - 1.0) / beta_tester_mult if beta_tester_mult > 1.0 else 0.0
 
+    # SERVER BOOSTER: 1.50x on all money gained (member.premium_since)
+    server_booster_mult = get_server_booster_money_multiplier(user_id)
+    final_value *= server_booster_mult
+    extra_money_from_server_booster = final_value * (server_booster_mult - 1.0) / server_booster_mult if server_booster_mult > 1.0 else 0.0
+
     # Nether Star: 1.15x all money (shop item)
     nether_star_mult = get_nether_star_money_multiplier(user_id)
     final_value *= nether_star_mult
@@ -3670,6 +3694,8 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         "month_name": month_name,
         "beta_tester_multiplier": beta_tester_mult,
         "extra_money_from_beta_tester": extra_money_from_beta_tester,
+        "server_booster_multiplier": server_booster_mult,
+        "extra_money_from_server_booster": extra_money_from_server_booster,
         "nether_star_multiplier": nether_star_mult,
         "extra_money_from_nether_star": extra_money_from_nether_star,
         "seasonal_multiplier": seasonal_multiplier,
@@ -6657,7 +6683,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.11.1 :3git"
+            name="running /gather on V0.11.1"
         )
     )
     try:
@@ -6788,6 +6814,16 @@ async def on_member_join(member):
         await assign_bloom_rank_role(member, guild)
     except Exception as e:
         print(f"Error assigning bloom rank role to user {member.id}: {e}")
+
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    """Sync server booster status when a member boosts or unboosts the server."""
+    if before.premium_since != after.premium_since:
+        try:
+            set_user_server_booster(after.id, after.premium_since is not None)
+        except Exception as e:
+            print(f"[Server Booster] Error syncing booster status for {after.id}: {e}")
 
 
 @bot.event
@@ -8280,6 +8316,8 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
 
         # BETA TESTER: same 1.3x as /gather
         fv *= get_beta_tester_money_multiplier(user_id)
+        # SERVER BOOSTER: 1.50x (member.premium_since)
+        fv *= get_server_booster_money_multiplier(user_id)
         fv *= get_nether_star_money_multiplier(user_id)
         fv *= get_palace_treasure_money_multiplier(user_id)
         fv *= get_edward_splash_money_multiplier(user_id)
@@ -8553,6 +8591,7 @@ async def gather(interaction: discord.Interaction):
             return
 
         sync_beta_tester_from_member(interaction.user)
+        sync_server_booster_from_member(interaction.user)
         channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
         user_id = interaction.user.id
 
@@ -8686,6 +8725,9 @@ async def gather(interaction: discord.Interaction):
             if gather_result.get('extra_money_from_beta_tester', 0) > 0:
                 embed.add_field(name="🧪 Beta Tester!",
                     value=f"{gather_result['beta_tester_multiplier']:.2f}x - **+${gather_result['extra_money_from_beta_tester']:.2f}**", inline=False)
+            if gather_result.get('extra_money_from_server_booster', 0) > 0:
+                embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
+                    value=f"{gather_result['server_booster_multiplier']:.2f}x - **+${gather_result['extra_money_from_server_booster']:.2f}**", inline=False)
             if item_boost_sources:
                 extra = gather_result.get("extra_money_from_nether_star", 0)
                 value_parts = [f"**+${extra:.2f}**"] if extra > 0 else []
@@ -8733,6 +8775,9 @@ async def gather(interaction: discord.Interaction):
             if gather_result.get('extra_money_from_beta_tester', 0) > 0:
                 embed.add_field(name="🧪 Beta Tester!",
                     value=f"{gather_result['beta_tester_multiplier']:.2f}x - **+${gather_result['extra_money_from_beta_tester']:.2f}**", inline=False)
+            if gather_result.get('extra_money_from_server_booster', 0) > 0:
+                embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
+                    value=f"{gather_result['server_booster_multiplier']:.2f}x - **+${gather_result['extra_money_from_server_booster']:.2f}**", inline=False)
             if item_boost_sources:
                 extra = gather_result.get("extra_money_from_nether_star", 0)
                 value_parts = [f"**+${extra:.2f}**"] if extra > 0 else []
@@ -9206,6 +9251,11 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     total_value *= beta_tester_mult
     extra_money_from_beta_tester = total_value * (beta_tester_mult - 1.0) / beta_tester_mult if beta_tester_mult > 1.0 else 0.0
 
+    # SERVER BOOSTER: 1.50x on all money gained (member.premium_since)
+    server_booster_mult = get_server_booster_money_multiplier(user_id)
+    total_value *= server_booster_mult
+    extra_money_from_server_booster = total_value * (server_booster_mult - 1.0) / server_booster_mult if server_booster_mult > 1.0 else 0.0
+
     # Nether Star: 1.15x all money
     nether_star_mult = get_nether_star_money_multiplier(user_id)
     total_value *= nether_star_mult
@@ -9260,6 +9310,8 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         "num_items": total_items_to_harvest,
         "beta_tester_multiplier": beta_tester_mult,
         "extra_money_from_beta_tester": extra_money_from_beta_tester,
+        "server_booster_multiplier": server_booster_mult,
+        "extra_money_from_server_booster": extra_money_from_server_booster,
         "nether_star_multiplier": nether_star_mult,
         "extra_money_from_nether_star": extra_money_from_nether_star,
     }
@@ -9432,6 +9484,7 @@ async def harvest(interaction: discord.Interaction):
             return
 
         sync_beta_tester_from_member(interaction.user)
+        sync_server_booster_from_member(interaction.user)
         channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
         user_id = interaction.user.id
 
@@ -9568,6 +9621,9 @@ async def harvest(interaction: discord.Interaction):
         if result.get("extra_money_from_beta_tester", 0) > 0:
             embed.add_field(name="🧪 Beta Tester!",
                 value=f"{result['beta_tester_multiplier']:.2f}x - **+${result['extra_money_from_beta_tester']:.2f}**", inline=False)
+        if result.get("extra_money_from_server_booster", 0) > 0:
+            embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
+                value=f"{result['server_booster_multiplier']:.2f}x - **+${result['extra_money_from_server_booster']:.2f}**", inline=False)
         # Daily shop / item boosts that affected this harvest
         item_boost_sources = []
         shop_inv = full_data.get("shop_inventory", {}) if full_data else {}
@@ -16111,6 +16167,7 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             return
 
         sync_beta_tester_from_member(interaction.user)
+        sync_server_booster_from_member(interaction.user)
         user_id = interaction.user.id
         holdings = get_user_crypto_holdings(user_id)
         prices = get_crypto_prices()
@@ -16161,6 +16218,7 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             extra_from_rank = subtotal * (rank_perma_buff_multiplier - 1.0)
             total_sale_value = subtotal + extra_from_rank
             total_sale_value *= get_beta_tester_money_multiplier(user_id)
+            total_sale_value *= get_server_booster_money_multiplier(user_id)
             total_sale_value *= get_nether_star_money_multiplier(user_id)
             total_sale_value *= get_edward_splash_money_multiplier(user_id)
             if has_shop_item(user_id, "msi_afterburner"):
@@ -16170,10 +16228,10 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             current_balance = get_user_balance(user_id)
             new_balance = current_balance + total_sale_value
             update_user_balance(user_id, new_balance)
-            
+
             # Get updated holdings
             updated_holdings = get_user_crypto_holdings(user_id)
-            
+
             # Create success embed
             embed = discord.Embed(
                 title="💰 Sale Successful!",
@@ -16219,6 +16277,13 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
                 embed.add_field(
                     name="🧪 Beta Tester!",
                     value=f"{BETA_TESTER_MONEY_MULTIPLIER:.2f}x - **+${extra_beta:.2f}**",
+                    inline=False
+                )
+            if get_user_server_booster(user_id):
+                extra_booster = total_sale_value * (SERVER_BOOSTER_MONEY_MULTIPLIER - 1.0) / SERVER_BOOSTER_MONEY_MULTIPLIER
+                embed.add_field(
+                    name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
+                    value=f"{SERVER_BOOSTER_MONEY_MULTIPLIER:.2f}x - **+${extra_booster:.2f}**",
                     inline=False
                 )
 
@@ -16295,6 +16360,7 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         extra_from_rank = subtotal * (rank_perma_buff_multiplier - 1.0)
         sale_value = subtotal + extra_from_rank
         sale_value *= get_beta_tester_money_multiplier(user_id)
+        sale_value *= get_server_booster_money_multiplier(user_id)
         sale_value *= get_nether_star_money_multiplier(user_id)
         sale_value *= get_edward_splash_money_multiplier(user_id)
         if has_shop_item(user_id, "msi_afterburner"):
@@ -16355,6 +16421,13 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             embed.add_field(
                 name="🧪 Beta Tester!",
                 value=f"{BETA_TESTER_MONEY_MULTIPLIER:.2f}x - **+${extra_beta:.2f}**",
+                inline=False
+            )
+        if get_user_server_booster(user_id):
+            extra_booster = sale_value * (SERVER_BOOSTER_MONEY_MULTIPLIER - 1.0) / SERVER_BOOSTER_MONEY_MULTIPLIER
+            embed.add_field(
+                name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
+                value=f"{SERVER_BOOSTER_MONEY_MULTIPLIER:.2f}x - **+${extra_booster:.2f}**",
                 inline=False
             )
         # Item Boosts (shop / dailyshop items affecting this sale)
