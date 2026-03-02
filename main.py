@@ -6657,7 +6657,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.11.1 :3"
+            name="running /gather on V0.11.1 :3git"
         )
     )
     try:
@@ -7290,10 +7290,8 @@ class WildAnimalView(discord.ui.View):
                 # Unlock the channel IMMEDIATELY so commands aren't stuck
                 active_pve_events.pop(self.channel_id, None)
 
-                # Send instant "Defeated!" DMs to ALL participants immediately (same second)
-                await _pve_send_instant_defeat_dms(interaction.guild, self.animal, list(self.attackers.keys()))
                 asyncio.create_task(
-                    _pve_distribute_rewards(interaction, self.animal, dict(self.attackers), self.channel_id, self.area_multiplier))
+                    _pve_distribute_rewards(interaction, self.animal, dict(self.attackers), self.channel_id, self.area_multiplier, max_hp=self.max_hp))
                 return
 
             progress_embed = discord.Embed(
@@ -7382,15 +7380,13 @@ class BulletAntView(discord.ui.View):
                             await intro_msg.edit(embed=defeat_embed)
                         except Exception as e:
                             print(f"Bullet Ant Swarm intro edit failed: {e}")
-                    await _pve_send_instant_defeat_dms(
-                        interaction.guild, BULLET_ANT_SWARM_REWARD_ANIMAL,
-                        list(self.swarm_state["attackers"].keys()))
                     asyncio.create_task(
                         _pve_distribute_rewards(
                             interaction, BULLET_ANT_SWARM_REWARD_ANIMAL,
                             dict(self.swarm_state["attackers"]), self.channel_id,
                             self.swarm_state["area_multiplier"],
-                            achievements_ephemeral=True))
+                            achievements_ephemeral=True,
+                            max_hp=self.swarm_state.get("total_hp")))
                 return
 
             progress_embed = discord.Embed(
@@ -7535,15 +7531,13 @@ class BeeView(discord.ui.View):
                             await intro_msg.edit(embed=defeat_embed)
                         except Exception as e:
                             print(f"Bee Swarm intro edit failed: {e}")
-                    await _pve_send_instant_defeat_dms(
-                        interaction.guild, BEE_SWARM_REWARD_ANIMAL,
-                        list(self.swarm_state["attackers"].keys()))
                     asyncio.create_task(
                         _pve_distribute_rewards(
                             interaction, BEE_SWARM_REWARD_ANIMAL,
                             dict(self.swarm_state["attackers"]), self.channel_id,
                             area_mult,
-                            achievements_ephemeral=True))
+                            achievements_ephemeral=True,
+                            max_hp=self.swarm_state.get("total_hp")))
                     # 40% chance: spawn Larva (Break → Queen Bee, Ignore or 10s → nothing)
                     if channel and guild_id and random.random() < BEE_SWARM_LARVA_CHANCE:
                         larva_embed = discord.Embed(
@@ -7688,7 +7682,7 @@ class BossView(discord.ui.View):
                     await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
 
                 # Accumulate this boss's defeat for deferred rewards (single boss: 1 entry; Twins: 2 entries)
-                _pve_boss_defeated_pending.setdefault(self.guild_id, []).append((self.boss, dict(self.attackers)))
+                _pve_boss_defeated_pending.setdefault(self.guild_id, []).append((self.boss, dict(self.attackers), self.max_hp))
                 boss_list = active_boss_events.get(self.guild_id, [])
                 if self.boss_state_ref in boss_list:
                     boss_list = [e for e in boss_list if e is not self.boss_state_ref]
@@ -7706,7 +7700,7 @@ class BossView(discord.ui.View):
                     guild = interaction.guild
                     channels = _get_guild_gather_channels(guild)
                     if len(pending) == 1:
-                        boss, _ = pending[0]
+                        boss = pending[0][0]
                         broadcast_desc = boss.get("server_defeat_msg", boss["defeat_msg"])
                         broadcast_embed = discord.Embed(
                             title=f"☠️ {boss['emoji']} {boss['name']} Defeated! ☠️",
@@ -7724,13 +7718,14 @@ class BossView(discord.ui.View):
                                 await ch.send(embed=broadcast_embed)
                         except Exception as e:
                             print(f"Boss defeat broadcast failed in {ch.name}: {e}")
-                    # Send instant "Defeated!" DMs to all participants for each boss, then distribute rewards
                     multi_boss = len(pending) > 1
-                    for boss, attackers in pending:
-                        await _pve_send_instant_defeat_dms(interaction.guild, boss, list(attackers.keys()))
+                    for item in pending:
+                        boss = item[0]
+                        attackers = item[1]
+                        max_hp = item[2] if len(item) > 2 else None
                         asyncio.create_task(_pve_distribute_rewards(
                             interaction, boss, attackers, self.channel_id, self.area_multiplier,
-                            achievements_ephemeral=multi_boss))
+                            achievements_ephemeral=multi_boss, max_hp=max_hp))
                 return
 
             progress_embed = discord.Embed(
@@ -7988,9 +7983,9 @@ class EnderDragonView(discord.ui.View):
                     tower_attackers = ender_dragon_tower_attackers.pop(self.guild_id, {})
                     all_user_ids = set(self.attackers.keys()) | set(tower_attackers.keys())
                     combined_attackers = {uid: self.attackers.get(uid, 0) + tower_attackers.get(uid, 0) for uid in all_user_ids}
-                    await _pve_send_instant_defeat_dms(interaction.guild, self.boss, list(combined_attackers.keys()))
+                    dragon_max_hp = self.entry["max_hp"]
                     asyncio.create_task(_pve_distribute_rewards(
-                        interaction, self.boss, combined_attackers, self.channel_id, self.area_multiplier))
+                        interaction, self.boss, combined_attackers, self.channel_id, self.area_multiplier, max_hp=dragon_max_hp))
                 return
 
             progress_embed = self._embed(interaction.user.display_name)
@@ -8316,37 +8311,39 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
     return display_results, total_balance
 
 
-async def _pve_send_instant_defeat_dms(guild: discord.Guild, animal: dict, attacker_ids: list[int]) -> None:
-    """Send instant 'Defeated!' DMs to all participants so everyone gets feedback the exact second the boss/animal dies.
-    Call this from the defeat handler BEFORE create_task(_pve_distribute_rewards) so DMs go out immediately."""
-    if not attacker_ids:
-        return
-    instant_embed = discord.Embed(
-        title=f"✅ Defeated — {animal['emoji']} {animal['name']}",
-        description="Your plants and money are being calculated… you'll get your full reward in a moment!",
-        color=discord.Color.green(),
-    )
-
-    async def send_one(user_id: int) -> None:
-        try:
-            member = guild.get_member(user_id)
-            if member:
-                await member.send(embed=instant_embed)
-        except Exception:
-            pass
-
-    await asyncio.gather(*[send_one(uid) for uid in attacker_ids], return_exceptions=True)
+def _pve_cap_damage_by_hp(attackers: dict[int, int], max_hp: int) -> dict[int, int]:
+    """Cap total reward damage to the entity's max HP; distribute proportionally so overkill doesn't over-reward."""
+    total = sum(attackers.values())
+    if total <= 0 or max_hp <= 0:
+        return dict(attackers)
+    cap = min(total, max_hp)
+    if cap >= total:
+        return dict(attackers)
+    # Proportional split; use largest-remainder so sum of ints equals cap
+    fracs = [(uid, (dmg / total) * cap) for uid, dmg in attackers.items()]
+    int_parts = [(uid, int(f)) for uid, f in fracs]
+    remainder = cap - sum(p for _, p in int_parts)
+    # Sort by fractional part descending, give +1 to first 'remainder' users
+    with_frac = [(uid, int(p), (fracs[i][1] - int(p))) for i, (uid, p) in enumerate(int_parts)]
+    with_frac.sort(key=lambda x: -x[2])
+    result = {}
+    for i, (uid, base) in enumerate((x[0], x[1]) for x in with_frac):
+        result[uid] = base + (1 if i < remainder else 0)
+    return result
 
 
 async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict,
                                    attackers: dict[int, int], channel_id: int,
-                                   area_multiplier: float, *, achievements_ephemeral: bool = False):
+                                   area_multiplier: float, *, achievements_ephemeral: bool = False,
+                                   max_hp: int | None = None):
     """Award plants to every participant. Record defeats, update PLANTER role, unlock achievements.
-    Achievement notifications and reward embeds are always sent via DM so only the user sees them.
-    Instant 'Defeated!' DMs are sent by the caller before this task runs."""
+    Reward damage is capped by the entity's max_hp so overkill (e.g. 12 damage on 1 HP left) doesn't over-reward."""
     channel = interaction.guild.get_channel(channel_id)
     enemy_id = animal.get("id")
     guild = interaction.guild
+
+    if max_hp is not None:
+        attackers = _pve_cap_damage_by_hp(attackers, max_hp)
 
     async def reward_one_user(user_id: int, total_damage: int) -> None:
         try:
@@ -8429,6 +8426,7 @@ async def trigger_bullet_ant_swarm_event(channel: discord.TextChannel, area_mult
         "defeat_msg": BULLET_ANT_SWARM_DEFEAT,
         "area_multiplier": area_multiplier,
         "channel_id": channel.id,
+        "total_hp": sum(ant_hps),
     }
     active_pve_events[channel.id] = {"swarm": True, "swarm_type": "bullet_ant", "swarm_state": swarm_state, "start_time": time.time()}
 
@@ -8468,6 +8466,7 @@ async def trigger_bee_swarm_event(channel: discord.TextChannel, area_multiplier:
         "defeat_msg": BEE_SWARM_DEFEAT,
         "area_multiplier": area_multiplier,
         "channel_id": channel.id,
+        "total_hp": sum(bee_hps),
     }
     active_pve_events[channel.id] = {"swarm": True, "swarm_type": "bee", "swarm_state": swarm_state, "start_time": time.time()}
 
