@@ -119,6 +119,7 @@ from database import (
     get_user_bloom_cycle_plants,
     deduct_user_bloom_cycle_plants,
     add_user_bloom_cycle_plants,
+    set_user_bloom_cycle_plants,
     get_user_last_water_time,
     update_user_last_water_time,
     get_user_consecutive_water_days,
@@ -203,6 +204,9 @@ from database import (
     set_user_beta_tester,
     get_user_server_booster,
     set_user_server_booster,
+    get_user_premium_tier,
+    set_user_premium_tier,
+    get_all_user_ids_with_premium_tier,
 )
 
 try:
@@ -1160,6 +1164,8 @@ def can_harvest(user_id, full_data=None):
     else:
         invite_reductions = get_invite_cooldown_reductions(user_id)
         cooldown_reduction += invite_reductions.get("harvest_reduction", 0)
+    premium_cd = get_premium_cooldown_reductions(user_id)
+    cooldown_reduction += premium_cd.get("harvest_reduction", 0)
     
     effective_cooldown = max(0, HARVEST_COOLDOWN - cooldown_reduction)
     cooldown_end = last_harvest_time + effective_cooldown
@@ -1777,6 +1783,8 @@ ender_dragon_tower_attackers: dict[int, dict[int, int]] = {}
 ender_dragon_regen_tasks: dict[int, asyncio.Task] = {}
 # When a boss is defeated we append (boss, attackers); when all bosses in the event are dead we distribute and broadcast
 _pve_boss_defeated_pending: dict[int, list] = {}  # guild_id -> [(boss, attackers), ...]
+# Users who have defeated PvE but reward distribution hasn't finished yet — block bloom until they get their rewards
+users_pending_pve_rewards: set[int] = set()
 plantera_bulb_eligible_guilds: dict[int, float] = {}  # guild_id -> timestamp when last boss was defeated (for Plantera bulb chance)
 PLANTERA_BULB_CHANCE = 0.02
 PLANTERA_BULB_MAX_AGE_SEC = 86400  # 24h
@@ -3191,6 +3199,67 @@ def get_server_booster_money_multiplier(user_id: int) -> float:
     return SERVER_BOOSTER_MONEY_MULTIPLIER if get_user_server_booster(user_id) else 1.0
 
 
+# Premium tiers (Discord roles): Seed $3, Sprout $8, Sapling $15, Evergreen $20. Exclusive: higher tier = better benefits, no stacking.
+PREMIUM_ROLE_NAMES = ["Seed", "Sprout", "Sapling", "Evergreen"]
+PREMIUM_MONEY_MULTIPLIERS = {0: 1.0, 1: 1.1, 2: 1.5, 3: 2.0, 4: 3.0}
+PREMIUM_COOLDOWN_REDUCTIONS = {
+    0: {"gather_reduction": 0, "harvest_reduction": 0, "mine_reduction": 0},
+    1: {"gather_reduction": 3, "harvest_reduction": 30, "mine_reduction": 120},
+    2: {"gather_reduction": 6, "harvest_reduction": 60, "mine_reduction": 300},
+    3: {"gather_reduction": 10, "harvest_reduction": 120, "mine_reduction": 600},
+    4: {"gather_reduction": 15, "harvest_reduction": 180, "mine_reduction": 900},
+}
+PREMIUM_DISPLAY = {
+    0: "",
+    1: "🌰 SEED ($3)",
+    2: "🌱 SPROUT ($8)",
+    3: "[SAPLING] SAPLING ($15)",
+    4: "🌲 EVERGREEN ($20)",
+}
+# Premium gardener IDs (virtual): 6=Seed, 7=Sprout, 8=Sapling, 9=Evergreen. Chances mirror slots 1-4.
+PREMIUM_GARDENER_CHANCES = {6: 0.05, 7: 0.08, 8: 0.10, 9: 0.20}
+
+
+def get_premium_tier_from_member(member: discord.Member | None) -> int:
+    """Return premium tier 0-4 by looking only at the member's Discord roles (Seed, Sprout, Sapling, Evergreen). Highest role wins. No DB."""
+    if member is None:
+        return 0
+    tier = 0
+    for i, role_name in enumerate(PREMIUM_ROLE_NAMES):
+        if discord.utils.get(member.roles, name=role_name) is not None:
+            tier = i + 1
+    return tier
+
+
+def sync_premium_tier_from_member(member: discord.Member | None) -> None:
+    """Sync premium tier from Discord roles only. Benefits are applied by looking at the user's premium role; DB is just a cache for code paths that only have user_id."""
+    if member is None:
+        return
+    tier = get_premium_tier_from_member(member)
+    set_user_premium_tier(member.id, tier)
+
+
+def get_premium_tier_money_multiplier(user_id: int) -> float:
+    """Return 1.1, 1.5, 2.0, or 3.0 for Seed/Sprout/Sapling/Evergreen; 1.0 for none."""
+    return PREMIUM_MONEY_MULTIPLIERS.get(get_user_premium_tier(user_id), 1.0)
+
+
+def get_premium_cooldown_reductions(user_id: int) -> dict:
+    """Return gather_reduction, harvest_reduction, mine_reduction (seconds) for premium tier."""
+    return PREMIUM_COOLDOWN_REDUCTIONS.get(get_user_premium_tier(user_id), PREMIUM_COOLDOWN_REDUCTIONS[0]).copy()
+
+
+def get_effective_daily_shop_max_purchases(user_id: int) -> int:
+    """Base 3 + premium tier (Seed=4, Sprout=5, Sapling=6, Evergreen=7)."""
+    return 3 + get_user_premium_tier(user_id)
+
+
+def get_premium_virtual_gardeners(user_id: int) -> list:
+    """Return list of virtual gardener dicts for premium tier (id 6-9). Tier 1=Seed, 2=+Sprout, 3=+Sapling, 4=+Evergreen."""
+    tier = get_user_premium_tier(user_id)
+    return [{"id": 5 + t} for t in range(1, tier + 1)]
+
+
 NETHER_STAR_MONEY_MULTIPLIER = 1.15
 
 
@@ -3339,6 +3408,8 @@ def can_gather(user_id, user_data=None, active_events=None, full_data=None):
     else:
         invite_reductions = get_invite_cooldown_reductions(user_id)
         cooldown_reduction += invite_reductions.get("gather_reduction", 0)
+    premium_cd = get_premium_cooldown_reductions(user_id)
+    cooldown_reduction += premium_cd.get("gather_reduction", 0)
     
     # Calculate effective cooldown (base cooldown minus reduction, minimum 0)
     effective_cooldown = max(0, GATHER_COOLDOWN - cooldown_reduction)
@@ -3631,6 +3702,11 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     final_value *= server_booster_mult
     extra_money_from_server_booster = final_value * (server_booster_mult - 1.0) / server_booster_mult if server_booster_mult > 1.0 else 0.0
 
+    # PREMIUM TIER: 1.1x / 1.5x / 2x / 3x (Seed / Sprout / Sapling / Evergreen)
+    premium_mult = get_premium_tier_money_multiplier(user_id)
+    final_value *= premium_mult
+    extra_money_from_premium = final_value * (premium_mult - 1.0) / premium_mult if premium_mult > 1.0 else 0.0
+
     # Nether Star: 1.15x all money (shop item)
     nether_star_mult = get_nether_star_money_multiplier(user_id)
     final_value *= nether_star_mult
@@ -3696,6 +3772,8 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         "extra_money_from_beta_tester": extra_money_from_beta_tester,
         "server_booster_multiplier": server_booster_mult,
         "extra_money_from_server_booster": extra_money_from_server_booster,
+        "premium_tier_multiplier": premium_mult,
+        "extra_money_from_premium": extra_money_from_premium,
         "nether_star_multiplier": nether_star_mult,
         "extra_money_from_nether_star": extra_money_from_nether_star,
         "seasonal_multiplier": seasonal_multiplier,
@@ -7286,10 +7364,7 @@ class WildAnimalView(discord.ui.View):
             return
         async with self._lock:
             if self.defeated:
-                await safe_interaction_response(
-                    interaction, interaction.response.send_message,
-                    f"The **{self.animal['name']}** has already been defeated!", ephemeral=True)
-                return
+                return  # Already dead; send nothing to avoid flooding chat when spam-clicking
 
             damage = get_pve_damage_multiplier(interaction.user.id)
             self.hp -= damage
@@ -7683,10 +7758,7 @@ class BossView(discord.ui.View):
             return
         async with self._lock:
             if self.defeated:
-                await safe_interaction_response(
-                    interaction, interaction.response.send_message,
-                    f"The **{self.boss['name']}** has already been defeated!", ephemeral=True)
-                return
+                return  # Already dead; send nothing to avoid flooding chat when spam-clicking
 
             damage = get_pve_damage_multiplier(interaction.user.id)
             self.hp -= damage
@@ -7958,9 +8030,7 @@ class EnderDragonView(discord.ui.View):
             return
         async with self._lock:
             if self.defeated:
-                await safe_interaction_response(interaction, interaction.response.send_message,
-                    f"The **{self.boss['name']}** has already been defeated!", ephemeral=True)
-                return
+                return  # Already dead; send nothing to avoid flooding chat when spam-clicking
             damage = get_pve_damage_multiplier(interaction.user.id)
             self.entry["hp"] = max(0, self.entry["hp"] - damage)
             self.attackers[interaction.user.id] = self.attackers.get(interaction.user.id, 0) + damage
@@ -8318,6 +8388,8 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
         fv *= get_beta_tester_money_multiplier(user_id)
         # SERVER BOOSTER: 1.50x (member.premium_since)
         fv *= get_server_booster_money_multiplier(user_id)
+        # PREMIUM TIER: 1.1x / 1.5x / 2x / 3x
+        fv *= get_premium_tier_money_multiplier(user_id)
         fv *= get_nether_star_money_multiplier(user_id)
         fv *= get_palace_treasure_money_multiplier(user_id)
         fv *= get_edward_splash_money_multiplier(user_id)
@@ -8383,6 +8455,10 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
     if max_hp is not None:
         attackers = _pve_cap_damage_by_hp(attackers, max_hp)
 
+    # Block bloom until rewards are distributed (so they can't bloom before getting PvE rewards)
+    for uid in attackers:
+        users_pending_pve_rewards.add(uid)
+
     async def reward_one_user(user_id: int, total_damage: int) -> None:
         try:
             member = guild.get_member(user_id)
@@ -8443,12 +8519,17 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
                 pass
         except Exception as e:
             print(f"PvE reward failed for user {user_id}: {e}")
+        finally:
+            users_pending_pve_rewards.discard(user_id)
 
     try:
         tasks = [reward_one_user(user_id, total_damage) for user_id, total_damage in attackers.items()]
         await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as e:
         print(f"Error distributing PvE rewards: {e}")
+    finally:
+        for uid in attackers:
+            users_pending_pve_rewards.discard(uid)
 
 
 async def trigger_bullet_ant_swarm_event(channel: discord.TextChannel, area_multiplier: float):
@@ -8592,6 +8673,7 @@ async def gather(interaction: discord.Interaction):
 
         sync_beta_tester_from_member(interaction.user)
         sync_server_booster_from_member(interaction.user)
+        sync_premium_tier_from_member(interaction.user)
         channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
         user_id = interaction.user.id
 
@@ -8728,6 +8810,10 @@ async def gather(interaction: discord.Interaction):
             if gather_result.get('extra_money_from_server_booster', 0) > 0:
                 embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
                     value=f"{gather_result['server_booster_multiplier']:.2f}x - **+${gather_result['extra_money_from_server_booster']:.2f}**", inline=False)
+            if gather_result.get('extra_money_from_premium', 0) > 0:
+                tier = get_user_premium_tier(user_id)
+                embed.add_field(name=PREMIUM_DISPLAY.get(tier, "Premium"),
+                    value=f"{gather_result['premium_tier_multiplier']:.2f}x - **+${gather_result['extra_money_from_premium']:.2f}**", inline=False)
             if item_boost_sources:
                 extra = gather_result.get("extra_money_from_nether_star", 0)
                 value_parts = [f"**+${extra:.2f}**"] if extra > 0 else []
@@ -8778,6 +8864,10 @@ async def gather(interaction: discord.Interaction):
             if gather_result.get('extra_money_from_server_booster', 0) > 0:
                 embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
                     value=f"{gather_result['server_booster_multiplier']:.2f}x - **+${gather_result['extra_money_from_server_booster']:.2f}**", inline=False)
+            if gather_result.get('extra_money_from_premium', 0) > 0:
+                tier = get_user_premium_tier(user_id)
+                embed.add_field(name=PREMIUM_DISPLAY.get(tier, "Premium"),
+                    value=f"{gather_result['premium_tier_multiplier']:.2f}x - **+${gather_result['extra_money_from_premium']:.2f}**", inline=False)
             if item_boost_sources:
                 extra = gather_result.get("extra_money_from_nether_star", 0)
                 value_parts = [f"**+${extra:.2f}**"] if extra > 0 else []
@@ -9256,6 +9346,11 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     total_value *= server_booster_mult
     extra_money_from_server_booster = total_value * (server_booster_mult - 1.0) / server_booster_mult if server_booster_mult > 1.0 else 0.0
 
+    # PREMIUM TIER: 1.1x / 1.5x / 2x / 3x (Seed / Sprout / Sapling / Evergreen)
+    premium_mult = get_premium_tier_money_multiplier(user_id)
+    total_value *= premium_mult
+    extra_money_from_premium = total_value * (premium_mult - 1.0) / premium_mult if premium_mult > 1.0 else 0.0
+
     # Nether Star: 1.15x all money
     nether_star_mult = get_nether_star_money_multiplier(user_id)
     total_value *= nether_star_mult
@@ -9312,6 +9407,8 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         "extra_money_from_beta_tester": extra_money_from_beta_tester,
         "server_booster_multiplier": server_booster_mult,
         "extra_money_from_server_booster": extra_money_from_server_booster,
+        "premium_tier_multiplier": premium_mult,
+        "extra_money_from_premium": extra_money_from_premium,
         "nether_star_multiplier": nether_star_mult,
         "extra_money_from_nether_star": extra_money_from_nether_star,
     }
@@ -9485,6 +9582,7 @@ async def harvest(interaction: discord.Interaction):
 
         sync_beta_tester_from_member(interaction.user)
         sync_server_booster_from_member(interaction.user)
+        sync_premium_tier_from_member(interaction.user)
         channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
         user_id = interaction.user.id
 
@@ -9624,6 +9722,10 @@ async def harvest(interaction: discord.Interaction):
         if result.get("extra_money_from_server_booster", 0) > 0:
             embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
                 value=f"{result['server_booster_multiplier']:.2f}x - **+${result['extra_money_from_server_booster']:.2f}**", inline=False)
+        if result.get("extra_money_from_premium", 0) > 0:
+            tier = get_user_premium_tier(user_id)
+            embed.add_field(name=PREMIUM_DISPLAY.get(tier, "Premium"),
+                value=f"{result['premium_tier_multiplier']:.2f}x - **+${result['extra_money_from_premium']:.2f}**", inline=False)
         # Daily shop / item boosts that affected this harvest
         item_boost_sources = []
         shop_inv = full_data.get("shop_inventory", {}) if full_data else {}
@@ -9837,22 +9939,50 @@ class BloomConfirmView(discord.ui.View):
         if self.done:
             await safe_interaction_response(interaction, interaction.response.send_message, "You already bloomed!", ephemeral=True)
             return
+
+        user_id = interaction.user.id
+        # Re-check all bloom blocks in case user joined a game or defeated PvE after opening /bloom
+        if user_id in user_active_games:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ You cannot bloom while in an active **/russian** game! Finish or cash out first.", ephemeral=True)
+            return
+        if user_id in user_active_gathership:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ You cannot bloom while in an active **Mayflower** game! Finish the game first.", ephemeral=True)
+            return
+        if user_id in user_active_gathemon:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ You cannot bloom while in an active **GathéMon** battle! Finish the battle first.", ephemeral=True)
+            return
+        if user_id in users_pending_pve_rewards:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ You cannot bloom yet! Your rewards from a Wild Animal or Boss are still being distributed. Wait a moment and try again.", ephemeral=True)
+            return
+
         self.done = True
         self.stop()
 
-        user_id = interaction.user.id
+        guild = interaction.guild
+        if not guild:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ This command must be used in a server.", ephemeral=True)
+            return
         old_rank = get_bloom_rank(user_id)
         tree_rings = get_user_tree_rings(user_id)
         perform_bloom(user_id)
         new_rank = get_bloom_rank(user_id)
-
-        # Force planter role to PLANTER I after bloom (guarantees Discord role reset; DB bloom_cycle_plants is already 0)
+        # CRITICAL: For ALL blooms, planter MUST reset to PLANTER I. DB bloom_cycle_plants is already 0 in perform_bloom.
+        set_user_bloom_cycle_plants(user_id, 0)
         try:
-            await assign_gatherer_role(interaction.user, interaction.guild, force_planter_role="PLANTER I")
+            member = await guild.fetch_member(user_id)
         except Exception as e:
-            print(f"Error resetting planter role for user {user_id}: {e}")
+            print(f"Error fetching member for bloom planter reset: {e}")
+            member = interaction.user
         try:
-            await assign_bloom_rank_role(interaction.user, interaction.guild)
+            await assign_gatherer_role(member, guild, force_planter_role="PLANTER I")
+        except Exception as e:
+            print(f"Error resetting planter role for user {user_id} after bloom: {e}")
+        try:
+            await assign_bloom_rank_role(member, guild)
         except Exception as e:
             print(f"Error assigning bloom rank role to user {user_id}: {e}")
 
@@ -9866,7 +9996,12 @@ class BloomConfirmView(discord.ui.View):
         if tree_rings > 0:
             multiplier = get_bloom_multiplier(user_id)
             success_embed.add_field(name="💰 Money Boost", value=f"+{(multiplier - 1.0) * 100:.1f}% on all earnings", inline=False)
-        success_embed.add_field(name="🗺️ Areas Reset", value="All unlocked areas have been reset. You're back in **#forest**!", inline=False)
+        success_embed.add_field(
+            name="🗺️ Reset, PLANTER X → PLANTER I",
+            value="All unlocked areas have also been reset.",
+            inline=False,
+        )
+        success_embed.set_footer(text="Go /gather in #forest!!")
 
         try:
             await interaction.message.edit(embed=success_embed, view=None)
@@ -9892,6 +10027,21 @@ async def bloom(interaction: discord.Interaction):
         if user_id in user_active_games:
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"❌ You cannot bloom while in an active **/russian** game, {interaction.user.name}! Finish or cash out first.",
+                ephemeral=True)
+            return
+        if user_id in user_active_gathership:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ You cannot bloom while in an active **Mayflower** game, {interaction.user.name}! Finish the game first.",
+                ephemeral=True)
+            return
+        if user_id in user_active_gathemon:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ You cannot bloom while in an active **GathéMon** battle, {interaction.user.name}! Finish the battle first.",
+                ephemeral=True)
+            return
+        if user_id in users_pending_pve_rewards:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ You cannot bloom yet! Your rewards from a Wild Animal or Boss are still being distributed. Wait a moment and try again.",
                 ephemeral=True)
             return
 
@@ -9990,8 +10140,9 @@ async def unlock(interaction: discord.Interaction, area: app_commands.Choice[str
                 ephemeral=True)
             return
         
-        # Check if user has enough money
-        unlock_cost = area_data["unlock_cost"]
+        # Check if user has enough money (scale unlock cost by bloom count like other prices)
+        base_unlock_cost = area_data["unlock_cost"]
+        unlock_cost = bloom_scaled_price(user_id, base_unlock_cost)
         user_balance = get_user_balance(user_id)
         if user_balance < unlock_cost:
             money_needed = unlock_cost - user_balance
@@ -10533,9 +10684,10 @@ class DailyShopBuyButton(discord.ui.Button):
         purchase_count, last_date = get_user_daily_shop_purchases(user_id)
         if last_date != date_est:
             purchase_count = 0
-        if purchase_count >= MAX_DAILY_SHOP_PURCHASES:
+        max_purchases = get_effective_daily_shop_max_purchases(user_id)
+        if purchase_count >= max_purchases:
             await safe_interaction_response(interaction, interaction.response.send_message,
-                f"❌ You've already bought **{MAX_DAILY_SHOP_PURCHASES}** items today. Come back at midnight EST!", ephemeral=True)
+                f"❌ You've already bought **{max_purchases}** items today. Come back at midnight EST!", ephemeral=True)
             return
         info = DAILY_SHOP_ITEMS[item_id]
         cost = info["cost"]
@@ -10610,6 +10762,7 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
     try:
         if not await safe_defer(interaction, ephemeral=True):
             return
+        sync_premium_tier_from_member(interaction.user)
         user_id = interaction.user.id
         date_est = _get_date_est()
         if action is not None and action.value == "inventory":
@@ -13223,6 +13376,63 @@ async def setrank(
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
+# Planter rank (PLANTER I–X) minimum bloom_cycle_plants so DB and Discord stay in sync when admin sets rank
+_PLANTER_RANK_MIN_CYCLE_PLANTS = {
+    "PLANTER I": 0, "PLANTER II": 50, "PLANTER III": 150, "PLANTER IV": 300, "PLANTER V": 500,
+    "PLANTER VI": 1000, "PLANTER VII": 2000, "PLANTER VIII": 4000, "PLANTER IX": 10000, "PLANTER X": 15000,
+}
+
+
+@bot.tree.command(name="setplanterrank", description="[ADMIN] Set a user's PLANTER rank (I–X). Use to fix planter rank e.g. after a bloom that didn't reset.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    user="The user to set the planter rank for",
+    rank="The PLANTER rank (I through X)",
+)
+@app_commands.choices(rank=[
+    app_commands.Choice(name="PLANTER I", value="PLANTER I"),
+    app_commands.Choice(name="PLANTER II", value="PLANTER II"),
+    app_commands.Choice(name="PLANTER III", value="PLANTER III"),
+    app_commands.Choice(name="PLANTER IV", value="PLANTER IV"),
+    app_commands.Choice(name="PLANTER V", value="PLANTER V"),
+    app_commands.Choice(name="PLANTER VI", value="PLANTER VI"),
+    app_commands.Choice(name="PLANTER VII", value="PLANTER VII"),
+    app_commands.Choice(name="PLANTER VIII", value="PLANTER VIII"),
+    app_commands.Choice(name="PLANTER IX", value="PLANTER IX"),
+    app_commands.Choice(name="PLANTER X", value="PLANTER X"),
+])
+async def setplanterrank(interaction: discord.Interaction, user: discord.Member, rank: app_commands.Choice[str]):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+        if interaction.guild is None:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: This command must be used in a server.", ephemeral=True)
+            return
+        rank_name = rank.value
+        min_plants = _PLANTER_RANK_MIN_CYCLE_PLANTS.get(rank_name, 0)
+        set_user_bloom_cycle_plants(user.id, min_plants)
+        try:
+            member = await interaction.guild.fetch_member(user.id)
+        except Exception:
+            member = user
+        await assign_gatherer_role(member, interaction.guild, force_planter_role=rank_name)
+        embed = discord.Embed(
+            title="✅ Planter rank set",
+            description=f"{user.mention}'s PLANTER rank has been set to **{rank_name}** (cycle plants set to {min_plants:,}).",
+            color=discord.Color.green()
+        )
+        print(f"Admin {interaction.user.name} used /setplanterrank to set {user.name} to {rank_name}")
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+    except Exception as e:
+        print(f"Error in setplanterrank command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
 # Market admin command
 @bot.tree.command(name="market", description="[ADMIN] Toggle market news on/off and reset stock prices")
 @app_commands.default_permissions(administrator=True)
@@ -14850,25 +15060,39 @@ async def gardener_background_task():
         try:
             # Get all users with gardeners (run in thread to avoid blocking event loop)
             users_with_gardeners = await asyncio.to_thread(get_all_users_with_gardeners)
+            premium_user_ids = await asyncio.to_thread(get_all_user_ids_with_premium_tier)
+            premium_user_ids_set = set(premium_user_ids)
+            all_user_ids = set(uid for uid, _ in users_with_gardeners) | premium_user_ids_set
             
-            for user_id, gardeners in users_with_gardeners:
-                # Process each gardener
+            for user_id in all_user_ids:
+                # Sync premium tier from Discord roles when member is available (so benefits use role, not stale DB)
+                if user_id in premium_user_ids_set:
+                    for guild in bot.guilds:
+                        member = guild.get_member(user_id)
+                        if member is not None:
+                            sync_premium_tier_from_member(member)
+                            break
+                db_gardeners = await asyncio.to_thread(get_user_gardeners, user_id)
+                premium_gardeners = get_premium_virtual_gardeners(user_id)
+                gardeners = db_gardeners + premium_gardeners
+                if not gardeners:
+                    continue
+                # Process each gardener (regular 1-5 and premium virtual 6-9)
                 for gardener in gardeners:
                     gardener_id = gardener.get("id")
                     if not gardener_id:
                         continue
-                    
-                    # Get chance based on gardener level
-                    gardener_chance = GARDENER_CHANCES.get(gardener_id, 0.05)  # Default to 5% if invalid ID
+                    is_premium_gardener = gardener_id >= 6
+                    gardener_chance = PREMIUM_GARDENER_CHANCES.get(gardener_id) if is_premium_gardener else GARDENER_CHANCES.get(gardener_id, 0.05)
                     if random.random() < gardener_chance:
                         try:
-                            # Stacked tool chance: any gardener with a tool can trigger harvest upgrade
+                            # Stacked tool chance: any regular gardener (1-5) with a tool can trigger harvest upgrade; premium gardeners (6-9) never upgrade to harvest
                             total_harvest_upgrade_chance = sum(
                                 GARDENER_TOOLS.get(g["id"], {}).get("chance", 0)
                                 for g in gardeners
-                                if g.get("has_tool")
+                                if g.get("has_tool") and g.get("id", 0) <= 5
                             )
-                            upgraded_to_harvest = total_harvest_upgrade_chance > 0 and random.random() < total_harvest_upgrade_chance
+                            upgraded_to_harvest = not is_premium_gardener and total_harvest_upgrade_chance > 0 and random.random() < total_harvest_upgrade_chance
                             
                             if upgraded_to_harvest:
                                 # Perform full harvest instead of single gather (orchard upgrades apply; no chain)
@@ -14877,8 +15101,9 @@ async def gardener_background_task():
                                 current_balance = harvest_result["current_balance"]
                                 item_count = len(harvest_result["gathered_items"])
                                 
-                                # Update gardener stats with total money earned from harvest and plant count
-                                await asyncio.to_thread(update_gardener_stats, user_id, gardener_id, total_value, item_count)
+                                # Update gardener stats only for regular gardeners (premium 6-9 have no DB record)
+                                if gardener_id <= 5:
+                                    await asyncio.to_thread(update_gardener_stats, user_id, gardener_id, total_value, item_count)
                                 
                                 # Send cool upgrade message to #lawn
                                 for guild in bot.guilds:
@@ -14917,8 +15142,8 @@ async def gardener_background_task():
                             else:
                                 # Normal single gather (orchard fertilizer applies; no chain)
                                 gather_result = await perform_gather_for_user(user_id, apply_cooldown=False, apply_orchard_fertilizer=True)
-                                # Single gather = 1 plant
-                                await asyncio.to_thread(update_gardener_stats, user_id, gardener_id, gather_result["value"], 1)
+                                if gardener_id <= 5:
+                                    await asyncio.to_thread(update_gardener_stats, user_id, gardener_id, gather_result["value"], 1)
                                 
                                 user_name = "User"
                                 for guild in bot.guilds:
@@ -16063,6 +16288,7 @@ async def mine(interaction: discord.Interaction):
         if not await safe_defer(interaction, ephemeral=False):
             return
         
+        sync_premium_tier_from_member(interaction.user)
         user_id = interaction.user.id
         
         # Check if user is on Russian Roulette elimination cooldown (dead)
@@ -16096,6 +16322,8 @@ async def mine(interaction: discord.Interaction):
         mine_cooldown = MINE_COOLDOWN
         invite_reductions = get_invite_cooldown_reductions(user_id)
         mine_cooldown = max(0, mine_cooldown - invite_reductions.get("mine_reduction", 0))
+        premium_cd = get_premium_cooldown_reductions(user_id)
+        mine_cooldown = max(0, mine_cooldown - premium_cd.get("mine_reduction", 0))
         
         if last_mine_time > 0:
             cooldown_end = last_mine_time + mine_cooldown
@@ -16168,6 +16396,7 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
 
         sync_beta_tester_from_member(interaction.user)
         sync_server_booster_from_member(interaction.user)
+        sync_premium_tier_from_member(interaction.user)
         user_id = interaction.user.id
         holdings = get_user_crypto_holdings(user_id)
         prices = get_crypto_prices()
@@ -16219,6 +16448,7 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             total_sale_value = subtotal + extra_from_rank
             total_sale_value *= get_beta_tester_money_multiplier(user_id)
             total_sale_value *= get_server_booster_money_multiplier(user_id)
+            total_sale_value *= get_premium_tier_money_multiplier(user_id)
             total_sale_value *= get_nether_star_money_multiplier(user_id)
             total_sale_value *= get_edward_splash_money_multiplier(user_id)
             if has_shop_item(user_id, "msi_afterburner"):
@@ -16284,6 +16514,15 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
                 embed.add_field(
                     name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
                     value=f"{SERVER_BOOSTER_MONEY_MULTIPLIER:.2f}x - **+${extra_booster:.2f}**",
+                    inline=False
+                )
+            premium_tier = get_user_premium_tier(user_id)
+            if premium_tier >= 1:
+                mult = PREMIUM_MONEY_MULTIPLIERS.get(premium_tier, 1.0)
+                extra_premium = total_sale_value * (mult - 1.0) / mult
+                embed.add_field(
+                    name=PREMIUM_DISPLAY.get(premium_tier, "Premium"),
+                    value=f"{mult:.2f}x - **+${extra_premium:.2f}**",
                     inline=False
                 )
 
@@ -16361,6 +16600,7 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         sale_value = subtotal + extra_from_rank
         sale_value *= get_beta_tester_money_multiplier(user_id)
         sale_value *= get_server_booster_money_multiplier(user_id)
+        sale_value *= get_premium_tier_money_multiplier(user_id)
         sale_value *= get_nether_star_money_multiplier(user_id)
         sale_value *= get_edward_splash_money_multiplier(user_id)
         if has_shop_item(user_id, "msi_afterburner"):
@@ -16428,6 +16668,15 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             embed.add_field(
                 name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
                 value=f"{SERVER_BOOSTER_MONEY_MULTIPLIER:.2f}x - **+${extra_booster:.2f}**",
+                inline=False
+            )
+        premium_tier = get_user_premium_tier(user_id)
+        if premium_tier >= 1:
+            mult = PREMIUM_MONEY_MULTIPLIERS.get(premium_tier, 1.0)
+            extra_premium = sale_value * (mult - 1.0) / mult
+            embed.add_field(
+                name=PREMIUM_DISPLAY.get(premium_tier, "Premium"),
+                value=f"{mult:.2f}x - **+${extra_premium:.2f}**",
                 inline=False
             )
         # Item Boosts (shop / dailyshop items affecting this sale)

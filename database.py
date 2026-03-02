@@ -429,6 +429,39 @@ def set_user_server_booster(user_id: int, value: bool) -> None:
     )
 
 
+# Premium tier: 0 = none, 1 = Seed ($3), 2 = Sprout ($8), 3 = Sapling ($15), 4 = Evergreen ($20). Synced from Discord roles.
+PREMIUM_TREE_RING_REDUCTION = {0: 0, 1: 5, 2: 8, 3: 15, 4: 25}  # plants less per tree ring
+
+
+def get_user_premium_tier(user_id: int) -> int:
+    """Return premium tier 0-4 (0 = none, 1 = Seed, 2 = Sprout, 3 = Sapling, 4 = Evergreen)."""
+    users = _get_users_collection()
+    doc = users.find_one({"_id": int(user_id)}, {"premium_tier": 1})
+    return int(doc.get("premium_tier", 0)) if doc else 0
+
+
+def set_user_premium_tier(user_id: int, tier: int) -> None:
+    """Set the cached premium tier (0-4) for the user (synced from Discord roles)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    tier = max(0, min(4, int(tier)))
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"premium_tier": tier}},
+        upsert=True,
+    )
+
+
+def get_all_user_ids_with_premium_tier() -> list:
+    """Return list of user IDs that have premium_tier >= 1 (for premium gardener task)."""
+    users = _get_users_collection()
+    cursor = users.find(
+        {"premium_tier": {"$gte": 1}},
+        {"_id": 1},
+    )
+    return [doc["_id"] for doc in cursor]
+
+
 def increment_forage_count(user_id: int) -> None:
     users = _get_users_collection()
     users.update_one(
@@ -620,6 +653,17 @@ def add_user_bloom_cycle_plants(user_id: int, amount: int) -> None:
     users.update_one(
         {"_id": int(user_id)},
         {"$inc": {"bloom_cycle_plants": amount}},
+        upsert=True,
+    )
+
+
+def set_user_bloom_cycle_plants(user_id: int, value: int) -> None:
+    """Set user's bloom cycle plants to an exact value (e.g. for admin /setplanterrank or post-bloom sync)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"bloom_cycle_plants": max(0, int(value))}},
         upsert=True,
     )
 
@@ -1121,9 +1165,12 @@ def has_shop_item(user_id: int, item_id: str) -> bool:
 
 
 def get_tree_ring_interval(user_id: int) -> int:
-    """Return 50 if user has Time Machine (1 ring per 50 plants), else 100."""
+    """Return plants needed per tree ring: 50 or 100 (Time Machine) minus premium reduction (Seed 5, Sprout 8, Sapling 15, Evergreen 25)."""
     inv = get_user_shop_inventory(user_id)
-    return 50 if inv.get("time_machine", 0) >= 1 else 100
+    base = 50 if inv.get("time_machine", 0) >= 1 else 100
+    tier = get_user_premium_tier(user_id)
+    reduction = PREMIUM_TREE_RING_REDUCTION.get(tier, 0)
+    return max(1, base - reduction)
 
 
 def get_user_daily_shop_purchases(user_id: int) -> tuple:
