@@ -8310,72 +8310,76 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
                                    attackers: dict[int, int], channel_id: int,
                                    area_multiplier: float, *, achievements_ephemeral: bool = False):
     """Award plants to every participant. Record defeats, update PLANTER role, unlock achievements.
-    Achievement notifications and reward embeds are always sent via DM so only the user sees them."""
+    Achievement notifications and reward embeds are always sent via DM so only the user sees them.
+    Processes all participants in parallel so each user gets their DM instantly."""
     channel = interaction.guild.get_channel(channel_id)
     enemy_id = animal.get("id")
     guild = interaction.guild
-    try:
-        for user_id, total_damage in attackers.items():
+
+    async def reward_one_user(user_id: int, total_damage: int) -> None:
+        try:
+            member = guild.get_member(user_id)
+            if not member:
+                return
+
+            results, total_value = await asyncio.to_thread(
+                _pve_roll_items_and_batch_write, user_id, total_damage, area_multiplier)
+
+            # Record PvE defeat and update PLANTER role (plants from PvE count toward rank)
+            if enemy_id:
+                add_pve_defeat(user_id, enemy_id)
             try:
-                member = guild.get_member(user_id)
-                if not member:
-                    continue
-
-                results, total_value = await asyncio.to_thread(
-                    _pve_roll_items_and_batch_write, user_id, total_damage, area_multiplier)
-
-                # Record PvE defeat and update PLANTER role (plants from PvE count toward rank)
-                if enemy_id:
-                    add_pve_defeat(user_id, enemy_id)
-                try:
-                    await assign_gatherer_role(member, guild)
-                except Exception as e:
-                    print(f"Error assigning gatherer role after PvE for user {user_id}: {e}")
-
-                # Unlock per-enemy hidden achievement if first time (always DM so only user sees it)
-                if enemy_id:
-                    ach_key = PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT.get(enemy_id)
-                    if ach_key and unlock_hidden_achievement(user_id, ach_key):
-                        await send_hidden_achievement_notification_dm(user_id, ach_key)
-
-                # Slayer achievement category (total defeats) — always DM so only user sees it
-                total_defeats = get_user_total_pve_defeats(user_id)
-                new_slayer_level = get_achievement_level_for_stat("slayer", total_defeats)
-                cur_slayer = get_user_achievement_level(user_id, "slayer")
-                if new_slayer_level > cur_slayer:
-                    set_user_achievement_level(user_id, "slayer", new_slayer_level)
-                    await send_achievement_notification_dm(user_id, "slayer", new_slayer_level)
-
-                # PvE Master: defeat every type at least once — always DM so only user sees it
-                if PVE_MASTER_REQUIRED_IDS.issubset(set(get_user_pve_defeated(user_id))):
-                    if unlock_hidden_achievement(user_id, "pve_master"):
-                        await send_hidden_achievement_notification_dm(user_id, "pve_master")
-
-                plant_emojis = [get_item_display_emoji(r["name"]) for r in results]
-                emoji_display = " ".join(plant_emojis)
-                header = (
-                    f"You dealt **{total_damage}** damage "
-                    f"and gathered **{total_damage}** plant{'s' if total_damage != 1 else ''}!\n\n")
-                max_emoji_len = 4000 - len(header)
-                if len(emoji_display) > max_emoji_len:
-                    emoji_display = emoji_display[:max_emoji_len - 5] + " …"
-
-                reward_embed = discord.Embed(
-                    title=f"🎁 PvE Rewards — {animal['emoji']} {animal['name']}",
-                    description=f"{header}{emoji_display}",
-                    color=discord.Color.green())
-                reward_embed.add_field(
-                    name="💰 Total Earned", value=f"**${total_value:,.2f}**", inline=True)
-                reward_embed.set_footer(text="Thanks for defending the gathering grounds!")
-
-                # Send reward embed via DM (ephemeral-style) to avoid cluttering the channel
-                try:
-                    await member.send(embed=reward_embed)
-                except Exception:
-                    pass
+                await assign_gatherer_role(member, guild)
             except Exception as e:
-                print(f"PvE reward failed for user {user_id}: {e}")
+                print(f"Error assigning gatherer role after PvE for user {user_id}: {e}")
 
+            # Unlock per-enemy hidden achievement if first time (always DM so only user sees it)
+            if enemy_id:
+                ach_key = PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT.get(enemy_id)
+                if ach_key and unlock_hidden_achievement(user_id, ach_key):
+                    await send_hidden_achievement_notification_dm(user_id, ach_key)
+
+            # Slayer achievement category (total defeats) — always DM so only user sees it
+            total_defeats = get_user_total_pve_defeats(user_id)
+            new_slayer_level = get_achievement_level_for_stat("slayer", total_defeats)
+            cur_slayer = get_user_achievement_level(user_id, "slayer")
+            if new_slayer_level > cur_slayer:
+                set_user_achievement_level(user_id, "slayer", new_slayer_level)
+                await send_achievement_notification_dm(user_id, "slayer", new_slayer_level)
+
+            # PvE Master: defeat every type at least once — always DM so only user sees it
+            if PVE_MASTER_REQUIRED_IDS.issubset(set(get_user_pve_defeated(user_id))):
+                if unlock_hidden_achievement(user_id, "pve_master"):
+                    await send_hidden_achievement_notification_dm(user_id, "pve_master")
+
+            plant_emojis = [get_item_display_emoji(r["name"]) for r in results]
+            emoji_display = " ".join(plant_emojis)
+            header = (
+                f"You dealt **{total_damage}** damage "
+                f"and gathered **{total_damage}** plant{'s' if total_damage != 1 else ''}!\n\n")
+            max_emoji_len = 4000 - len(header)
+            if len(emoji_display) > max_emoji_len:
+                emoji_display = emoji_display[:max_emoji_len - 5] + " …"
+
+            reward_embed = discord.Embed(
+                title=f"🎁 PvE Rewards — {animal['emoji']} {animal['name']}",
+                description=f"{header}{emoji_display}",
+                color=discord.Color.green())
+            reward_embed.add_field(
+                name="💰 Total Earned", value=f"**${total_value:,.2f}**", inline=True)
+            reward_embed.set_footer(text="Thanks for defending the gathering grounds!")
+
+            # Send reward embed via DM (ephemeral-style) to avoid cluttering the channel
+            try:
+                await member.send(embed=reward_embed)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"PvE reward failed for user {user_id}: {e}")
+
+    try:
+        tasks = [reward_one_user(user_id, total_damage) for user_id, total_damage in attackers.items()]
+        await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as e:
         print(f"Error distributing PvE rewards: {e}")
 
