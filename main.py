@@ -13413,6 +13413,11 @@ async def setplanterrank(interaction: discord.Interaction, user: discord.Member,
             await safe_interaction_response(interaction, interaction.followup.send,
                 "❌ **Error**: This command must be used in a server.", ephemeral=True)
             return
+        if not hasattr(interaction.channel, "name") or interaction.channel.name != "hidden":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
+                ephemeral=True)
+            return
         rank_name = rank.value
         min_plants = _PLANTER_RANK_MIN_CYCLE_PLANTS.get(rank_name, 0)
         set_user_bloom_cycle_plants(user.id, min_plants)
