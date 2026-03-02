@@ -1424,8 +1424,8 @@ PVE_TRIGGER_CHANCE_GATHER = 0.08   # 8% per /gather for animals (event multiplie
 PVE_TRIGGER_CHANCE_HARVEST = 0.04  # 4% per /harvest for animals (event multiplies)
 
 # Steal: stealable chance per successful gather/harvest (no PvE when stealable; crit cannot be stolen)
-STEAL_CHANCE_GATHER = 0.01   # 1% per /gather
-STEAL_CHANCE_HARVEST = 0.005  # 0.5% per /harvest
+STEAL_CHANCE_GATHER = 0.04   # 4% per /gather (4x previous)
+STEAL_CHANCE_HARVEST = 0.02  # 2% per /harvest (4x previous)
 STEAL_WINDOW_GATHER_SEC = 4
 STEAL_WINDOW_HARVEST_SEC = 2
 
@@ -2681,50 +2681,50 @@ ACHIEVEMENTS = {
             {
                 "level": 4,
                 "name": "Pillager",
-                "description": "Steal 40 gathers/harvests",
-                "threshold": 40,
+                "description": "Steal 35 gathers/harvests",
+                "threshold": 35,
                 "boost": 0.20  # 20%
             },
             {
                 "level": 5,
                 "name": "Grand Theft Auto",
-                "description": "Steal 100 gathers/harvests",
-                "threshold": 100,
+                "description": "Steal 75 gathers/harvests",
+                "threshold": 75,
                 "boost": 0.40  # 40%
             },
             {
                 "level": 6,
                 "name": "Phantom Thief",
-                "description": "Steal 250 gathers/harvests",
-                "threshold": 250,
+                "description": "Steal 150 gathers/harvests",
+                "threshold": 150,
                 "boost": 0.70  # 70%
             },
             {
                 "level": 7,
                 "name": "They'll Never Know It Was Me",
-                "description": "Steal 500 gathers/harvests",
-                "threshold": 500,
+                "description": "Steal 250 gathers/harvests",
+                "threshold": 250,
                 "boost": 1.0  # 100%
             },
             {
                 "level": 8,
                 "name": "Pickpocket 100",
-                "description": "Steal 1,000 gathers/harvests",
-                "threshold": 1000,
+                "description": "Steal 350 gathers/harvests",
+                "threshold": 350,
                 "boost": 1.5  # 150%
             },
             {
                 "level": 9,
                 "name": "Untouchable",
-                "description": "Steal 2,500 gathers/harvests",
-                "threshold": 2500,
+                "description": "Steal 425 gathers/harvests",
+                "threshold": 425,
                 "boost": 2.0  # 200%
             },
             {
                 "level": 10,
                 "name": "Level 99 Mafia Boss",
-                "description": "Steal 5,000 gathers/harvests",
-                "threshold": 5000,
+                "description": "Steal 500 gathers/harvests",
+                "threshold": 500,
                 "boost": 3.0  # 300%
             }
         ]
@@ -7117,10 +7117,10 @@ class StealView(discord.ui.View):
                 "❌ You need a Planter rank to steal! Use /gather to rank up.", ephemeral=True)
             return
         stealer_id = interaction.user.id
-        if not has_shop_item(stealer_id, "bandana") and abs(stealer_level - self.victim_planter_level) > 1:
+        if not has_shop_item(stealer_id, "bandana") and abs(stealer_level - self.victim_planter_level) > 2:
             await safe_interaction_response(
                 interaction, interaction.response.send_message,
-                "❌ You can only steal from someone with equal rank, or one rank above/below!", ephemeral=True)
+                "❌ You can only steal from someone within 2 Planter ranks above or below you!", ephemeral=True)
             return
 
         self._stolen = True
@@ -7290,6 +7290,8 @@ class WildAnimalView(discord.ui.View):
                 # Unlock the channel IMMEDIATELY so commands aren't stuck
                 active_pve_events.pop(self.channel_id, None)
 
+                # Send instant "Defeated!" DMs to ALL participants immediately (same second)
+                await _pve_send_instant_defeat_dms(interaction.guild, self.animal, list(self.attackers.keys()))
                 asyncio.create_task(
                     _pve_distribute_rewards(interaction, self.animal, dict(self.attackers), self.channel_id, self.area_multiplier))
                 return
@@ -7380,6 +7382,9 @@ class BulletAntView(discord.ui.View):
                             await intro_msg.edit(embed=defeat_embed)
                         except Exception as e:
                             print(f"Bullet Ant Swarm intro edit failed: {e}")
+                    await _pve_send_instant_defeat_dms(
+                        interaction.guild, BULLET_ANT_SWARM_REWARD_ANIMAL,
+                        list(self.swarm_state["attackers"].keys()))
                     asyncio.create_task(
                         _pve_distribute_rewards(
                             interaction, BULLET_ANT_SWARM_REWARD_ANIMAL,
@@ -7530,6 +7535,9 @@ class BeeView(discord.ui.View):
                             await intro_msg.edit(embed=defeat_embed)
                         except Exception as e:
                             print(f"Bee Swarm intro edit failed: {e}")
+                    await _pve_send_instant_defeat_dms(
+                        interaction.guild, BEE_SWARM_REWARD_ANIMAL,
+                        list(self.swarm_state["attackers"].keys()))
                     asyncio.create_task(
                         _pve_distribute_rewards(
                             interaction, BEE_SWARM_REWARD_ANIMAL,
@@ -7716,9 +7724,10 @@ class BossView(discord.ui.View):
                                 await ch.send(embed=broadcast_embed)
                         except Exception as e:
                             print(f"Boss defeat broadcast failed in {ch.name}: {e}")
-                    # Distribute rewards for each defeated boss (Twins = 2 calls); use ephemeral achievements for multi-boss
+                    # Send instant "Defeated!" DMs to all participants for each boss, then distribute rewards
                     multi_boss = len(pending) > 1
                     for boss, attackers in pending:
+                        await _pve_send_instant_defeat_dms(interaction.guild, boss, list(attackers.keys()))
                         asyncio.create_task(_pve_distribute_rewards(
                             interaction, boss, attackers, self.channel_id, self.area_multiplier,
                             achievements_ephemeral=multi_boss))
@@ -7979,6 +7988,7 @@ class EnderDragonView(discord.ui.View):
                     tower_attackers = ender_dragon_tower_attackers.pop(self.guild_id, {})
                     all_user_ids = set(self.attackers.keys()) | set(tower_attackers.keys())
                     combined_attackers = {uid: self.attackers.get(uid, 0) + tower_attackers.get(uid, 0) for uid in all_user_ids}
+                    await _pve_send_instant_defeat_dms(interaction.guild, self.boss, list(combined_attackers.keys()))
                     asyncio.create_task(_pve_distribute_rewards(
                         interaction, self.boss, combined_attackers, self.channel_id, self.area_multiplier))
                 return
@@ -8306,12 +8316,34 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
     return display_results, total_balance
 
 
+async def _pve_send_instant_defeat_dms(guild: discord.Guild, animal: dict, attacker_ids: list[int]) -> None:
+    """Send instant 'Defeated!' DMs to all participants so everyone gets feedback the exact second the boss/animal dies.
+    Call this from the defeat handler BEFORE create_task(_pve_distribute_rewards) so DMs go out immediately."""
+    if not attacker_ids:
+        return
+    instant_embed = discord.Embed(
+        title=f"✅ Defeated — {animal['emoji']} {animal['name']}",
+        description="Your plants and money are being calculated… you'll get your full reward in a moment!",
+        color=discord.Color.green(),
+    )
+
+    async def send_one(user_id: int) -> None:
+        try:
+            member = guild.get_member(user_id)
+            if member:
+                await member.send(embed=instant_embed)
+        except Exception:
+            pass
+
+    await asyncio.gather(*[send_one(uid) for uid in attacker_ids], return_exceptions=True)
+
+
 async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict,
                                    attackers: dict[int, int], channel_id: int,
                                    area_multiplier: float, *, achievements_ephemeral: bool = False):
     """Award plants to every participant. Record defeats, update PLANTER role, unlock achievements.
     Achievement notifications and reward embeds are always sent via DM so only the user sees them.
-    Processes all participants in parallel so each user gets their DM instantly."""
+    Instant 'Defeated!' DMs are sent by the caller before this task runs."""
     channel = interaction.guild.get_channel(channel_id)
     enemy_id = animal.get("id")
     guild = interaction.guild
@@ -10682,7 +10714,12 @@ async def userstats(interaction: discord.Interaction):
                 completed_regular += 1
         completed_hidden = int(ach_data.get("hidden_achievements_discovered", 0))
         completed_slots = completed_regular + completed_hidden
-        completion_pct = round((completed_slots / total_completion_slots) * 100) if total_completion_slots else 0
+        # Weighted completion: prestige (bloom) has most weight so Pine II isn't ~70% done
+        max_bloom_level = 18  # REDWOOD
+        bloom_count = int(doc.get("bloom_count", 0))
+        prestige_pct = (bloom_count / max_bloom_level) * 100 if max_bloom_level else 0
+        ach_pct = (completed_slots / total_completion_slots) * 100 if total_completion_slots else 0
+        completion_pct = round(0.7 * min(100, prestige_pct) + 0.3 * min(100, ach_pct))
         completion_pct = min(100, max(0, completion_pct))
         bar_length = 15
         filled = round((completion_pct / 100.0) * bar_length) if bar_length else 0
