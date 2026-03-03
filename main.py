@@ -7019,15 +7019,25 @@ async def _post_rares_nether_star_claim(guild: discord.Guild, user: discord.Memb
     await _post_to_rares_channel(guild, msg)
 
 
-def _gather_critical_path(user_id: int, channel_name: str, area_mult: float,
-                          user_planter_level: int, area: dict) -> dict:
+def _gather_critical_path(member, user_id: int, channel_name: str, area: dict) -> dict:
     """All DB work for /gather in ONE sync call (runs in a single thread).
 
-    1 read (full_data) + 1 write (gather + command-count + cooldown).
+    Syncs beta/booster/premium from Discord, then 1 read (full_data) + 1 write (gather + command-count + cooldown).
     Area check, cooldown check and chain roll are pure computation.
     Returns a dict describing the outcome so the caller can build the embed
     and send Discord messages without touching the database again.
     """
+    # Sync Discord role state to DB in-thread so the main event loop is not blocked
+    sync_beta_tester_from_member(member)
+    sync_server_booster_from_member(member)
+    sync_premium_tier_from_member(member)
+    user_planter_level = get_user_planter_level(member)
+
+    area_mult = area.get("multiplier", 1.0)
+    if has_shop_item(user_id, "atlas"):
+        area_mult *= 2.0
+    area_mult *= area.get("gather_boost", 1.0)
+
     full_data = get_user_gather_full_data(user_id)
     active_events = get_active_events_cached()
 
@@ -7099,6 +7109,7 @@ def _gather_critical_path(user_id: int, channel_name: str, area_mult: float,
         "stealable": stealable,
         "victim_planter_level": user_planter_level,
         "steal_payload": steal_payload,
+        "area_mult": area_mult,
     }
 
 
@@ -8676,9 +8687,6 @@ async def gather(interaction: discord.Interaction):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
-        sync_beta_tester_from_member(interaction.user)
-        sync_server_booster_from_member(interaction.user)
-        sync_premium_tier_from_member(interaction.user)
         channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
         user_id = interaction.user.id
 
@@ -8714,16 +8722,10 @@ async def gather(interaction: discord.Interaction):
             return
 
         area = GATHERING_AREAS[channel_name]
-        area_mult = area.get("multiplier", 1.0)
-        if has_shop_item(user_id, "atlas"):
-            area_mult *= 2.0
-        area_mult *= area.get("gather_boost", 1.0)
-        user_planter_level = get_user_planter_level(interaction.user)
 
-        # === ONE thread call: data fetch + area check + cooldown + gather + chain roll ===
+        # === ONE thread call: sync roles to DB + data fetch + area check + cooldown + gather + chain roll ===
         result = await asyncio.to_thread(
-            _gather_critical_path, user_id, channel_name, area_mult,
-            user_planter_level, area)
+            _gather_critical_path, interaction.user, user_id, channel_name, area)
 
         # --- handle early-exit cases ---
         if result.get("area_error"):
@@ -8748,6 +8750,7 @@ async def gather(interaction: discord.Interaction):
         gather_result = result["gather_result"]
         full_data = result["full_data"]
         chain_triggered = result["chain_triggered"]
+        area_mult = result.get("area_mult", 1.0)
 
         # --- build embed (pure computation, no DB) ---
         is_crit = gather_result.get('is_critical_gather', False)
@@ -8977,6 +8980,113 @@ async def gather(interaction: discord.Interaction):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
+def _water_critical_path(user_id: int) -> dict:
+    """Run in thread: all DB reads + logic + writes for /water. Returns dict for response and notifications."""
+    EST_OFFSET = datetime.timedelta(hours=-5)
+    current_time = time.time()
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    now_est = now_utc + EST_OFFSET
+    current_date = now_est.date()
+    current_hour = now_est.hour
+
+    last_water_time = get_user_last_water_time(user_id)
+    invite_reductions = get_invite_cooldown_reductions(user_id)
+    has_double_water = invite_reductions.get("water_double", False)
+
+    if has_double_water and current_hour < 12:
+        next_reset_est = now_est.replace(hour=12, minute=0, second=0, microsecond=0)
+    else:
+        next_reset_est = (now_est + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    time_until_reset = (next_reset_est - now_est).total_seconds()
+
+    already_watered = False
+    if last_water_time > 0:
+        last_water_utc = datetime.datetime.utcfromtimestamp(last_water_time)
+        last_water_est = last_water_utc + EST_OFFSET
+        last_water_date = last_water_est.date()
+        last_water_hour = last_water_est.hour
+        if last_water_date == current_date:
+            if has_double_water:
+                in_afternoon_window = current_hour >= 12
+                last_in_afternoon_window = last_water_hour >= 12
+                if in_afternoon_window and last_in_afternoon_window:
+                    already_watered = True
+                elif not in_afternoon_window and not last_in_afternoon_window:
+                    already_watered = True
+            else:
+                already_watered = True
+
+    if already_watered:
+        time_left = int(time_until_reset)
+        if time_left < 60:
+            time_msg = f"{time_left} second{'s' if time_left != 1 else ''}"
+        elif time_left < 3600:
+            minutes_left = time_left // 60
+            seconds_left = time_left % 60
+            time_msg = f"{minutes_left} minute{'s' if minutes_left != 1 else ''} and {seconds_left} second{'s' if seconds_left != 1 else ''}"
+        else:
+            hours_left = time_left // 3600
+            minutes_left = (time_left % 3600) // 60
+            seconds_left = time_left % 60
+            time_msg = f"{hours_left} hour{'s' if hours_left != 1 else ''}, {minutes_left} minute{'s' if minutes_left != 1 else ''}, and {seconds_left} second{'s' if seconds_left != 1 else ''}"
+        return {"already_watered": True, "time_msg": time_msg}
+
+    consecutive_days = get_user_consecutive_water_days(user_id)
+    is_first_water_today = True
+    if last_water_time > 0:
+        last_water_utc = datetime.datetime.utcfromtimestamp(last_water_time)
+        last_water_est = last_water_utc + EST_OFFSET
+        last_water_date = last_water_est.date()
+        if last_water_date == current_date:
+            is_first_water_today = False
+        else:
+            yesterday_date = (now_est - datetime.timedelta(days=1)).date()
+            if last_water_date != yesterday_date and last_water_date != current_date:
+                consecutive_days = 0
+    else:
+        consecutive_days = 0
+
+    if is_first_water_today:
+        consecutive_days += 1
+        set_user_consecutive_water_days(user_id, consecutive_days)
+
+    update_user_last_water_time(user_id, current_time)
+    increment_user_water_count(user_id)
+    money_reward = normalize_money(consecutive_days * 5000.0)
+    current_balance = get_user_balance(user_id)
+    new_balance = normalize_money(current_balance + money_reward)
+    update_user_balance(user_id, new_balance)
+    daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
+
+    tree_rings_awarded = 0
+    if consecutive_days == 5 and is_first_water_today:
+        increment_tree_rings(user_id, 10)
+        tree_rings_awarded = 10
+
+    water_label = "💧💧 **Double Water!** " if not is_first_water_today else ""
+    message = f"{water_label}You've been rewarded with **${money_reward:,.2f}**. Your streak is **{consecutive_days}**! (**{daily_bonus_multiplier:.2f}x**)"
+    if tree_rings_awarded > 0:
+        message += f" You've been awarded **{tree_rings_awarded} Tree Rings**!"
+
+    water_streak_level_up = None
+    leap_year_unlocked = False
+    if is_first_water_today:
+        new_water_streak_level = get_achievement_level_for_stat("water_streak", consecutive_days)
+        current_water_streak_level = get_user_achievement_level(user_id, "water_streak")
+        if new_water_streak_level > current_water_streak_level:
+            set_user_achievement_level(user_id, "water_streak", new_water_streak_level)
+            water_streak_level_up = new_water_streak_level
+        if consecutive_days == 366:
+            leap_year_unlocked = unlock_hidden_achievement(user_id, "leap_year")
+
+    return {
+        "already_watered": False,
+        "message": message,
+        "water_streak_level_up": water_streak_level_up,
+        "leap_year_unlocked": leap_year_unlocked,
+    }
+
+
 #/water command - daily watering system
 @bot.tree.command(name="water", description="Water your plants daily for bonus rewards! (Resets at midnight)")
 async def water(interaction: discord.Interaction):
@@ -8985,144 +9095,19 @@ async def water(interaction: discord.Interaction):
             return
 
         user_id = interaction.user.id
-        current_time = time.time()
-        last_water_time = get_user_last_water_time(user_id)
-        
-        # Convert to EST (UTC-5)
-        EST_OFFSET = datetime.timedelta(hours=-5)
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        now_est = now_utc + EST_OFFSET
-        current_date = now_est.date()
-        current_hour = now_est.hour
-        
-        # Check if user has double-water perk (invite reward tier 19)
-        invite_reductions = get_invite_cooldown_reductions(user_id)
-        has_double_water = invite_reductions.get("water_double", False)
-        
-        # Get next reset time
-        # If before 12 PM EST and has double water: next reset is 12 PM today
-        # Otherwise: next reset is midnight (12 AM) tomorrow
-        if has_double_water and current_hour < 12:
-            next_reset_est = now_est.replace(hour=12, minute=0, second=0, microsecond=0)
-        else:
-            next_reset_est = (now_est + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        time_until_reset = (next_reset_est - now_est).total_seconds()
-        
-        # Check if user has already watered in the current window
-        if last_water_time > 0:
-            last_water_utc = datetime.datetime.utcfromtimestamp(last_water_time)
-            last_water_est = last_water_utc + EST_OFFSET
-            last_water_date = last_water_est.date()
-            last_water_hour = last_water_est.hour
-            
-            already_watered = False
-            if last_water_date == current_date:
-                if has_double_water:
-                    # With double water: two windows per day (12 AM-12 PM and 12 PM-12 AM)
-                    # Check if they already watered in the current 12-hour window
-                    in_afternoon_window = current_hour >= 12
-                    last_in_afternoon_window = last_water_hour >= 12
-                    if in_afternoon_window and last_in_afternoon_window:
-                        already_watered = True  # Already watered in PM window
-                    elif not in_afternoon_window and not last_in_afternoon_window:
-                        already_watered = True  # Already watered in AM window
-                    # If current is PM and last was AM (or vice versa), they can water again
-                else:
-                    already_watered = True  # Without perk, once per day
-            
-            if already_watered:
-                time_left = int(time_until_reset)
-                
-                # Format time remaining
-                if time_left < 60:
-                    time_msg = f"{time_left} second{'s' if time_left != 1 else ''}"
-                elif time_left < 3600:
-                    minutes_left = time_left // 60
-                    seconds_left = time_left % 60
-                    time_msg = f"{minutes_left} minute{'s' if minutes_left != 1 else ''} and {seconds_left} second{'s' if seconds_left != 1 else ''}"
-                else:
-                    hours_left = time_left // 3600
-                    minutes_left = (time_left % 3600) // 60
-                    seconds_left = time_left % 60
-                    time_msg = f"{hours_left} hour{'s' if hours_left != 1 else ''}, {minutes_left} minute{'s' if minutes_left != 1 else ''}, and {seconds_left} second{'s' if seconds_left != 1 else ''}"
-                
-                await safe_interaction_response(interaction, interaction.followup.send,
-                    f"💧 {interaction.user.mention}, you need to wait **{time_msg}** before watering your plants again!", ephemeral=False)
-                return
-        
-        # Calculate consecutive days
-        # Streak only breaks if the user missed an ENTIRE calendar day (midnight reset)
-        # Missing the 12 PM double-water window does NOT break the streak
-        consecutive_days = get_user_consecutive_water_days(user_id)
-        
-        # Only update streak on the FIRST water of the day (not the second double-water)
-        is_first_water_today = True
-        if last_water_time > 0:
-            last_water_utc = datetime.datetime.utcfromtimestamp(last_water_time)
-            last_water_est = last_water_utc + EST_OFFSET
-            last_water_date = last_water_est.date()
-            
-            if last_water_date == current_date:
-                # This is the second water today (double-water perk) - don't change streak
-                is_first_water_today = False
-            else:
-                # First water of a new day - check if streak continues
-                yesterday_date = (now_est - datetime.timedelta(days=1)).date()
-                if last_water_date != yesterday_date and last_water_date != current_date:
-                    # Last water was not yesterday and not today - streak breaks
-                    consecutive_days = 0
-        else:
-            consecutive_days = 0  # First time watering
-        
-        if is_first_water_today:
-            consecutive_days += 1
-            set_user_consecutive_water_days(user_id, consecutive_days)
-        
-        # Update last water time and increment water count
-        update_user_last_water_time(user_id, current_time)
-        increment_user_water_count(user_id)
-        
-        # Calculate money reward: $5,000 per day (day 1 = $5k, day 2 = $10k, etc.)
-        money_reward = consecutive_days * 5000.0
-        money_reward = normalize_money(money_reward)
-        
-        # Update user balance with reward
-        current_balance = get_user_balance(user_id)
-        new_balance = normalize_money(current_balance + money_reward)
-        update_user_balance(user_id, new_balance)
-        
-        # Get water count and multiplier
-        water_count = get_user_water_count(user_id)
-        water_multiplier = get_water_multiplier(user_id)
-        daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
-        
-        # Award 10 Tree Rings on 5th consecutive day
-        tree_rings_awarded = 0
-        if consecutive_days == 5 and is_first_water_today:
-            increment_tree_rings(user_id, 10)
-            tree_rings_awarded = 10
-        
-        # Build the message
-        water_label = "💧💧 **Double Water!** " if not is_first_water_today else ""
-        message = f"{water_label}{interaction.user.mention}, you've been rewarded with **${money_reward:,.2f}**. Your streak is **{consecutive_days}**! (**{daily_bonus_multiplier:.2f}x**)"
-        
-        # Add Tree Rings message if it's the 5th day
-        if tree_rings_awarded > 0:
-            message += f" You've been awarded **{tree_rings_awarded} Tree Rings**!"
-        
+        result = await asyncio.to_thread(_water_critical_path, user_id)
+
+        if result["already_watered"]:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"💧 {interaction.user.mention}, you need to wait **{result['time_msg']}** before watering your plants again!", ephemeral=False)
+            return
+
+        message = f"💧 {interaction.user.mention}, " + result["message"]
         await safe_interaction_response(interaction, interaction.followup.send, message, ephemeral=False)
-        
-        # Check and update water_streak achievement level (after main response)
-        if is_first_water_today:
-            new_water_streak_level = get_achievement_level_for_stat("water_streak", consecutive_days)
-            current_water_streak_level = get_user_achievement_level(user_id, "water_streak")
-            if new_water_streak_level > current_water_streak_level:
-                set_user_achievement_level(user_id, "water_streak", new_water_streak_level)
-                await send_achievement_notification(interaction, "water_streak", new_water_streak_level)
-            
-            # Check for hidden achievement: Leap Year (water streak of 366)
-            if consecutive_days == 366 and unlock_hidden_achievement(user_id, "leap_year"):
-                await send_hidden_achievement_notification(interaction, "leap_year")
+        if result.get("water_streak_level_up") is not None:
+            await send_achievement_notification(interaction, "water_streak", result["water_streak_level_up"])
+        if result.get("leap_year_unlocked"):
+            await send_hidden_achievement_notification(interaction, "leap_year")
     except Exception as e:
         print(f"Error in water command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
@@ -9434,13 +9419,21 @@ async def perform_harvest_for_user(user_id: int, allow_chain: bool = True,
 
 
 #/harvest command, basically /castnet
-def _harvest_critical_path(user_id: int, channel_name: str, area_mult: float,
-                           user_planter_level: int, area: dict) -> dict:
+def _harvest_critical_path(member, user_id: int, channel_name: str, area: dict) -> dict:
     """All DB work for /harvest in ONE sync call (runs in a single thread).
 
-    1 read (full_data) + 1 write (harvest batch + cooldown + command-count).
+    Syncs beta/booster/premium from Discord, then 1 read (full_data) + 1 write (harvest batch + cooldown + command-count).
     Returns a dict so the caller can build the embed without touching the DB.
     """
+    sync_beta_tester_from_member(member)
+    sync_server_booster_from_member(member)
+    sync_premium_tier_from_member(member)
+    user_planter_level = get_user_planter_level(member)
+    area_mult = area.get("multiplier", 1.0)
+    if has_shop_item(user_id, "atlas"):
+        area_mult *= 2.0
+    area_mult *= area.get("gather_boost", 1.0)
+
     full_data = get_user_harvest_full_data(user_id)
 
     # --- area access check: use effective planter level (max of role and DB from bloom_cycle_plants) ---
@@ -9495,6 +9488,7 @@ def _harvest_critical_path(user_id: int, channel_name: str, area_mult: float,
         "stealable": stealable,
         "victim_planter_level": user_planter_level,
         "steal_payload": steal_payload,
+        "area_mult": area_mult,
     }
 
 
@@ -9586,9 +9580,6 @@ async def harvest(interaction: discord.Interaction):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
-        sync_beta_tester_from_member(interaction.user)
-        sync_server_booster_from_member(interaction.user)
-        sync_premium_tier_from_member(interaction.user)
         channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
         user_id = interaction.user.id
 
@@ -9623,16 +9614,10 @@ async def harvest(interaction: discord.Interaction):
             return
 
         area = GATHERING_AREAS[channel_name]
-        area_mult = area.get("multiplier", 1.0)
-        if has_shop_item(user_id, "atlas"):
-            area_mult *= 2.0
-        area_mult *= area.get("gather_boost", 1.0)
-        user_planter_level = get_user_planter_level(interaction.user)
 
-        # === ONE thread call: data fetch + area check + cooldown + harvest + chain roll ===
+        # === ONE thread call: sync roles + data fetch + area check + cooldown + harvest + chain roll ===
         crit = await asyncio.to_thread(
-            _harvest_critical_path, user_id, channel_name, area_mult,
-            user_planter_level, area)
+            _harvest_critical_path, interaction.user, user_id, channel_name, area)
 
         if crit.get("area_error"):
             await safe_interaction_response(interaction, interaction.followup.send,
@@ -9656,6 +9641,7 @@ async def harvest(interaction: discord.Interaction):
         result = crit["result"]
         full_data = crit["full_data"]
         chain_triggered = crit["chain_triggered"]
+        area_mult = crit.get("area_mult", 1.0)
 
         gathered_items = result["gathered_items"]
         total_value = result["total_value"]
@@ -10102,6 +10088,47 @@ async def bloom(interaction: discord.Interaction):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
+def _unlock_critical_path(member, user_id: int, area_key: str) -> dict:
+    """Run in thread: all DB reads + checks + writes for /unlock. Returns result dict for embed/error."""
+    name = getattr(member, "name", "You")
+    if area_key not in GATHERING_AREAS or GATHERING_AREAS[area_key]["unlocked_by_default"]:
+        return {"success": False, "error": "❌ Invalid area!"}
+    area_data = GATHERING_AREAS[area_key]
+    unlocked_areas = get_user_unlocked_areas(user_id)
+    if unlocked_areas.get(area_key, False):
+        return {"success": False, "error": f"❌ You've already unlocked **{area_data['display_name']}**, {name}!"}
+    if area_data["previous_area"] and not unlocked_areas.get(area_data["previous_area"], False):
+        prev_display = GATHERING_AREAS[area_data["previous_area"]]["display_name"]
+        return {"success": False, "error": f"❌ You must unlock **{prev_display}** before you can unlock **{area_data['display_name']}**, {name}!"}
+    role_level = get_user_planter_level(member)
+    cycle_plants = get_user_bloom_cycle_plants(user_id)
+    effective_planter_level = max(role_level, get_planter_level_from_total_items(cycle_plants))
+    if effective_planter_level < area_data["required_planter_level"]:
+        return {"success": False, "error": f"❌ You must be **{area_data['required_planter_rank']}** or above to unlock **{area_data['display_name']}**, {name}! Keep gathering to rank up!"}
+    unlock_cost = bloom_scaled_price(user_id, area_data["unlock_cost"])
+    user_balance = get_user_balance(user_id)
+    if user_balance < unlock_cost:
+        money_needed = unlock_cost - user_balance
+        return {"success": False, "error": f"❌ You need **${money_needed:,.2f}** more to unlock **{area_data['display_name']}**, {name}! (Cost: **${unlock_cost:,}**)"}
+    new_balance = normalize_money(user_balance - unlock_cost)
+    update_user_balance(user_id, new_balance)
+    unlock_user_area(user_id, area_key)
+    updated_unlocked = get_user_unlocked_areas(user_id)
+    unlocked_levels = [i + 1 for i, key in enumerate(AREA_ORDER_FOR_ACHIEVEMENT) if updated_unlocked.get(key)]
+    areas_achievement_level = max(unlocked_levels) if unlocked_levels else 0
+    current_areas_achievement = get_user_achievement_level(user_id, "areas_unlocked")
+    should_notify_areas = areas_achievement_level > current_areas_achievement
+    if should_notify_areas:
+        set_user_achievement_level(user_id, "areas_unlocked", areas_achievement_level)
+    return {
+        "success": True,
+        "new_balance": new_balance,
+        "area_data": area_data,
+        "areas_achievement_level": areas_achievement_level,
+        "should_notify_areas": should_notify_areas,
+    }
+
+
 # /unlock command - unlock new gathering areas
 @bot.tree.command(name="unlock", description="Unlock a new gathering area!")
 @app_commands.describe(area="The area to unlock")
@@ -10116,61 +10143,18 @@ async def unlock(interaction: discord.Interaction, area: app_commands.Choice[str
     try:
         if not await safe_defer(interaction, ephemeral=False):
             return
-        
+
         user_id = interaction.user.id
         area_key = area.value
-        
-        if area_key not in GATHERING_AREAS or GATHERING_AREAS[area_key]["unlocked_by_default"]:
+        result = await asyncio.to_thread(_unlock_critical_path, interaction.user, user_id, area_key)
+
+        if not result["success"]:
             await safe_interaction_response(interaction, interaction.followup.send,
-                "❌ Invalid area!", ephemeral=True)
+                result["error"], ephemeral=True)
             return
-        
-        area_data = GATHERING_AREAS[area_key]
-        
-        # Check if already unlocked
-        unlocked_areas = get_user_unlocked_areas(user_id)
-        if unlocked_areas.get(area_key, False):
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"❌ You've already unlocked **{area_data['display_name']}**, {interaction.user.name}!",
-                ephemeral=True)
-            return
-        
-        # Check if previous area is unlocked (progression order)
-        if area_data["previous_area"]:
-            if not unlocked_areas.get(area_data["previous_area"], False):
-                prev_display = GATHERING_AREAS[area_data["previous_area"]]["display_name"]
-                await safe_interaction_response(interaction, interaction.followup.send,
-                    f"❌ You must unlock **{prev_display}** before you can unlock **{area_data['display_name']}**, {interaction.user.name}!",
-                    ephemeral=True)
-                return
-        
-        # Check planter rank: use max of Discord role and DB level (bloom_cycle_plants)
-        role_level = get_user_planter_level(interaction.user)
-        cycle_plants = get_user_bloom_cycle_plants(user_id)
-        effective_planter_level = max(role_level, get_planter_level_from_total_items(cycle_plants))
-        if effective_planter_level < area_data["required_planter_level"]:
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"❌ You must be **{area_data['required_planter_rank']}** or above to unlock **{area_data['display_name']}**, {interaction.user.name}! Keep gathering to rank up!",
-                ephemeral=True)
-            return
-        
-        # Check if user has enough money (scale unlock cost by bloom count like other prices)
-        base_unlock_cost = area_data["unlock_cost"]
-        unlock_cost = bloom_scaled_price(user_id, base_unlock_cost)
-        user_balance = get_user_balance(user_id)
-        if user_balance < unlock_cost:
-            money_needed = unlock_cost - user_balance
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"❌ You need **${money_needed:,.2f}** more to unlock **{area_data['display_name']}**, {interaction.user.name}! (Cost: **${unlock_cost:,}**)",
-                ephemeral=True)
-            return
-        
-        # Deduct the money and unlock the area
-        new_balance = normalize_money(user_balance - unlock_cost)
-        update_user_balance(user_id, new_balance)
-        unlock_user_area(user_id, area_key)
-        
-        # Create success embed
+
+        area_data = result["area_data"]
+        new_balance = result["new_balance"]
         embed = discord.Embed(
             title=f"{area_data['emoji']} Area Unlocked!",
             description=f"{interaction.user.mention} has unlocked **{area_data['display_name']}**!",
@@ -10178,19 +10162,9 @@ async def unlock(interaction: discord.Interaction, area: app_commands.Choice[str
         )
         embed.add_field(name="📈 Area Multiplier", value=f"**{area_data['multiplier']}x**", inline=False)
         embed.add_field(name="💵 New Balance", value=f"**${new_balance:,.2f}**", inline=False)
-        
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
-        
-        # Award areas_unlocked achievement (progression: jungle → grove → marsh → bog → mire)
-        updated_unlocked = get_user_unlocked_areas(user_id)
-        unlocked_levels = [
-            i + 1 for i, key in enumerate(AREA_ORDER_FOR_ACHIEVEMENT) if updated_unlocked.get(key)
-        ]
-        areas_achievement_level = max(unlocked_levels) if unlocked_levels else 0
-        current_areas_achievement = get_user_achievement_level(user_id, "areas_unlocked")
-        if areas_achievement_level > current_areas_achievement:
-            set_user_achievement_level(user_id, "areas_unlocked", areas_achievement_level)
-            await send_achievement_notification(interaction, "areas_unlocked", areas_achievement_level)
+        if result.get("should_notify_areas"):
+            await send_achievement_notification(interaction, "areas_unlocked", result["areas_achievement_level"])
     except Exception as e:
         print(f"Error in unlock command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
@@ -10524,10 +10498,20 @@ def _format_refresh_countdown() -> str:
     return f"{m}m"
 
 
-def _build_daily_shop_embed_and_view(offerings: list, date_est: str, user_id: int):
+def _dailyshop_load_sync(member, user_id: int, date_est: str) -> dict:
+    """Run in thread: sync premium tier + load shop inventory, offerings, tree rings. Returns dict for dailyshop command."""
+    sync_premium_tier_from_member(member)
+    inv = get_user_shop_inventory(user_id)
+    offerings = get_daily_shop_offerings(date_est, user_id)
+    tree_rings = get_user_tree_rings(user_id)
+    return {"inv": inv, "offerings": offerings, "tree_rings": tree_rings}
+
+
+def _build_daily_shop_embed_and_view(offerings: list, date_est: str, user_id: int, tree_rings: int = None):
     """Build the Daily Shop embed and view for the given list of item ids (already filtered for user)."""
     tree_ring_emoji = "<:TreeRing:1474244868288282817>"
-    tree_rings = get_user_tree_rings(user_id)
+    if tree_rings is None:
+        tree_rings = get_user_tree_rings(user_id)
     embed = discord.Embed(
         title="🛒 Daily Shop",
         description=f"{tree_ring_emoji} Your Tree Rings: **{tree_rings}**",
@@ -10804,11 +10788,11 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
     try:
         if not await safe_defer(interaction, ephemeral=True):
             return
-        sync_premium_tier_from_member(interaction.user)
         user_id = interaction.user.id
         date_est = _get_date_est()
+        data = await asyncio.to_thread(_dailyshop_load_sync, interaction.user, user_id, date_est)
         if action is not None and action.value == "inventory":
-            inv = get_user_shop_inventory(user_id)
+            inv = data["inv"]
             embed = discord.Embed(
                 title="🛒 Daily Shop – Your Inventory",
                 description=f"{interaction.user.mention}'s purchased items (Tree Ring shop)",
@@ -10819,10 +10803,10 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
             embed.set_footer(text="Shop refreshes daily at midnight EST")
             await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
             return
-        offerings = get_daily_shop_offerings(date_est, user_id)
+        offerings = data["offerings"]
         if not offerings:
             tree_ring_emoji = "<:TreeRing:1474244868288282817>"
-            tree_rings = get_user_tree_rings(user_id)
+            tree_rings = data["tree_rings"]
             embed = discord.Embed(
                 title="🛒 Daily Shop",
                 description=f"You already own **all** Daily Shop items! There's nothing new for you today. Check back after the next refresh.\n\n{tree_ring_emoji} Your Tree Rings: **{tree_rings}**",
@@ -10831,7 +10815,7 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
             embed.set_footer(text=f"Shop refreshes in {_format_refresh_countdown()}")
             await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
             return
-        embed, view = _build_daily_shop_embed_and_view(offerings, date_est, user_id)
+        embed, view = _build_daily_shop_embed_and_view(offerings, date_est, user_id, tree_rings=data["tree_rings"])
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view, ephemeral=True)
     except Exception as e:
         traceback.print_exc()
@@ -16360,49 +16344,59 @@ class MiningView(discord.ui.View):
         super().stop()
 
 
+def _mine_prepare_sync(member, user_id: int) -> dict:
+    """Run in thread: sync premium + roulette check + cooldown data + GPUs. Returns dict for mine command."""
+    sync_premium_tier_from_member(member)
+    is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+    last_mine_time = get_user_last_mine_time(user_id)
+    invite_reductions = get_invite_cooldown_reductions(user_id)
+    premium_cd = get_premium_cooldown_reductions(user_id)
+    user_gpus = get_user_gpus(user_id)
+    return {
+        "is_roulette_cooldown": is_roulette_cooldown,
+        "roulette_time_left": roulette_time_left,
+        "last_mine_time": last_mine_time,
+        "invite_reductions": invite_reductions,
+        "premium_cd": premium_cd,
+        "user_gpus": user_gpus,
+    }
+
+
 @bot.tree.command(name="mine", description="Mine cryptocurrency! (1 hour cooldown)")
 async def mine(interaction: discord.Interaction):
     try:
         if not await safe_defer(interaction, ephemeral=False):
             return
-        
-        sync_premium_tier_from_member(interaction.user)
+
         user_id = interaction.user.id
-        
+        data = await asyncio.to_thread(_mine_prepare_sync, interaction.user, user_id)
+
         # Check if user is on Russian Roulette elimination cooldown (dead)
-        is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
-        if is_roulette_cooldown:
+        if data["is_roulette_cooldown"]:
+            roulette_time_left = data["roulette_time_left"]
             if roulette_time_left < 60:
-                # Show seconds when less than 1 minute left
                 await safe_interaction_response(interaction, interaction.followup.send,
                     f"Sorry, {interaction.user.name}, you're dead. You cannot mine for {roulette_time_left} second(s)", ephemeral=True)
             else:
-                # Show minutes when 1 minute or more left
                 minutes_left = roulette_time_left // 60
                 await safe_interaction_response(interaction, interaction.followup.send,
                     f"Sorry, {interaction.user.name}, you're dead. You cannot mine for {minutes_left} minute(s)", ephemeral=True)
             return
-        
+
         # Check if command is being used in the correct channel
         if not hasattr(interaction.channel, 'name') or interaction.channel.name != "gathercoin":
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"❌ This command can only be used in the #gathercoin channel, {interaction.user.name}!",
                 ephemeral=True)
             return
-        
-        user_id = interaction.user.id
-        
+
         # Check cooldown
-        last_mine_time = get_user_last_mine_time(user_id)
+        last_mine_time = data["last_mine_time"]
         current_time = time.time()
-        
-        # Apply invite reward cooldown reduction (tier 15: -20 minutes = -1200 seconds)
         mine_cooldown = MINE_COOLDOWN
-        invite_reductions = get_invite_cooldown_reductions(user_id)
-        mine_cooldown = max(0, mine_cooldown - invite_reductions.get("mine_reduction", 0))
-        premium_cd = get_premium_cooldown_reductions(user_id)
-        mine_cooldown = max(0, mine_cooldown - premium_cd.get("mine_reduction", 0))
-        
+        mine_cooldown = max(0, mine_cooldown - data["invite_reductions"].get("mine_reduction", 0))
+        mine_cooldown = max(0, mine_cooldown - data["premium_cd"].get("mine_reduction", 0))
+
         if last_mine_time > 0:
             cooldown_end = last_mine_time + mine_cooldown
             if current_time < cooldown_end:
@@ -16413,11 +16407,9 @@ async def mine(interaction: discord.Interaction):
                     f"⏰ You must wait {minutes_left} minutes and {seconds_left} seconds before mining again, {interaction.user.name}.",
                     ephemeral=True)
                 return
-        
-        # Don't set cooldown here - it will be set when the user clicks the button to start the session
-        
-        # Get user's GPUs and calculate bonuses
-        user_gpus = get_user_gpus(user_id)
+
+        # Get user's GPUs and calculate bonuses (from thread result)
+        user_gpus = data["user_gpus"]
         total_percent_boost = 0
         total_seconds_boost = 0
         gpus_used = []
@@ -16460,6 +16452,16 @@ async def mine(interaction: discord.Interaction):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
+def _sell_initial_sync(member, user_id: int) -> dict:
+    """Run in thread: sync beta/booster/premium + load holdings and prices. Returns dict for sell command."""
+    sync_beta_tester_from_member(member)
+    sync_server_booster_from_member(member)
+    sync_premium_tier_from_member(member)
+    holdings = get_user_crypto_holdings(user_id)
+    prices = get_crypto_prices()
+    return {"holdings": holdings, "prices": prices}
+
+
 @bot.tree.command(name="sell", description="Sell your cryptocurrency holdings")
 @app_commands.choices(coin=[
     app_commands.Choice(name="RootCoin (RTC)", value="RTC"),
@@ -16472,12 +16474,10 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         if not await safe_defer(interaction, ephemeral=False):
             return
 
-        sync_beta_tester_from_member(interaction.user)
-        sync_server_booster_from_member(interaction.user)
-        sync_premium_tier_from_member(interaction.user)
         user_id = interaction.user.id
-        holdings = get_user_crypto_holdings(user_id)
-        prices = get_crypto_prices()
+        initial = await asyncio.to_thread(_sell_initial_sync, interaction.user, user_id)
+        holdings = initial["holdings"]
+        prices = initial["prices"]
         
         # Handle "all" option
         if coin == "all":
