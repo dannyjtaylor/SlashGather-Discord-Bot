@@ -1149,13 +1149,14 @@ def get_bloom_multiplier(user_id: int) -> float:
 # ---------------------------------------------------------------------------
 
 def get_user_shop_inventory(user_id: int) -> Dict[str, int]:
-    """Get user's shop item counts (item_id -> count)."""
+    """Get user's shop item counts (item_id -> count). Normalizes keys to str and values to int for safety."""
     users = _get_users_collection()
     _ensure_user_document(user_id)
     doc = users.find_one({"_id": int(user_id)}, {"shop_inventory": 1})
     if not doc:
         return {}
-    return dict(doc.get("shop_inventory", {}))
+    raw = doc.get("shop_inventory") or {}
+    return {str(k): int(v) if isinstance(v, (int, float)) else 0 for k, v in raw.items()}
 
 
 def has_shop_item(user_id: int, item_id: str) -> bool:

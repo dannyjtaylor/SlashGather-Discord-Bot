@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import uuid
 import threading
 import datetime
+import traceback
 import aiohttp
 import warnings
 import yfinance as yf
@@ -3308,13 +3309,15 @@ def get_steal_chance_multiplier(user_id: int) -> float:
 
 def get_pve_damage_multiplier(user_id: int, is_boss: bool = False) -> int:
     """Return total damage per hit for PvE (wild animals and optionally bosses). Base 1, weapons stack additively.
-    King's Blade +3, Zenith +2, Split Soul Katana +1, Inverted Spear +1 (enemies and bosses), Diamond Sword +1,
-    Ancient Staff +1, Reaver Karambit +1, Nail +1, Evoker +1."""
+    King's Blade +3, Zenith +2, Death Note +2, Split Soul Katana +1, Inverted Spear +1 (enemies and bosses),
+    Diamond Sword +1, Ancient Staff +1, Reaver Karambit +1, Nail +1, Evoker +1, Thorfinn's Dagger +1."""
     damage = 1
     if has_shop_item(user_id, "kings_blade"):
         damage += 3  # +3 for enemies
     if has_shop_item(user_id, "zenith"):
         damage += 2  # 1 -> 3
+    if has_shop_item(user_id, "death_note"):
+        damage += 2  # +2 for enemies
     if has_shop_item(user_id, "split_soul_katana"):
         damage += 1  # +1 for enemies
     if has_shop_item(user_id, "inverted_spear_of_heaven"):
@@ -3328,6 +3331,8 @@ def get_pve_damage_multiplier(user_id: int, is_boss: bool = False) -> int:
     if has_shop_item(user_id, "nail"):
         damage += 1  # +1 for enemies
     if has_shop_item(user_id, "evoker"):
+        damage += 1  # +1 for enemies
+    if has_shop_item(user_id, "thorfinns_dagger"):
         damage += 1  # +1 for enemies
     return damage
 
@@ -6761,7 +6766,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.11.2"
+            name="running /gather on V0.11.2 :3"
         )
     )
     try:
@@ -8967,6 +8972,7 @@ async def gather(interaction: discord.Interaction):
             if random.random() < effective_chance:
                 asyncio.create_task(trigger_pve_event(interaction.channel, area_mult))
     except Exception as e:
+        traceback.print_exc()
         print(f"Error in gather command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
@@ -9992,10 +9998,18 @@ class BloomConfirmView(discord.ui.View):
             color=discord.Color.gold()
         )
         success_embed.add_field(name="🌲 Bloom Rank", value=f"**{old_rank}** → **{new_rank}**", inline=False)
-        success_embed.add_field(name="<:TreeRing:1474244868288282817> Tree Rings", value=f"**{tree_rings}** Tree Rings", inline=False)
+        success_embed.add_field(
+            name="<:TreeRing:1474244868288282817> Tree Rings (kept)",
+            value=f"**{tree_rings}** Tree Rings — you keep these through bloom!",
+            inline=False,
+        )
         if tree_rings > 0:
             multiplier = get_bloom_multiplier(user_id)
-            success_embed.add_field(name="💰 Money Boost", value=f"+{(multiplier - 1.0) * 100:.1f}% on all earnings", inline=False)
+            success_embed.add_field(
+                name="💰 Money Boost (from Tree Rings)",
+                value=f"+{(multiplier - 1.0) * 100:.1f}% on all earnings *(from your kept Tree Rings)*",
+                inline=False,
+            )
         success_embed.add_field(
             name="🗺️ Reset, PLANTER X → PLANTER I",
             value="All unlocked areas have also been reset.",
@@ -10379,6 +10393,18 @@ DAILY_SHOP_ITEMS = {
         "cost": 70,
         "effect": "+1 ATK to Enemies",
     },
+    "death_note": {
+        "name": "Death Note",
+        "description": "You must like potato chips, huh?",
+        "cost": 167,
+        "effect": "+2 ATK to Enemies",
+    },
+    "thorfinns_dagger": {
+        "name": "Thorfinn's Dagger",
+        "description": "If you're a true warrior, you shouldn't need this.",
+        "cost": 95,
+        "effect": "+1 ATK to Enemies",
+    },
     "decoys": {
         "name": "Decoys",
         "description": "Throw thieves off your trail!",
@@ -10726,30 +10752,46 @@ class DailyShopBuyButton(discord.ui.Button):
         await safe_interaction_response(interaction, interaction.followup.send, msg, ephemeral=True)
 
 
+# Discord embed field value limit
+_EMBED_FIELD_VALUE_MAX = 1024
+
+
+def _format_shop_inventory_field(inv: dict) -> str:
+    """Format shop inventory for embed field; truncates to Discord limit."""
+    if not inv:
+        return "*No items yet. Use the buttons above to buy!*"
+    lines = []
+    for i, c in sorted(inv.items(), key=lambda x: (-x[1], x[0])):
+        info = DAILY_SHOP_ITEMS.get(i, {})
+        name = info.get("name", i)
+        desc = info.get("description", "")
+        effect = info.get("effect", "")
+        lines.append(f"**{name}** × {c}\n*{desc}*\n**Buff:** {effect}")
+    value = "\n\n".join(lines)
+    if len(value) > _EMBED_FIELD_VALUE_MAX:
+        value = value[:_EMBED_FIELD_VALUE_MAX - 3] + "..."
+    return value
+
+
 class DailyShopInventoryButton(discord.ui.Button):
     def __init__(self):
         super().__init__(style=discord.ButtonStyle.secondary, label="Inventory", custom_id="dailyshop_inventory")
 
     async def callback(self, interaction: discord.Interaction):
-        user_id = interaction.user.id
-        inv = get_user_shop_inventory(user_id)
-        embed = discord.Embed(
-            title="🛒 Your Shop Inventory",
-            description="Items you've purchased from the Daily Shop.",
-            color=discord.Color.gold()
-        )
-        if not inv:
-            embed.add_field(name="Items", value="*No items yet. Use the buttons above to buy!*", inline=False)
-        else:
-            lines = []
-            for i, c in sorted(inv.items(), key=lambda x: (-x[1], x[0])):
-                info = DAILY_SHOP_ITEMS.get(i, {})
-                name = info.get("name", i)
-                desc = info.get("description", "")
-                effect = info.get("effect", "")
-                lines.append(f"**{name}** × {c}\n*{desc}*\n**Buff:** {effect}")
-            embed.add_field(name="Items", value="\n\n".join(lines), inline=False)
-        await safe_interaction_response(interaction, interaction.response.send_message, embed=embed, ephemeral=True)
+        try:
+            user_id = interaction.user.id
+            inv = get_user_shop_inventory(user_id)
+            embed = discord.Embed(
+                title="🛒 Your Shop Inventory",
+                description="Items you've purchased from the Daily Shop.",
+                color=discord.Color.gold()
+            )
+            embed.add_field(name="Items", value=_format_shop_inventory_field(inv), inline=False)
+            await safe_interaction_response(interaction, interaction.response.send_message, embed=embed, ephemeral=True)
+        except Exception as e:
+            traceback.print_exc()
+            print(f"Error in dailyshop Inventory button: {e}")
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 @bot.tree.command(name="dailyshop", description="Open the Daily Shop or view your inventory")
@@ -10772,17 +10814,8 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
                 description=f"{interaction.user.mention}'s purchased items (Tree Ring shop)",
                 color=discord.Color.gold()
             )
-            if not inv:
-                embed.add_field(name="Items", value="*No items yet. Use /dailyshop to open the shop and buy!*", inline=False)
-            else:
-                lines = []
-                for i, c in sorted(inv.items(), key=lambda x: (-x[1], x[0])):
-                    info = DAILY_SHOP_ITEMS.get(i, {})
-                    name = info.get("name", i)
-                    desc = info.get("description", "")
-                    effect = info.get("effect", "")
-                    lines.append(f"**{name}** × {c}\n*{desc}*\n**Buff:** {effect}")
-                embed.add_field(name="Items", value="\n\n".join(lines), inline=False)
+            value = "*No items yet. Use /dailyshop to open the shop and buy!*" if not inv else _format_shop_inventory_field(inv)
+            embed.add_field(name="Items", value=value, inline=False)
             embed.set_footer(text="Shop refreshes daily at midnight EST")
             await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
             return
@@ -10801,6 +10834,7 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
         embed, view = _build_daily_shop_embed_and_view(offerings, date_est, user_id)
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view, ephemeral=True)
     except Exception as e:
+        traceback.print_exc()
         print(f"Error in dailyshop command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
