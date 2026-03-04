@@ -3224,7 +3224,7 @@ PREMIUM_DISPLAY = {
     0: "",
     1: "🌰 SEED ($3)",
     2: "🌱 SPROUT ($8)",
-    3: "[SAPLING] SAPLING ($15)",
+    3: "🪴 SAPLING ($15)",
     4: "🌲 EVERGREEN ($20)",
 }
 # Base daily /water amount per streak day for each premium rank
@@ -6807,7 +6807,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.11.3"
+            name="running /gather on V0.11.2"
         )
     )
     try:
