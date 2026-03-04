@@ -12,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 import uuid
 import threading
 import datetime
+import subprocess
+import sys
 import traceback
 import aiohttp
 import warnings
@@ -1776,6 +1778,7 @@ PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT = {
 }
 PVE_MASTER_REQUIRED_IDS = frozenset(PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT.keys())
 active_boss_events: dict[int, list] = {}  # guild_id -> list of {channel_id, boss, hp, max_hp}
+pending_boss_spawn_guild_ids: set[int] = set()  # guilds with a 1-min delayed boss spawn scheduled (prevents double intro/spawn)
 # Ender Dragon: guild_id -> set of channel_ids that still have an active (not broken) Obsidian Tower
 ender_dragon_towers: dict[int, set[int]] = {}
 # Ender Dragon: guild_id -> {user_id: total_tower_hits} for plant rewards when dragon is defeated (towers are NOT counted as enemies defeated)
@@ -3638,7 +3641,7 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
             water_multiplier = water_base
         rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
         achievement_multiplier = get_achievement_multiplier(user_id, full_data=full_data)
-        daily_rate = 0.04 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.02
+        daily_rate = 0.08 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.04
         daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * daily_rate)
     else:
         bloom_multiplier = get_bloom_multiplier(user_id)
@@ -6766,7 +6769,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.11.2 :3"
+            name="running /gather on V0.11.3"
         )
     )
     try:
@@ -8211,17 +8214,20 @@ async def trigger_ender_dragon_event(channel: discord.TextChannel, area_multipli
 
 
 async def _delayed_boss_spawn(guild: discord.Guild, channel: discord.TextChannel, boss: dict, area_multiplier: float, delay: float = 60.0):
-    await asyncio.sleep(delay)
-    if guild.id not in active_boss_events:
-        try:
-            if boss["id"] in PVE_BOSSES_TWINS_IDS:
-                await trigger_twins_boss_event(channel, area_multiplier)
-            elif boss["id"] == ENDER_DRAGON_ID:
-                await trigger_ender_dragon_event(channel, area_multiplier)
-            else:
-                await trigger_boss_event(channel, boss, area_multiplier)
-        except Exception as e:
-            print(f"Delayed boss spawn failed: {e}")
+    try:
+        await asyncio.sleep(delay)
+        if guild.id not in active_boss_events:
+            try:
+                if boss["id"] in PVE_BOSSES_TWINS_IDS:
+                    await trigger_twins_boss_event(channel, area_multiplier)
+                elif boss["id"] == ENDER_DRAGON_ID:
+                    await trigger_ender_dragon_event(channel, area_multiplier)
+                else:
+                    await trigger_boss_event(channel, boss, area_multiplier)
+            except Exception as e:
+                print(f"Delayed boss spawn failed: {e}")
+    finally:
+        pending_boss_spawn_guild_ids.discard(guild.id)
 
 
 # Bosses that can spawn randomly: excludes Plantera (bulb only); Mothron only when Solar Eclipse; Queen Bee only via Larva.
@@ -8312,7 +8318,7 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
     water_base = 1.0 + (full_data.get("water_count", 0) * 0.01)
     water_mult = (1.0 + (water_base - 1.0) * 2) if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else water_base
     ach_mult = get_achievement_multiplier(user_id, full_data=full_data)
-    daily_rate = 0.04 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.02
+    daily_rate = 0.08 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.04
     daily_mult = 1.0 + (full_data.get("consecutive_water_days", 0) * daily_rate)
     rank_mult = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
     hoe_enchant = full_data.get("hoe_enchantment")
@@ -8950,8 +8956,9 @@ async def gather(interaction: discord.Interaction):
             view = PlanteraBulbView(interaction.channel.id, guild_id, area_mult)
             asyncio.create_task(interaction.channel.send(embed=bulb_embed, view=view))
             pve_spawned = True
-        # 2. Boss spawn (rarer): 1-min warning then boss in this channel
+        # 2. Boss spawn (rarer): 1-min warning then boss in this channel (only if no boss active and no boss already scheduled)
         if (not pve_spawned and channel_name in VALID_GATHERING_CHANNELS and guild_id and guild_id not in active_boss_events
+                and guild_id not in pending_boss_spawn_guild_ids
                 and interaction.channel.id not in active_pve_events
                 and not result.get("stealable")):
             _, boss_mult = _pve_spawn_multiplier()
@@ -8961,6 +8968,7 @@ async def gather(interaction: discord.Interaction):
             bosses_candidates = _get_random_spawn_bosses()
             if random.random() < effective_boss_chance and bosses_candidates:
                 boss = random.choice(bosses_candidates)
+                pending_boss_spawn_guild_ids.add(guild_id)
                 await _send_boss_warning_embed(interaction.guild, boss)
                 asyncio.create_task(_delayed_boss_spawn(interaction.guild, interaction.channel, boss, area_mult, 60.0))
                 pve_spawned = True
@@ -9144,7 +9152,7 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         plants_before_harvest = full_data.get("gather_stats_total_items", 0)
         current_balance = full_data.get("balance", 0)
         achievement_multiplier = get_achievement_multiplier(user_id, full_data=full_data)
-        daily_rate = 0.04 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.02
+        daily_rate = 0.08 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.04
         daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * daily_rate)
         rank_perma_buff_mult = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
         pre_bloom_cycle = full_data.get("bloom_cycle_plants", 0)
@@ -9689,7 +9697,7 @@ async def harvest(interaction: discord.Interaction):
             embed.add_field(name="🏆 Achievement Boost",
                 value=f"+{achievement_percent:.1f}% - **+${extra_money_from_achievement:.2f}**", inline=False)
 
-        daily_rate_display = 0.04 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.02
+        daily_rate_display = 0.08 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.04
         daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * daily_rate_display)
         extra_money_from_daily = total_base_value * (daily_bonus_multiplier - 1.0)
         if extra_money_from_daily > 0:
@@ -9805,8 +9813,9 @@ async def harvest(interaction: discord.Interaction):
             view = PlanteraBulbView(interaction.channel.id, guild_id, area_mult)
             asyncio.create_task(interaction.channel.send(embed=bulb_embed, view=view))
             pve_spawned = True
-        # 2. Boss spawn (rarer)
+        # 2. Boss spawn (rarer) — only if no boss active and no boss already scheduled
         if (not pve_spawned and channel_name in VALID_GATHERING_CHANNELS and guild_id and guild_id not in active_boss_events
+                and guild_id not in pending_boss_spawn_guild_ids
                 and interaction.channel.id not in active_pve_events
                 and not crit.get("stealable")):
             _, boss_mult = _pve_spawn_multiplier()
@@ -9816,6 +9825,7 @@ async def harvest(interaction: discord.Interaction):
             bosses_candidates = _get_random_spawn_bosses()
             if random.random() < effective_boss_chance and bosses_candidates:
                 boss = random.choice(bosses_candidates)
+                pending_boss_spawn_guild_ids.add(guild_id)
                 await _send_boss_warning_embed(interaction.guild, boss)
                 asyncio.create_task(_delayed_boss_spawn(interaction.guild, interaction.channel, boss, area_mult, 60.0))
                 pve_spawned = True
@@ -10335,7 +10345,7 @@ DAILY_SHOP_ITEMS = {
         "name": "Golden Watering Can",
         "description": "Perfect for the Zen Garden!",
         "cost": 200,
-        "effect": "Double /water streak boost and increase the daily increase from 2% per day to 4%",
+        "effect": "Double /water streak boost and increase the daily increase from 4% per day to 8%",
     },
     "van_der_lindes_plan": {
         "name": "Van der Linde's Plan",
@@ -10457,17 +10467,18 @@ MAX_DAILY_SHOP_PURCHASES = 3
 
 
 def get_daily_shop_offerings(date_est: str, user_id: int = None) -> list:
-    """Return up to 3 random item ids for the given EST date (YYYY-MM-DD). Deterministic per user per date (each person sees different items).
-    If user_id is provided, only returns items the user does not already own (one per item ever)."""
+    """Return up to 3 item ids for the given EST date (YYYY-MM-DD). Deterministic per user per date: the same 3 'slots' are fixed for that user that day.
+    Only items the user does not already own are shown (purchased or previously owned items are hidden from the list)."""
     seed = f"{date_est}_{user_id}" if user_id is not None else date_est
     rng = random.Random(seed)
     all_ids = list(DAILY_SHOP_ITEMS.keys())
-    if user_id is not None:
-        all_ids = [i for i in all_ids if not has_shop_item(user_id, i)]
+    # Lock in the same 3 offerings for this user for this day (deterministic)
     k = min(3, len(all_ids))
-    if k == 0:
-        return []
-    return rng.sample(all_ids, k)
+    offerings_for_day = rng.sample(all_ids, k)
+    # Only show items the user doesn't already own (so after buying one, the other two stay visible)
+    if user_id is not None:
+        offerings_for_day = [i for i in offerings_for_day if not has_shop_item(user_id, i)]
+    return offerings_for_day
 
 
 def _get_date_est() -> str:
@@ -10504,6 +10515,17 @@ def _dailyshop_load_sync(member, user_id: int, date_est: str) -> dict:
     inv = get_user_shop_inventory(user_id)
     offerings = get_daily_shop_offerings(date_est, user_id)
     tree_rings = get_user_tree_rings(user_id)
+    return {"inv": inv, "offerings": offerings, "tree_rings": tree_rings}
+
+
+async def _dailyshop_load_async(member, user_id: int, date_est: str) -> dict:
+    """Sync premium first, then load inventory, offerings, and tree rings in parallel for minimal latency."""
+    await asyncio.to_thread(sync_premium_tier_from_member, member)
+    inv, tree_rings, offerings = await asyncio.gather(
+        asyncio.to_thread(get_user_shop_inventory, user_id),
+        asyncio.to_thread(get_user_tree_rings, user_id),
+        asyncio.to_thread(get_daily_shop_offerings, date_est, user_id),
+    )
     return {"inv": inv, "offerings": offerings, "tree_rings": tree_rings}
 
 
@@ -10790,7 +10812,7 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
             return
         user_id = interaction.user.id
         date_est = _get_date_est()
-        data = await asyncio.to_thread(_dailyshop_load_sync, interaction.user, user_id, date_est)
+        data = await _dailyshop_load_async(interaction.user, user_id, date_est)
         if action is not None and action.value == "inventory":
             inv = data["inv"]
             embed = discord.Embed(
@@ -10887,7 +10909,7 @@ async def userstats(interaction: discord.Interaction):
         bloom_multiplier = 1.0 + (tree_rings * 0.005)
         rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data={"bloom_count": bloom_count})
         water_streak = doc["consecutive_water_days"]
-        daily_rate = 0.04 if doc["shop_inventory"].get("golden_watering_can", 0) >= 1 else 0.02
+        daily_rate = 0.08 if doc["shop_inventory"].get("golden_watering_can", 0) >= 1 else 0.04
         daily_bonus_multiplier = 1.0 + (water_streak * daily_rate)
         ach_data = doc["achievements"]
         hoe_attunement = doc["hoe_enchantment"]
@@ -12835,7 +12857,7 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
         rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data={"bloom_count": doc["bloom_count"]})
         water_streak = doc["consecutive_water_days"]
         shop_inv = doc.get("shop_inventory") or {}
-        daily_rate = 0.04 if shop_inv.get("golden_watering_can", 0) >= 1 else 0.02
+        daily_rate = 0.08 if shop_inv.get("golden_watering_can", 0) >= 1 else 0.04
         daily_bonus_multiplier = 1.0 + (water_streak * daily_rate)
         hoe_attunement = doc.get("hoe_enchantment")
         tractor_attunement = doc.get("tractor_enchantment")
@@ -13055,6 +13077,43 @@ async def reset(interaction: discord.Interaction, type: str):
     except Exception as e:
         print(f"Error in reset command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+# Rollback command - Admin only, #hidden channel; runs scripts/rollback.sh (git reset --hard HEAD~1 and restart)
+@bot.tree.command(name="rollback", description="[ADMIN] Roll back one commit and restart the bot (runs rollback script)")
+@app_commands.default_permissions(administrator=True)
+async def rollback(interaction: discord.Interaction):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+        if not hasattr(interaction.channel, "name") or interaction.channel.name != "hidden":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ This command can only be used in the #hidden channel.", ephemeral=True)
+            return
+        repo_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(repo_dir, "scripts", "rollback.sh")
+        if not os.path.isfile(script_path):
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ Rollback script not found: `scripts/rollback.sh`", ephemeral=True)
+            return
+        if sys.platform == "win32":
+            proc = subprocess.Popen(["bash", script_path], cwd=repo_dir, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        else:
+            proc = subprocess.Popen(["/bin/bash", script_path], cwd=repo_dir, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if proc.poll() is None:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "✅ Rollback script started. The bot will restart shortly (you may see this message before it disconnects).", ephemeral=True)
+        else:
+            err = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ Rollback script exited immediately. Stderr: {err[:500] or 'none'}", ephemeral=True)
+        print(f"Admin {interaction.user.name} ran /rollback")
+    except Exception as e:
+        print(f"Error in rollback command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, f"❌ An error occurred: {e}", ephemeral=True)
 
 
 # Wipe command - Admin only, #hidden channel
