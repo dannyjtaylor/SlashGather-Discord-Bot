@@ -10741,16 +10741,16 @@ _EMBED_FIELD_VALUE_MAX = 1024
 
 
 def _format_shop_inventory_field(inv: dict) -> str:
-    """Format shop inventory for embed field; truncates to Discord limit."""
+    """Format shop inventory for embed field; truncates to Discord limit. Items are one-per-user (no quantity shown)."""
     if not inv:
         return "*No items yet. Use the buttons above to buy!*"
     lines = []
-    for i, c in sorted(inv.items(), key=lambda x: (-x[1], x[0])):
+    for i in sorted(inv.keys(), key=lambda k: (DAILY_SHOP_ITEMS.get(k, {}).get("name", k),)):
         info = DAILY_SHOP_ITEMS.get(i, {})
         name = info.get("name", i)
         desc = info.get("description", "")
         effect = info.get("effect", "")
-        lines.append(f"**{name}** × {c}\n*{desc}*\n**Buff:** {effect}")
+        lines.append(f"**{name}**\n*{desc}*\n**Buff:** {effect}")
     value = "\n\n".join(lines)
     if len(value) > _EMBED_FIELD_VALUE_MAX:
         value = value[:_EMBED_FIELD_VALUE_MAX - 3] + "..."
