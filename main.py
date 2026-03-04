@@ -3205,13 +3205,20 @@ def get_server_booster_money_multiplier(user_id: int) -> float:
 
 # Premium tiers (Discord roles): Seed $3, Sprout $8, Sapling $15, Evergreen $20. Exclusive: higher tier = better benefits, no stacking.
 PREMIUM_ROLE_NAMES = ["Seed", "Sprout", "Sapling", "Evergreen"]
+# Permanent money boost (\"Permaboost\") for each premium rank
+# Seed=1.1x, Sprout=1.5x, Sapling=2.0x, Evergreen=3.0x
 PREMIUM_MONEY_MULTIPLIERS = {0: 1.0, 1: 1.1, 2: 1.5, 3: 2.0, 4: 3.0}
+# Command cooldown reductions for each premium rank (seconds)
+# SEED:   -2s /gather, -1m /harvest, -2m /mine
+# SPROUT: -3s /gather, -2m /harvest, -4m /mine
+# SAPLING:-5s /gather, -4m /harvest, -8m /mine
+# EVERGREEN: -7s /gather, -7m /harvest, -15m /mine
 PREMIUM_COOLDOWN_REDUCTIONS = {
     0: {"gather_reduction": 0, "harvest_reduction": 0, "mine_reduction": 0},
-    1: {"gather_reduction": 3, "harvest_reduction": 30, "mine_reduction": 120},
-    2: {"gather_reduction": 6, "harvest_reduction": 60, "mine_reduction": 300},
-    3: {"gather_reduction": 10, "harvest_reduction": 120, "mine_reduction": 600},
-    4: {"gather_reduction": 15, "harvest_reduction": 180, "mine_reduction": 900},
+    1: {"gather_reduction": 2, "harvest_reduction": 60, "mine_reduction": 120},
+    2: {"gather_reduction": 3, "harvest_reduction": 120, "mine_reduction": 240},
+    3: {"gather_reduction": 5, "harvest_reduction": 240, "mine_reduction": 480},
+    4: {"gather_reduction": 7, "harvest_reduction": 420, "mine_reduction": 900},
 }
 PREMIUM_DISPLAY = {
     0: "",
@@ -3220,18 +3227,49 @@ PREMIUM_DISPLAY = {
     3: "[SAPLING] SAPLING ($15)",
     4: "🌲 EVERGREEN ($20)",
 }
+# Base daily /water amount per streak day for each premium rank
+# 0 (none): 5,000; Seed: 15,000; Sprout: 50,000; Sapling: 100,000; Evergreen: 500,000
+PREMIUM_WATER_BASE_AMOUNTS = {
+    0: 5000.0,
+    1: 15000.0,
+    2: 50000.0,
+    3: 100000.0,
+    4: 500000.0,
+}
 # Premium gardener IDs (virtual): 6=Seed, 7=Sprout, 8=Sapling, 9=Evergreen. Chances mirror slots 1-4.
 PREMIUM_GARDENER_CHANCES = {6: 0.05, 7: 0.08, 8: 0.10, 9: 0.20}
 
 
 def get_premium_tier_from_member(member: discord.Member | None) -> int:
-    """Return premium tier 0-4 by looking only at the member's Discord roles (Seed, Sprout, Sapling, Evergreen). Highest role wins. No DB."""
+    """
+    Return premium tier 0-4 by looking only at the member's Discord roles.
+
+    Supports both legacy simple role names (Seed/Sprout/Sapling/Evergreen) and
+    the display-style names used in PREMIUM_DISPLAY (e.g. \"🌰 SEED ($3)\").
+    Highest matching tier wins. No DB reads.
+    """
     if member is None:
         return 0
+
+    # Collect role names once for efficient matching
+    member_role_names = {r.name for r in member.roles}
+
+    # Legacy simple names (case-insensitive)
+    legacy_names = ["Seed", "Sprout", "Sapling", "Evergreen"]
+
     tier = 0
-    for i, role_name in enumerate(PREMIUM_ROLE_NAMES):
-        if discord.utils.get(member.roles, name=role_name) is not None:
-            tier = i + 1
+    # Check against PREMIUM_DISPLAY names (if configured)
+    for i in range(1, 5):
+        display_name = PREMIUM_DISPLAY.get(i, "")
+        if display_name and display_name in member_role_names:
+            tier = max(tier, i)
+
+    # Fallback: simple names, case-insensitive
+    lower_names = {name.lower() for name in member_role_names}
+    for i, legacy in enumerate(legacy_names, start=1):
+        if legacy.lower() in lower_names:
+            tier = max(tier, i)
+
     return tier
 
 
@@ -7402,8 +7440,10 @@ class WildAnimalView(discord.ui.View):
                 victory_embed.add_field(
                     name="HP", value=f"**0** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
 
+                # Cap displayed damage by the animal's max HP so overkill isn't shown
+                display_attackers = _pve_cap_damage_by_hp(self.attackers, self.max_hp)
                 participants_lines = []
-                sorted_attackers = sorted(self.attackers.items(), key=lambda x: -x[1])
+                sorted_attackers = sorted(display_attackers.items(), key=lambda x: -x[1])
                 for uid, dmg in sorted_attackers:
                     member = interaction.guild.get_member(uid)
                     name = member.display_name if member else f"User {uid}"
@@ -7794,8 +7834,10 @@ class BossView(discord.ui.View):
                     description=self.boss["defeat_msg"],
                     color=discord.Color.gold())
                 victory_embed.add_field(name="HP", value=f"**0** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
+                # Cap displayed damage by the boss's max HP so overkill isn't shown
+                display_attackers = _pve_cap_damage_by_hp(self.attackers, self.max_hp)
                 participants_lines = []
-                for uid, dmg in sorted(self.attackers.items(), key=lambda x: -x[1]):
+                for uid, dmg in sorted(display_attackers.items(), key=lambda x: -x[1]):
                     member = interaction.guild.get_member(uid)
                     name = member.display_name if member else f"User {uid}"
                     participants_lines.append(f"**{name}** — {dmg} damage")
@@ -9060,7 +9102,11 @@ def _water_critical_path(user_id: int) -> dict:
 
     update_user_last_water_time(user_id, current_time)
     increment_user_water_count(user_id)
-    money_reward = normalize_money(consecutive_days * 5000.0)
+
+    # Base daily water reward scales with premium rank (Seed/Sprout/Sapling/Evergreen)
+    tier = get_user_premium_tier(user_id)
+    base_per_day = PREMIUM_WATER_BASE_AMOUNTS.get(tier, PREMIUM_WATER_BASE_AMOUNTS[0])
+    money_reward = normalize_money(consecutive_days * base_per_day)
     current_balance = get_user_balance(user_id)
     new_balance = normalize_money(current_balance + money_reward)
     update_user_balance(user_id, new_balance)
@@ -9101,6 +9147,9 @@ async def water(interaction: discord.Interaction):
     try:
         if not await safe_defer(interaction, ephemeral=False):
             return
+        # Ensure premium tier cache matches current roles so water rewards
+        # use the latest Seed/Sprout/Sapling/Evergreen rank.
+        await asyncio.to_thread(sync_premium_tier_from_member, interaction.user)
 
         user_id = interaction.user.id
         result = await asyncio.to_thread(_water_critical_path, user_id)
@@ -10467,17 +10516,31 @@ MAX_DAILY_SHOP_PURCHASES = 3
 
 
 def get_daily_shop_offerings(date_est: str, user_id: int = None) -> list:
-    """Return up to 3 item ids for the given EST date (YYYY-MM-DD). Deterministic per user per date: the same 3 'slots' are fixed for that user that day.
-    Only items the user does not already own are shown (purchased or previously owned items are hidden from the list)."""
+    """
+    Return up to 3 item ids for the given EST date (YYYY-MM-DD).
+
+    For a specific user_id, this always picks up to 3 items the user does **not**
+    already own. If they own all but 1–2 items, the shop will show only that many.
+    """
     seed = f"{date_est}_{user_id}" if user_id is not None else date_est
     rng = random.Random(seed)
     all_ids = list(DAILY_SHOP_ITEMS.keys())
-    # Lock in the same 3 offerings for this user for this day (deterministic)
-    k = min(3, len(all_ids))
-    offerings_for_day = rng.sample(all_ids, k)
-    # Only show items the user doesn't already own (so after buying one, the other two stay visible)
-    if user_id is not None:
-        offerings_for_day = [i for i in offerings_for_day if not has_shop_item(user_id, i)]
+
+    # No user context: just sample up to 3 items from the full list
+    if user_id is None:
+        k = min(3, len(all_ids))
+        return rng.sample(all_ids, k)
+
+    # For a user: deterministically shuffle all items, then take the first
+    # three that the user does NOT already own.
+    shuffled = all_ids[:]
+    rng.shuffle(shuffled)
+    offerings_for_day: list[str] = []
+    for item_id in shuffled:
+        if not has_shop_item(user_id, item_id):
+            offerings_for_day.append(item_id)
+            if len(offerings_for_day) >= 3:
+                break
     return offerings_for_day
 
 
@@ -10762,21 +10825,37 @@ class DailyShopBuyButton(discord.ui.Button):
 _EMBED_FIELD_VALUE_MAX = 1024
 
 
-def _format_shop_inventory_field(inv: dict) -> str:
-    """Format shop inventory for embed field; truncates to Discord limit. Items are one-per-user (no quantity shown)."""
+def _format_shop_inventory_field(inv: dict) -> list[str]:
+    """
+    Format shop inventory into one or more field-sized chunks (<= _EMBED_FIELD_VALUE_MAX chars each).
+    Items are one-per-user (no quantity shown).
+    """
     if not inv:
-        return "*No items yet. Use the buttons above to buy!*"
-    lines = []
+        return []
+
+    # Build per-item blocks first
+    blocks = []
     for i in sorted(inv.keys(), key=lambda k: (DAILY_SHOP_ITEMS.get(k, {}).get("name", k),)):
         info = DAILY_SHOP_ITEMS.get(i, {})
         name = info.get("name", i)
         desc = info.get("description", "")
         effect = info.get("effect", "")
-        lines.append(f"**{name}**\n*{desc}*\n**Buff:** {effect}")
-    value = "\n\n".join(lines)
-    if len(value) > _EMBED_FIELD_VALUE_MAX:
-        value = value[:_EMBED_FIELD_VALUE_MAX - 3] + "..."
-    return value
+        blocks.append(f"**{name}**\n*{desc}*\n**Buff:** {effect}")
+
+    # Greedy pack blocks into chunks within the embed field limit
+    chunks: list[str] = []
+    current = ""
+    for block in blocks:
+        if not current:
+            current = block
+        elif len(current) + 2 + len(block) <= _EMBED_FIELD_VALUE_MAX:
+            current = current + "\n\n" + block
+        else:
+            chunks.append(current)
+            current = block
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 class DailyShopInventoryButton(discord.ui.Button):
@@ -10787,13 +10866,40 @@ class DailyShopInventoryButton(discord.ui.Button):
         try:
             user_id = interaction.user.id
             inv = get_user_shop_inventory(user_id)
-            embed = discord.Embed(
-                title="🛒 Your Shop Inventory",
-                description="Items you've purchased from the Daily Shop.",
-                color=discord.Color.gold()
-            )
-            embed.add_field(name="Items", value=_format_shop_inventory_field(inv), inline=False)
-            await safe_interaction_response(interaction, interaction.response.send_message, embed=embed, ephemeral=True)
+            # If no items, send a simple single embed
+            if not inv:
+                embed = discord.Embed(
+                    title="🛒 Your Shop Inventory",
+                    description="Items you've purchased from the Daily Shop.",
+                    color=discord.Color.gold()
+                )
+                embed.add_field(
+                    name="Items",
+                    value="*No items yet. Use /dailyshop to open the shop and buy!*",
+                    inline=False,
+                )
+                await safe_interaction_response(
+                    interaction, interaction.response.send_message, embed=embed, ephemeral=True)
+                return
+
+            chunks = _format_shop_inventory_field(inv)
+            embeds: list[discord.Embed] = []
+            for idx, chunk in enumerate(chunks):
+                title = "🛒 Your Shop Inventory" if idx == 0 else f"🛒 Your Shop Inventory (Page {idx + 1})"
+                embed = discord.Embed(
+                    title=title,
+                    description="Items you've purchased from the Daily Shop.",
+                    color=discord.Color.gold()
+                )
+                embed.add_field(name="Items", value=chunk, inline=False)
+                embeds.append(embed)
+
+            if len(embeds) == 1:
+                await safe_interaction_response(
+                    interaction, interaction.response.send_message, embed=embeds[0], ephemeral=True)
+            else:
+                await safe_interaction_response(
+                    interaction, interaction.response.send_message, embeds=embeds, ephemeral=True)
         except Exception as e:
             traceback.print_exc()
             print(f"Error in dailyshop Inventory button: {e}")
@@ -10815,15 +10921,42 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
         data = await _dailyshop_load_async(interaction.user, user_id, date_est)
         if action is not None and action.value == "inventory":
             inv = data["inv"]
-            embed = discord.Embed(
-                title="🛒 Daily Shop – Your Inventory",
-                description=f"{interaction.user.mention}'s purchased items (Tree Ring shop)",
-                color=discord.Color.gold()
-            )
-            value = "*No items yet. Use /dailyshop to open the shop and buy!*" if not inv else _format_shop_inventory_field(inv)
-            embed.add_field(name="Items", value=value, inline=False)
-            embed.set_footer(text="Shop refreshes daily at midnight EST")
-            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+            # No items: single simple embed
+            if not inv:
+                embed = discord.Embed(
+                    title="🛒 Daily Shop – Your Inventory",
+                    description=f"{interaction.user.mention}'s purchased items (Tree Ring shop)",
+                    color=discord.Color.gold()
+                )
+                embed.add_field(
+                    name="Items",
+                    value="*No items yet. Use /dailyshop to open the shop and buy!*",
+                    inline=False,
+                )
+                embed.set_footer(text="Shop refreshes daily at midnight EST")
+                await safe_interaction_response(
+                    interaction, interaction.followup.send, embed=embed, ephemeral=True)
+                return
+
+            chunks = _format_shop_inventory_field(inv)
+            embeds: list[discord.Embed] = []
+            for idx, chunk in enumerate(chunks):
+                title = "🛒 Daily Shop – Your Inventory" if idx == 0 else f"🛒 Daily Shop – Your Inventory (Page {idx + 1})"
+                embed = discord.Embed(
+                    title=title,
+                    description=f"{interaction.user.mention}'s purchased items (Tree Ring shop)",
+                    color=discord.Color.gold()
+                )
+                embed.add_field(name="Items", value=chunk, inline=False)
+                embed.set_footer(text="Shop refreshes daily at midnight EST")
+                embeds.append(embed)
+
+            if len(embeds) == 1:
+                await safe_interaction_response(
+                    interaction, interaction.followup.send, embed=embeds[0], ephemeral=True)
+            else:
+                await safe_interaction_response(
+                    interaction, interaction.followup.send, embeds=embeds, ephemeral=True)
             return
         offerings = data["offerings"]
         if not offerings:
