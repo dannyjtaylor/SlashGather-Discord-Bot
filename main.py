@@ -8380,8 +8380,9 @@ class SansView(discord.ui.View):
         self.DEFEAT_THRESHOLD = 50
 
     def _hp_bar(self) -> str:
-        # Always show 1 HP, but visually show progress based on attempts
-        filled = min(20, max(1, round((self.total_attempts / self.DEFEAT_THRESHOLD) * 20)))
+        # Start empty and fill from left to right as attempts increase
+        filled = round((self.total_attempts / self.DEFEAT_THRESHOLD) * 20)
+        filled = min(20, max(0, filled))  # Clamp between 0 and 20
         empty = 20 - filled
         return f"{'🟥' * filled}{'⬛' * empty}"
 
@@ -8542,7 +8543,7 @@ class SansView(discord.ui.View):
                 seconds = time_left % 60
                 time_str = f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
                 await safe_interaction_response(interaction, interaction.followup.send,
-                    f"💀 **GAME OVER** - You're dead for **{time_str}**.", ephemeral=True)
+                    f"{SOUL_EMOJI} **GAME OVER** - You're dead for **{time_str}**.", ephemeral=True)
         except Exception as e:
             print(f"Error in Sans MERCY button: {e}")
             try:
@@ -8588,6 +8589,8 @@ async def trigger_boss_event(channel: discord.TextChannel, boss: dict, area_mult
     
     # Special handling for Sans
     if boss["id"] == "sans":
+        # Sans starts with empty HP bar (will fill as attempts increase)
+        embed.set_field_at(0, name="HP", value=f"**1** / **{hp}**\n{'⬛' * 20}", inline=False)
         embed.add_field(name="⚔️ How to Fight", value="Press **FIGHT**! (Sans will dodge, but keep attacking!)", inline=False)
         view = SansView(boss=boss, hp=hp, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_multiplier, boss_state_ref=entry)
     else:
@@ -9421,7 +9424,7 @@ async def gather(interaction: discord.Interaction):
                 seconds = time_left % 60
                 time_str = f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
                 await safe_interaction_response(interaction, interaction.followup.send,
-                    f"💀 **GAME OVER** - You're dead for **{time_str}**.", ephemeral=True)
+                    f"{SOUL_EMOJI} **GAME OVER** - You're dead for **{time_str}**.", ephemeral=True)
                 return
             else:
                 # Timer expired, remove from dict
@@ -10549,7 +10552,7 @@ async def harvest(interaction: discord.Interaction):
                 seconds = time_left % 60
                 time_str = f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
                 await safe_interaction_response(interaction, interaction.followup.send,
-                    f"💀 **GAME OVER** - You're dead for **{time_str}**.", ephemeral=True)
+                    f"{SOUL_EMOJI} **GAME OVER** - You're dead for **{time_str}**.", ephemeral=True)
                 return
             else:
                 # Timer expired, remove from dict
