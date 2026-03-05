@@ -2934,6 +2934,11 @@ HIDDEN_ACHIEVEMENTS = {
         "description": "Defeat the Queen Bee",
         "boost": 0.025  # 2.5%
     },
+    "the_roaring_knight_repelled": {
+        "name": "Dess, Is That You?",
+        "description": "Defeat The Roaring Knight",
+        "boost": 0.05  # 5%
+    },
     "pve_master": {
         "name": "Master Mode",
         "description": "Defeat every type of animal and boss at least once",
