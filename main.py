@@ -11355,7 +11355,8 @@ async def userstats(interaction: discord.Interaction):
 
 
 # almanac command: sections (flowers/fruits/vegetables), pagination, ??? = 2x HIDDEN, completion % (excluding Mikellion)
-ALMANAC_PLANTS_PER_PAGE = 6
+# Fewer plants per page for Fruits/Vegetables (more ripeness slots per plant) to avoid embed truncation
+ALMANAC_PLANTS_PER_PAGE_BY_SECTION = {"Flower": 6, "Fruit": 3, "Vegetable": 3}
 
 
 class AlmanacView(discord.ui.View):
@@ -11364,6 +11365,7 @@ class AlmanacView(discord.ui.View):
         self.user_id = user_id
         self.section = section  # "Flower" | "Fruit" | "Vegetable"
         self.page = 0
+        self._plants_per_page = ALMANAC_PLANTS_PER_PAGE_BY_SECTION.get(section, 6)
         # Use pre-fetched entries so pagination never hits the DB
         self._almanac_entries = almanac_entries if almanac_entries is not None else get_user_almanac_entries(user_id)
         self._filled = _almanac_filled_count(self._almanac_entries)
@@ -11373,12 +11375,12 @@ class AlmanacView(discord.ui.View):
         for (item_name, rip) in self._slots:
             self._by_plant.setdefault(item_name, []).append(rip)
         self._plant_list = list(self._by_plant.keys())
-        self._max_page = max(0, (len(self._plant_list) - 1) // ALMANAC_PLANTS_PER_PAGE)
+        self._max_page = max(0, (len(self._plant_list) - 1) // self._plants_per_page)
 
     def _build_embed(self) -> discord.Embed:
         pct = (100.0 * self._filled / self._total_slots) if self._total_slots else 0
-        start = self.page * ALMANAC_PLANTS_PER_PAGE
-        end = min(start + ALMANAC_PLANTS_PER_PAGE, len(self._plant_list))
+        start = self.page * self._plants_per_page
+        end = min(start + self._plants_per_page, len(self._plant_list))
         plants_on_page = self._plant_list[start:end]
         lines = []
         entries = self._almanac_entries
@@ -11396,7 +11398,7 @@ class AlmanacView(discord.ui.View):
             line = f"{emoji_str}**{item_name}** — \"{desc}\"\n  " + " | ".join(parts)
             lines.append(line)
         body = "\n\n".join(lines) if lines else "*No plants in this section.*"
-        title = f"📚 Almanac — {self.section}s"
+        title = f"📚 {self.section}s"
         embed = discord.Embed(title=title, description=body[:4000], color=discord.Color.green())
         embed.set_footer(text=f"Page {self.page + 1}/{self._max_page + 1} • Almanac: {self._filled}/{self._total_slots} ({pct:.1f}%)")
         return embed
