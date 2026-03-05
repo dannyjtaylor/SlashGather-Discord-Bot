@@ -9390,13 +9390,15 @@ async def cooldowns(interaction: discord.Interaction):
             return
         user_id = interaction.user.id
         data = await asyncio.to_thread(_cooldowns_data_sync, user_id)
+        death_seconds = data["death"]
+        russian_status = "Alive" if death_seconds <= 0 else f"Dead ({_format_cooldown_seconds(death_seconds)})"
         lines = [
             f"**/gather** - {_format_cooldown_seconds(data['gather'])}",
             f"**/harvest** - {_format_cooldown_seconds(data['harvest'])}",
             f"**/mine** - {_format_cooldown_seconds(data['mine'])}",
             f"**New /dailyshop** - {_format_cooldown_seconds(data['dailyshop'])}",
             f"**/water** - {_format_cooldown_seconds(data['water'])}",
-            f"**Death Timer** - {_format_cooldown_seconds(data['death'])}",
+            f"**/russian Status** - {russian_status}",
         ]
         embed = discord.Embed(
             title=f"⏱️ {interaction.user.name}'s Cooldowns",
@@ -11347,7 +11349,7 @@ async def userstats(interaction: discord.Interaction):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
-# almanac command: sections (flowers/fruits/vegetables), pagination, ??? = 3x HIDDEN, completion % (excluding Mikellion)
+# almanac command: sections (flowers/fruits/vegetables), pagination, ??? = 2x HIDDEN, completion % (excluding Mikellion)
 ALMANAC_PLANTS_PER_PAGE = 6
 
 
@@ -11385,7 +11387,7 @@ class AlmanacView(discord.ui.View):
                 if key in entries:
                     parts.append(rip)
                 else:
-                    parts.append(f"{ALMANAC_HIDDEN_EMOJI}{ALMANAC_HIDDEN_EMOJI}{ALMANAC_HIDDEN_EMOJI}")
+                    parts.append(f"{ALMANAC_HIDDEN_EMOJI}{ALMANAC_HIDDEN_EMOJI}")
             line = f"{emoji_str}**{item_name}** — \"{desc}\"\n  " + " | ".join(parts)
             lines.append(line)
         body = "\n\n".join(lines) if lines else "*No plants in this section.*"
