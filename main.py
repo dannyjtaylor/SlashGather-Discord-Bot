@@ -2822,7 +2822,7 @@ HIDDEN_ACHIEVEMENTS = {
         "boost": 0.10  # 10%
     },
     "leap_year": {
-        "name": "Leap Year",
+        "name": "Leap Day",
         "description": "Have a /water streak of 29 days",
         "boost": 0.15  # 15%
     },
