@@ -1456,7 +1456,7 @@ PVE_WILD_ANIMALS = [
     {
         "id": "black_bear",
         "name": "Black Bear",
-        "emoji": ":panda:",
+        "emoji": "🐾",
         "hp_range": (35, 45),
         "color": 0x2C2C2C,
         "description": "A scrappy **Black Bear** has wandered into the area, sniffing around for easy meals! It's raiding your plants!",
