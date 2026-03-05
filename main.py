@@ -9376,7 +9376,7 @@ def _cooldowns_data_sync(user_id: int) -> dict:
     target_utc = next_water_est - EST_OFFSET
     data["water"] = max(0, int((target_utc - now_utc).total_seconds()))
 
-    # Death timer (/russian) — also blocks /gather, /harvest, /mine
+git ad    # Death timer (/russian) — also blocks /gather, /harvest, /mine
     _, death_left = check_roulette_elimination_cooldown(user_id)
     data["death"] = max(0, death_left)
     # When dead, show same cooldown for /mine as /gather and /harvest (death time)
@@ -11355,8 +11355,8 @@ async def userstats(interaction: discord.Interaction):
 
 
 # almanac command: sections (flowers/fruits/vegetables), pagination, ??? = 2x HIDDEN, completion % (excluding Mikellion)
-# Fewer plants per page for Fruits/Vegetables (more ripeness slots per plant) to avoid embed truncation
-ALMANAC_PLANTS_PER_PAGE_BY_SECTION = {"Flower": 6, "Fruit": 3, "Vegetable": 3}
+# 4 plants per page for all sections to avoid embed truncation
+ALMANAC_PLANTS_PER_PAGE_BY_SECTION = {"Flower": 4, "Fruit": 4, "Vegetable": 4}
 
 
 class AlmanacView(discord.ui.View):
@@ -11365,7 +11365,7 @@ class AlmanacView(discord.ui.View):
         self.user_id = user_id
         self.section = section  # "Flower" | "Fruit" | "Vegetable"
         self.page = 0
-        self._plants_per_page = ALMANAC_PLANTS_PER_PAGE_BY_SECTION.get(section, 6)
+        self._plants_per_page = ALMANAC_PLANTS_PER_PAGE_BY_SECTION.get(section, 4)
         # Use pre-fetched entries so pagination never hits the DB
         self._almanac_entries = almanac_entries if almanac_entries is not None else get_user_almanac_entries(user_id)
         self._filled = _almanac_filled_count(self._almanac_entries)
