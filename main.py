@@ -11392,10 +11392,10 @@ class AlmanacView(discord.ui.View):
             for rip in self._by_plant[item_name]:
                 key = f"{item_name}{_ALMANAC_KEY_SEP}{rip}"
                 if key in entries:
-                    parts.append(rip)
+                    parts.append(f"**{rip.upper()}**")
                 else:
                     parts.append(f"{ALMANAC_HIDDEN_EMOJI}{ALMANAC_HIDDEN_EMOJI}")
-            line = f"{emoji_str}**{item_name}** — \"{desc}\"\n  " + " | ".join(parts)
+            line = f"{emoji_str}**{item_name.upper()}** — \"{desc}\"\n  " + " | ".join(parts)
             lines.append(line)
         body = "\n\n".join(lines) if lines else "*No plants in this section.*"
         title = f"📚 {self.section}s"
