@@ -8372,6 +8372,7 @@ class SansView(discord.ui.View):
         self.attack_attempts: dict[int, int] = {}  # Tracks number of attempts per user
         self.total_attempts = 0  # Total attack attempts across all users
         self.defeated = False
+        self.mercy_users: set[int] = set()  # Track users who have used MERCY
         self._lock = asyncio.Lock()
         # Sans is defeated after 50 total attack attempts
         self.DEFEAT_THRESHOLD = 50
@@ -8499,38 +8500,27 @@ class SansView(discord.ui.View):
                     return
 
                 user_id = interaction.user.id
+                
+                # Check if user already used MERCY
+                if user_id in self.mercy_users:
+                    await safe_interaction_response(interaction, interaction.followup.send,
+                        "❌ You already tried to SPARE Sans and got dunked on! You're dead and cannot use this button again.", ephemeral=True)
+                    return
+
+                # Mark this user as having used MERCY
+                self.mercy_users.add(user_id)
+                
                 # Set death timer: 30 minutes = 1800 seconds
                 death_end_time = time.time() + 1800
                 sans_death_timers[user_id] = death_end_time
 
-                # Create GAME OVER embed with SOUL emoji in title
-                game_over_embed = discord.Embed(
-                    title=f"{SOUL_EMOJI} GAME OVER",
-                    description=f"{interaction.user.mention} tried to SPARE Sans and got dunked on!",
-                    color=discord.Color.red())
-                game_over_embed.set_footer(text="Stay determined...")
-
-                # Send the embed immediately using followup (since we already deferred)
-                try:
-                    await interaction.followup.send(embed=game_over_embed)
-                except Exception as e:
-                    print(f"Error sending GAME OVER embed: {e}")
-                    # Fallback: try to send as regular message
-                    try:
-                        channel = interaction.channel
-                        if channel:
-                            await channel.send(embed=game_over_embed)
-                    except Exception as e2:
-                        print(f"Error sending GAME OVER embed as fallback: {e2}")
-
-                # Disable all buttons after mercy
-                for child in self.children:
-                    if hasattr(child, 'disabled'):
-                        child.disabled = True
-                try:
-                    await interaction.message.edit(view=self)
-                except Exception as e:
-                    print(f"Error editing Sans message after MERCY: {e}")
+                # Send simple death message (not Sans-specific)
+                time_left = 1800
+                minutes = time_left // 60
+                seconds = time_left % 60
+                time_str = f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"💀 **GAME OVER** - You're dead for **{time_str}**.", ephemeral=True)
         except Exception as e:
             print(f"Error in Sans MERCY button: {e}")
             try:
@@ -9402,7 +9392,7 @@ async def gather(interaction: discord.Interaction):
                 seconds = time_left % 60
                 time_str = f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
                 await safe_interaction_response(interaction, interaction.followup.send,
-                    f"💀 **GAME OVER** - You tried to SPARE Sans and got dunked on! You're dead for **{time_str}**.\n*Stay determined...*", ephemeral=True)
+                    f"💀 **GAME OVER** - You're dead for **{time_str}**.", ephemeral=True)
                 return
             else:
                 # Timer expired, remove from dict
@@ -10530,7 +10520,7 @@ async def harvest(interaction: discord.Interaction):
                 seconds = time_left % 60
                 time_str = f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
                 await safe_interaction_response(interaction, interaction.followup.send,
-                    f"💀 **GAME OVER** - You tried to SPARE Sans and got dunked on! You're dead for **{time_str}**.\n*Stay determined...*", ephemeral=True)
+                    f"💀 **GAME OVER** - You're dead for **{time_str}**.", ephemeral=True)
                 return
             else:
                 # Timer expired, remove from dict
