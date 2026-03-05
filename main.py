@@ -3850,7 +3850,7 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
             water_multiplier = water_base
         rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
         achievement_multiplier = get_achievement_multiplier(user_id, full_data=full_data)
-        daily_rate = 0.08 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.04
+        daily_rate = 0.04 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.02
         daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * daily_rate)
     else:
         bloom_multiplier = get_bloom_multiplier(user_id)
@@ -3864,7 +3864,7 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     extra_money_from_bloom = base_final_value * (bloom_multiplier - 1.0)
     extra_money_from_water = base_final_value * (water_multiplier - 1.0)
     extra_money_from_achievement = base_final_value * (achievement_multiplier - 1.0)
-    extra_money_from_daily = base_final_value * (daily_bonus_multiplier - 1.0)
+    # Note: extra_money_from_daily is now calculated later on base_for_buffs to match other buffs
 
     # Apply hoe imbuement money bonus (Prosperity) - additive from base
     if full_data is not None:
@@ -3885,8 +3885,8 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         if crit_chance > 0 and apply_cooldown:  # apply_cooldown=True means player, not gardener
             is_critical_gather = random.random() < crit_chance
 
-    # Subtotal = base + all additive boosts (before rank)
-    subtotal = base_final_value + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + enchant_money_bonus
+    # Subtotal = base + all additive boosts (before rank) - daily bonus moved to later stage
+    subtotal = base_final_value + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + enchant_money_bonus
 
     # Rank boost is multiplicative on the entire subtotal (1.2x per rank-up)
     extra_money_from_rank = subtotal * (rank_perma_buff_multiplier - 1.0)
@@ -3920,6 +3920,8 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     palace_mult = get_palace_treasure_money_multiplier(user_id)
     edward_mult = get_edward_splash_money_multiplier(user_id)
     eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
+    # Water Streak Boost now calculated on same base as other buffs for consistent display
+    extra_money_from_daily = base_for_buffs * (daily_bonus_multiplier - 1.0) if daily_bonus_multiplier > 1.0 else 0.0
     extra_money_from_beta_tester = base_for_buffs * (beta_tester_mult - 1.0) if beta_tester_mult > 1.0 else 0.0
     extra_money_from_server_booster = base_for_buffs * (server_booster_mult - 1.0) if server_booster_mult > 1.0 else 0.0
     extra_money_from_premium = base_for_buffs * (premium_mult - 1.0) if premium_mult > 1.0 else 0.0
@@ -3936,7 +3938,7 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         alchemist_extra = base_for_buffs * 0.05
     elif full_data is None and has_shop_item(user_id, "alchemists_pocketwatch"):
         alchemist_extra = base_for_buffs * 0.05
-    final_value = base_for_buffs + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra
+    final_value = base_for_buffs + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra
 
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
@@ -7127,7 +7129,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.11.6"
+            name="running /gather on V0.11.7"
         )
     )
     try:
@@ -8425,8 +8427,8 @@ class SansView(discord.ui.View):
                     await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
 
                     # Accumulate for deferred rewards
-                    # For Sans, pass None as max_hp so rewards aren't capped (he dodges but we still reward attempts)
-                    _pve_boss_defeated_pending.setdefault(self.guild_id, []).append((self.boss, dict(self.attackers), None))
+                    # For Sans, pass attack_attempts instead of attackers (damage), and None as max_hp so rewards aren't capped
+                    _pve_boss_defeated_pending.setdefault(self.guild_id, []).append((self.boss, dict(self.attack_attempts), None))
                     boss_list = active_boss_events.get(self.guild_id, [])
                     if self.boss_state_ref in boss_list:
                         boss_list = [e for e in boss_list if e is not self.boss_state_ref]
@@ -8456,9 +8458,9 @@ class SansView(discord.ui.View):
                                         await ch.send(embed=broadcast_embed)
                                 except Exception as e:
                                     print(f"Boss defeat broadcast failed in {ch.name}: {e}")
-                            # For Sans, pass None as max_hp so rewards aren't capped
+                            # For Sans, pass attack_attempts instead of attackers (damage), and None as max_hp so rewards aren't capped
                             asyncio.create_task(_pve_distribute_rewards(
-                                interaction, boss, dict(self.attackers), self.channel_id, self.area_multiplier,
+                                interaction, boss, dict(self.attack_attempts), self.channel_id, self.area_multiplier,
                                 achievements_ephemeral=False, max_hp=None))
                     return
 
@@ -9013,7 +9015,7 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
     water_base = 1.0 + (full_data.get("water_count", 0) * 0.01)
     water_mult = (1.0 + (water_base - 1.0) * 2) if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else water_base
     ach_mult = get_achievement_multiplier(user_id, full_data=full_data)
-    daily_rate = 0.08 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.04
+    daily_rate = 0.04 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.02
     daily_mult = 1.0 + (full_data.get("consecutive_water_days", 0) * daily_rate)
     rank_mult = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
     hoe_enchant = full_data.get("hoe_enchantment")
@@ -9218,9 +9220,16 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
 
             plant_emojis = [get_item_display_emoji(r["name"]) for r in results]
             emoji_display = " ".join(plant_emojis)
-            header = (
-                f"You dealt **{total_damage}** damage "
-                f"and gathered **{total_damage}** plant{'s' if total_damage != 1 else ''}!\n\n")
+            # For Sans, show attacks instead of damage
+            is_sans = enemy_id == "sans"
+            if is_sans:
+                header = (
+                    f"You made **{total_damage}** attack{'s' if total_damage != 1 else ''} "
+                    f"and gathered **{total_damage}** plant{'s' if total_damage != 1 else ''}!\n\n")
+            else:
+                header = (
+                    f"You dealt **{total_damage}** damage "
+                    f"and gathered **{total_damage}** plant{'s' if total_damage != 1 else ''}!\n\n")
             max_emoji_len = 4000 - len(header)
             if len(emoji_display) > max_emoji_len:
                 emoji_display = emoji_display[:max_emoji_len - 5] + " …"
@@ -10084,7 +10093,7 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         plants_before_harvest = full_data.get("gather_stats_total_items", 0)
         current_balance = full_data.get("balance", 0)
         achievement_multiplier = get_achievement_multiplier(user_id, full_data=full_data)
-        daily_rate = 0.08 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.04
+        daily_rate = 0.04 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.02
         daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * daily_rate)
         rank_perma_buff_mult = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
         pre_bloom_cycle = full_data.get("bloom_cycle_plants", 0)
@@ -10645,25 +10654,36 @@ async def harvest(interaction: discord.Interaction):
             embed.add_field(name="🏆 Achievement Boost",
                 value=f"+{achievement_percent:.1f}% - **+{format_money(extra_money_from_achievement)}**", inline=False)
 
-        daily_rate_display = 0.08 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.04
-        daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * daily_rate_display)
-        extra_money_from_daily = total_base_value * (daily_bonus_multiplier - 1.0)
-        if extra_money_from_daily > 0:
-            daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
-            embed.add_field(name="💧 Water Streak Boost",
-                value=f"+{daily_bonus_percent:.1f}% - **+{format_money(extra_money_from_daily)}**", inline=False)
-
         bloom_rank = _bloom_count_to_rank(bloom_count)
         rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
         if bloom_rank != "PINE I" and rank_perma_buff_multiplier > 1.0:
             enchant_money_bonus = result.get("enchant_money_bonus", 0)
             extra_money_from_water = total_base_value * (water_multiplier - 1.0)
             enchant_total = total_base_value * enchant_money_bonus if enchant_money_bonus != 0 else 0.0
-            total_subtotal = total_base_value + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + enchant_total
+            # Calculate base for Water Streak display (same as Beta Tester base: after rank, fuzzy dice, etc.)
+            # This approximates base_for_buffs by subtracting final buffs from total_value
+            total_subtotal = total_base_value + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + enchant_total
             extra_money_from_rank = total_subtotal * (rank_perma_buff_multiplier - 1.0)
+            total_after_rank = total_subtotal + extra_money_from_rank
+            # Apply fuzzy dice if present (1.05x)
+            total_after_fuzzy = total_after_rank * 1.05 if (full_data.get("shop_inventory", {}).get("fuzzy_dice", 0) >= 1) else total_after_rank
+            base_for_display = total_after_fuzzy
             rank_percent = (rank_perma_buff_multiplier - 1.0) * 100
             embed.add_field(name="⭐ Rank Boost",
                 value=f"+{rank_percent:.1f}% - **+{format_money(extra_money_from_rank)}**", inline=False)
+        else:
+            # No rank boost, so base is just after fuzzy dice
+            total_after_fuzzy = total_base_value * 1.05 if (full_data.get("shop_inventory", {}).get("fuzzy_dice", 0) >= 1) else total_base_value
+            base_for_display = total_after_fuzzy
+
+        daily_rate_display = 0.04 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.02
+        daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * daily_rate_display)
+        # Calculate Water Streak on same base as Beta Tester for consistent display
+        extra_money_from_daily = base_for_display * (daily_bonus_multiplier - 1.0) if daily_bonus_multiplier > 1.0 else 0.0
+        if extra_money_from_daily > 0:
+            daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
+            embed.add_field(name="💧 Water Streak Boost",
+                value=f"+{daily_bonus_percent:.1f}% - **+{format_money(extra_money_from_daily)}**", inline=False)
 
         if result.get("extra_money_from_beta_tester", 0) > 0:
             beta_percent = (result['beta_tester_multiplier'] - 1.0) * 100
@@ -11317,7 +11337,7 @@ DAILY_SHOP_ITEMS = {
         "name": "Golden Watering Can",
         "description": "Perfect for the Zen Garden!",
         "cost": 200,
-        "effect": "Double /water streak boost and increase the daily increase from 4% per day to 8%",
+        "effect": "Double /water streak boost and increase the daily increase from 2% per day to 4%",
     },
     "van_der_lindes_plan": {
         "name": "Van der Linde's Plan",
@@ -11984,7 +12004,7 @@ async def userstats(interaction: discord.Interaction):
         bloom_multiplier = 1.0 + (tree_rings * 0.005)
         rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data={"bloom_count": bloom_count})
         water_streak = doc["consecutive_water_days"]
-        daily_rate = 0.08 if doc["shop_inventory"].get("golden_watering_can", 0) >= 1 else 0.04
+        daily_rate = 0.04 if doc["shop_inventory"].get("golden_watering_can", 0) >= 1 else 0.02
         daily_bonus_multiplier = 1.0 + (water_streak * daily_rate)
         ach_data = doc["achievements"]
         hoe_attunement = doc["hoe_enchantment"]
@@ -13952,7 +13972,7 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
         rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data={"bloom_count": doc["bloom_count"]})
         water_streak = doc["consecutive_water_days"]
         shop_inv = doc.get("shop_inventory") or {}
-        daily_rate = 0.08 if shop_inv.get("golden_watering_can", 0) >= 1 else 0.04
+        daily_rate = 0.04 if shop_inv.get("golden_watering_can", 0) >= 1 else 0.02
         daily_bonus_multiplier = 1.0 + (water_streak * daily_rate)
         hoe_attunement = doc.get("hoe_enchantment")
         tractor_attunement = doc.get("tractor_enchantment")

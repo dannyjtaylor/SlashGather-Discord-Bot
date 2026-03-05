@@ -925,10 +925,10 @@ def get_water_multiplier(user_id: int) -> float:
 
 
 def get_daily_bonus_multiplier(user_id: int) -> float:
-    """Calculate daily streak bonus multiplier. 4% per consecutive day, or 8% with Golden Watering Can."""
+    """Calculate daily streak bonus multiplier. 2% per consecutive day, or 4% with Golden Watering Can."""
     consecutive_days = get_user_consecutive_water_days(user_id)
     inv = get_user_shop_inventory(user_id)
-    rate = 0.08 if inv.get("golden_watering_can", 0) >= 1 else 0.04
+    rate = 0.04 if inv.get("golden_watering_can", 0) >= 1 else 0.02
     return 1.0 + (consecutive_days * rate)
 
 
