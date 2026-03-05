@@ -80,6 +80,7 @@ from database import (
     get_all_users_ranks,
     get_user_total_items,
     get_user_items,
+    get_user_almanac_entries,
     get_user_basket_upgrades,
     set_user_basket_upgrade,
     get_user_harvest_upgrades,
@@ -148,6 +149,8 @@ from database import (
     get_user_pve_defeated,
     get_user_total_pve_defeats,
     get_user_total_steals,
+    get_user_critical_gathers_count,
+    increment_critical_gathers_count,
     get_user_coinflip_count,
     increment_user_coinflip_count,
     get_user_coinflip_win_streak,
@@ -1434,11 +1437,11 @@ CELESTIAL_TRIGGER_CHANCE = 0.1   # 10% at start time, Terraria-style
 PVE_TRIGGER_CHANCE_GATHER = 0.08   # 8% per /gather for animals (event multiplies); animals much more common than bosses
 PVE_TRIGGER_CHANCE_HARVEST = 0.04  # 4% per /harvest for animals (event multiplies)
 
-# Steal: stealable chance per successful gather/harvest (no PvE when stealable; crit cannot be stolen)
+# Steal: stealable chance per successful gather/harvest (no PvE when stealable; crits can be stolen)
 STEAL_CHANCE_GATHER = 0.04   # 4% per /gather (4x previous)
 STEAL_CHANCE_HARVEST = 0.02  # 2% per /harvest (4x previous)
-STEAL_WINDOW_GATHER_SEC = 4
-STEAL_WINDOW_HARVEST_SEC = 2
+STEAL_WINDOW_GATHER_SEC = 5
+STEAL_WINDOW_HARVEST_SEC = 3
 
 PVE_WILD_ANIMALS = [
     {
@@ -1877,65 +1880,37 @@ ACHIEVEMENTS = {
             {
                 "level": 2,
                 "name": "Smelling What You're Stepping In",
-                "description": "/gather 25 times",
-                "threshold": 25,
+                "description": "/gather 50 times",
+                "threshold": 50,
                 "boost": 0.03  # 3%
             },
             {
                 "level": 3,
                 "name": "Getting The Hang Of It",
-                "description": "/gather 100 times",
-                "threshold": 100,
+                "description": "/gather 250 times",
+                "threshold": 250,
                 "boost": 0.06  # 6%
             },
             {
                 "level": 4,
                 "name": "Green Thumb",
-                "description": "/gather 500 times",
-                "threshold": 500,
+                "description": "/gather 1,000 times",
+                "threshold": 1000,
                 "boost": 0.10  # 10%
             },
             {
                 "level": 5,
                 "name": "Serf",
-                "description": "/gather 1000 times",
-                "threshold": 1000,
+                "description": "/gather 4,000 times",
+                "threshold": 4000,
                 "boost": 0.15  # 15%
             },
             {
                 "level": 6,
-                "name": "Farmer",
-                "description": "/gather 5,000 times",
-                "threshold": 5000,
-                "boost": 0.22  # 22%
-            },
-            {
-                "level": 7,
                 "name": "Gathousand",
                 "description": "/gather 10,000 times",
                 "threshold": 10000,
-                "boost": 0.32  # 32%
-            },
-            {
-                "level": 8,
-                "name": "Fifty Gathousand",
-                "description": "/gather 50,000 times",
-                "threshold": 50000,
-                "boost": 0.50  # 50%
-            },
-            {
-                "level": 9,
-                "name": "Hundred Gathousand",
-                "description": "/gather 100,000 times",
-                "threshold": 100000,
-                "boost": 0.75  # 75%
-            },
-            {
-                "level": 10,
-                "name": "Mikellion",
-                "description": "/gather 1,000,000 times",
-                "threshold": 1000000,
-                "boost": 2.0  # 200%
+                "boost": 0.30  # 30% (capped)
             }
         ]
     },
@@ -2003,21 +1978,21 @@ ACHIEVEMENTS = {
                 "name": "Just One More",
                 "description": "Perform 7,777 coinflips",
                 "threshold": 7777,
-                "boost": 0.77  # 77%
+                "boost": 0.55  # 55%
             },
             {
                 "level": 9,
                 "name": "Almost Breaking Even",
                 "description": "Perform 15,000 coinflips",
                 "threshold": 15000,
-                "boost": 1.50  # 150%
+                "boost": 0.70  # 70%
             },
             {
                 "level": 10,
                 "name": "The House Always Wins",
                 "description": "Perform 30,000 coinflips",
                 "threshold": 30000,
-                "boost": 3.0  # 300%
+                "boost": 0.80  # 80% (capped)
             }
         ]
     },
@@ -2064,42 +2039,42 @@ ACHIEVEMENTS = {
                 "name": "Just a 1/32 Chance BTW",
                 "description": "Win 5 coinflips in a row",
                 "threshold": 5,
-                "boost": 0.50  # 50%
+                "boost": 0.25  # 25%
             },
             {
                 "level": 6,
                 "name": "Still Going",
                 "description": "Win 6 coinflips in a row",
                 "threshold": 6,
-                "boost": 1.0  # 100%
+                "boost": 0.50  # 50%
             },
             {
                 "level": 7,
                 "name": "Just 1 More Win (In a Row)",
                 "description": "Win 7 coinflips in a row",
                 "threshold": 7,
-                "boost": 1.5  # 150%
+                "boost": 0.65  # 65%
             },
             {
                 "level": 8,
                 "name": "Is This Even Possible?",
                 "description": "Win 8 coinflips in a row",
                 "threshold": 8,
-                "boost": 2.5  # 250%
+                "boost": 0.80  # 80%
             },
             {
                 "level": 9,
                 "name": "You Should Buy A Lottery Ticket",
                 "description": "Win 9 coinflips in a row",
                 "threshold": 9,
-                "boost": 4.0  # 400%
+                "boost": 0.90  # 90%
             },
             {
                 "level": 10,
                 "name": "Struck By Lightning (Twice)",
                 "description": "Win 10 coinflips in a row",
                 "threshold": 10,
-                "boost": 6.0  # 600%
+                "boost": 1.0  # 100% (capped)
             }
         ]
     },
@@ -2129,59 +2104,38 @@ ACHIEVEMENTS = {
             },
             {
                 "level": 3,
-                "name": "Combining",
+                "name": "Locally Known",
                 "description": "Do /harvest 15 times",
                 "threshold": 15,
                 "boost": 0.05  # 5%
             },
             {
                 "level": 4,
-                "name": "Have You Done /orchard Yet?",
+                "name": "Making The World Go Round",
                 "description": "Do /harvest 50 times",
                 "threshold": 50,
                 "boost": 0.10  # 10%
             },
             {
                 "level": 5,
-                "name": "Making The World Go Round",
+                "name": "Competing With Publix",
                 "description": "Do /harvest 100 times",
                 "threshold": 100,
                 "boost": 0.25  # 25%
             },
             {
                 "level": 6,
-                "name": "Locally Known",
+                "name": "World Renowned",
                 "description": "Do /harvest 500 times",
                 "threshold": 500,
                 "boost": 0.50  # 50%
             },
             {
                 "level": 7,
-                "name": "Competing With Publix",
-                "description": "Do /harvest 1000 times",
+                "name": "The Lebron of Plants",
+                "description": "Do /harvest 1,000 times",
                 "threshold": 1000,
                 "boost": 1.20  # 120%
-            },
-            {
-                "level": 8,
-                "name": "World Renowned",
-                "description": "Do /harvest 2000 times",
-                "threshold": 2000,
-                "boost": 2.50  # 250%
-            },
-            {
-                "level": 9,
-                "name": "The Lebron of Plants",
-                "description": "Do /harvest 5000 times",
-                "threshold": 5000,
-                "boost": 4.0  # 400%
-            },
-            {
-                "level": 10,
-                "name": "Galactically Known",
-                "description": "Do /harvest 10,000 times",
-                "threshold": 10000,
-                "boost": 9.99  # 999%
             }
         ]
     },
@@ -2263,7 +2217,7 @@ ACHIEVEMENTS = {
                 "name": "John Deere Himself",
                 "description": "Be PLANTER X",
                 "threshold": 10,
-                "boost": 3.0  # 300%
+                "boost": 1.0  # 100% (capped)
             }
         ]
     },
@@ -2479,7 +2433,7 @@ ACHIEVEMENTS = {
                 "name": "Mahogany",
                 "description": "Unlock the #underground-jungle",
                 "threshold": 1,
-                "boost": 0.02  # 2%
+                "boost": 0.05  # 5%
             },
             {
                 "level": 2,
@@ -2493,21 +2447,21 @@ ACHIEVEMENTS = {
                 "name": "Marshing On",
                 "description": "Unlock the #marsh",
                 "threshold": 3,
-                "boost": 0.30  # 30%
+                "boost": 0.15  # 15%
             },
             {
                 "level": 4,
                 "name": "Not To Be Confused With Bug",
                 "description": "Unlock the #bog",
                 "threshold": 4,
-                "boost": 0.50  # 50%
+                "boost": 0.22  # 22%
             },
             {
                 "level": 5,
                 "name": "But Not Loot Lake",
                 "description": "Unlock the #mire",
                 "threshold": 5,
-                "boost": 0.75  # 75%
+                "boost": 0.30  # 30% (capped)
             }
         ]
     },
@@ -2599,63 +2553,63 @@ ACHIEVEMENTS = {
             {
                 "level": 0,
                 "name": "Lever? I Hardly Know Her",
-                "description": "You haven't spun the slots yet! Do /slots!",
+                "description": "You haven't clicked SPIN yet! Do /slots, pick 0.1% or 1%, then click SPIN!",
                 "threshold": 0,
                 "boost": 0.0
             },
             {
                 "level": 1,
                 "name": "First Pull",
-                "description": "Spin /slots 1 time",
+                "description": "Click SPIN (0.1% or 1% bet) 1 time",
                 "threshold": 1,
                 "boost": 0.005  # 0.5%
             },
             {
                 "level": 2,
                 "name": "Gamble Addict",
-                "description": "Spin /slots 5 times",
+                "description": "Click SPIN 5 times",
                 "threshold": 5,
                 "boost": 0.01  # 1%
             },
             {
                 "level": 3,
                 "name": "I Love Reels",
-                "description": "Spin /slots 25 times",
+                "description": "Click SPIN 25 times",
                 "threshold": 25,
                 "boost": 0.03  # 3%
             },
             {
                 "level": 4,
                 "name": "House Favorite",
-                "description": "Spin /slots 100 times",
+                "description": "Click SPIN 100 times",
                 "threshold": 100,
                 "boost": 0.07  # 7%
             },
             {
                 "level": 5,
                 "name": "Slot Addict",
-                "description": "Spin /slots 500 times",
+                "description": "Click SPIN 500 times",
                 "threshold": 500,
                 "boost": 0.15  # 15%
             },
             {
                 "level": 6,
                 "name": "SURELY this one will be the jackpot, right?",
-                "description": "Spin /slots 1,000 times",
+                "description": "Click SPIN 1,000 times",
                 "threshold": 1000,
                 "boost": 0.25  # 25%
             },
             {
                 "level": 7,
                 "name": "Vegas Regular",
-                "description": "Spin /slots 5,000 times",
+                "description": "Click SPIN 5,000 times",
                 "threshold": 5000,
                 "boost": 0.40  # 40%
             },
             {
                 "level": 8,
                 "name": "I Prefer YouTube Shorts Instead Of Reels Anyway",
-                "description": "Spin /slots 10,000 times",
+                "description": "Click SPIN 10,000 times",
                 "threshold": 10000,
                 "boost": 0.60  # 60%
             }
@@ -2739,10 +2693,26 @@ ACHIEVEMENTS = {
                 "name": "Level 99 Mafia Boss",
                 "description": "Steal 500 gathers/harvests",
                 "threshold": 500,
-                "boost": 3.0  # 300%
+                "boost": 2.5  # 250%
             }
         ]
-    }
+    },
+    "almanac": {
+        "name": "Almanac Achievement Category",
+        "levels": [
+            {"level": 0, "name": "Zero to Hero", "description": "You have no plants?? Do /gather and then check your /almanac!", "threshold": 0, "boost": 0.0},
+            {"level": 1, "name": "Field Notes", "description": "Have 10% of the /almanac filled out", "threshold": 10, "boost": 0.05},
+            {"level": 2, "name": "Initiate", "description": "Have 20% of the /almanac filled out", "threshold": 20, "boost": 0.10},
+            {"level": 3, "name": "Sproutling Scholar", "description": "Have 30% of the /almanac filled out", "threshold": 30, "boost": 0.15},
+            {"level": 4, "name": "Archivist", "description": "Have 40% of the /almanac filled out", "threshold": 40, "boost": 0.20},
+            {"level": 5, "name": "Thorns & Theories", "description": "Have 50% of the /almanac filled out", "threshold": 50, "boost": 0.25},
+            {"level": 6, "name": "Canopy Chronicler", "description": "Have 60% of the /almanac filled out", "threshold": 60, "boost": 0.30},
+            {"level": 7, "name": "Botanist", "description": "Have 70% of the /almanac filled out", "threshold": 70, "boost": 0.35},
+            {"level": 8, "name": "Graduate's Thesis", "description": "Have 80% of the /almanac filled out", "threshold": 80, "boost": 0.40},
+            {"level": 9, "name": "Enlightened Eucalyptus", "description": "Have 90% of the /almanac filled out", "threshold": 90, "boost": 0.45},
+            {"level": 10, "name": "Root of All Knowledge", "description": "Max out your /almanac!", "threshold": 100, "boost": 0.50},
+        ]
+    },
 }
 
 # Hidden achievements definitions
@@ -2750,12 +2720,12 @@ HIDDEN_ACHIEVEMENTS = {
     "john_rockefeller": {
         "name": "John Rockefeller",
         "description": "Pay someone at least $1,000,000",
-        "boost": 0.25  # 25%
+        "boost": 0.10  # 10%
     },
     "beating_the_odds": {
         "name": "Beating The Odds",
         "description": "Cashout in a game of /russian where there are 5 bullets in the chamber",
-        "boost": 0.33  # 33%
+        "boost": 0.15  # 15%
     },
     "beneficiary": {
         "name": "Beneficiary",
@@ -2764,178 +2734,193 @@ HIDDEN_ACHIEVEMENTS = {
     },
     "leap_year": {
         "name": "Leap Year",
-        "description": "Have a /water streak of 366",
-        "boost": 50.00  # 5000%
+        "description": "Have a /water streak of 29 days",
+        "boost": 0.15  # 15%
     },
     "ceo": {
         "name": "CEO",
         "description": "Own over 50% of the amount of shares for any company in the stock market",
-        "boost": 2.0  # 200%
+        "boost": 0.70  # 70%
     },
     "blockchain": {
         "name": "Blockchain",
         "description": "Have at least 1.00 of any cryptocoin",
-        "boost": 0.50  # 50%
+        "boost": 0.05  # 5%
     },
     "almost_got_it": {
         "name": "Almost Got It",
         "description": "Do a /gather when there's less than 1 second before the cooldown is up, but you're still on cooldown",
-        "boost": 0.20  # 20%
+        "boost": 0.03  # 3%
     },
     "almost_got_it_too": {
         "name": "Almost Got It, Too",
         "description": "Do a /harvest when there's 0 seconds remaining, but you're still on cooldown",
-        "boost": 0.20  # 20%
+        "boost": 0.06  # 6%
     },
     "maxed_out": {
         "name": "Maxed Out",
         "description": "Have all GPUs, all gardeners, all /gear upgrades maxed, all /orchard upgrades maxed",
-        "boost": 1.0  # 100%
+        "boost": 0.50  # 50%
     },
     "high_reroller": {
         "name": "High Reroller",
         "description": "Get an imbue enchantment that is NETHERITE, LUMINITE, CELESTIAL, or SECRET",
-        "boost": 0.50  # 50%
+        "boost": 0.25  # 25%
     },
     "social_butterfly": {
         "name": "Social Butterfly",
         "description": "Invite 20 people to the server",
-        "boost": 2.0  # 200%
+        "boost": 0.35  # 35%
     },
     "no_monkey_business": {
         "name": "No Monkey Business",
         "description": "Defeat the Monkey",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "grizzly_victory": {
         "name": "If It's Brown, Lay Down",
         "description": "Defeat the Grizzly Bear",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "black_bear_blues": {
         "name": "If It's Black, Fight Back",
         "description": "Defeat the Black Bear",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "polar_power": {
         "name": "If It's White, Goodnight",
         "description": "Defeat the Polar Bear",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "tiger_tamer": {
         "name": "Tiger Tamer",
         "description": "Defeat the Tiger",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "panther_pounce": {
         "name": "SFSC'S Mascot",
         "description": "Defeat the Panther",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "homeless_hero": {
         "name": "Lean No More",
         "description": "Defeat the Homeless Man on Fent",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "bullet_ant_squasher": {
         "name": "Dodged",
         "description": "Defeat a Bullet Ant or Bullet Ant Swarm",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "skunkape_slayer": {
         "name": "Give Me The Werx",
         "description": "Defeat the Skunkape",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "godzilla_king": {
         "name": "Kick 'Em In The Shin",
         "description": "Defeat Godzilla",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "mothron_masher": {
         "name": "Not To Be Confused With Mothra",
         "description": "Defeat Mothron",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "plantera_crusher": {
         "name": "The Great Southern Plantkill",
         "description": "Defeat Plantera",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "wither_slayer": {
         "name": "Witherfall",
         "description": "Defeat The Wither",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "ender_dragon_slayer": {
         "name": "The End?",
         "description": "Defeat the Ender Dragon",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "retinazer_retired": {
         "name": "Ophthalmologist",
         "description": "Defeat Retinazer (The Twins)",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "spazmatism_silenced": {
         "name": "Mechanical Menace",
         "description": "Defeat Spazmatism (The Twins)",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
+    },
+    "flower_plower": {
+        "name": "Flower Plower",
+        "description": "Fill out the Flower section of the /almanac",
+        "boost": 0.20  # 20%
+    },
+    "parfaits": {
+        "name": "Anyone Wanna Go For Parfaits?",
+        "description": "Fill out the Fruit section of the /almanac",
+        "boost": 0.20  # 20%
+    },
+    "eat_greens": {
+        "name": "Yeah, I Eat My Greens",
+        "description": "Fill out the Vegetable section of the /almanac",
+        "boost": 0.20  # 20%
     },
     "hornet_hunter": {
         "name": "Hornet Hunter",
         "description": "Defeat a Hornet (underground jungle)",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "bee_swarm_squasher": {
         "name": "Hive Mind",
         "description": "Defeat a Bee Swarm (underground jungle)",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "angry_trapper_crusher": {
         "name": "Trapped",
         "description": "Defeat an Angry Trapper (underground jungle)",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "man_eater_muncher": {
         "name": "Man Eaten",
         "description": "Defeat a Man Eater (underground jungle)",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "giant_tortoise_tamer": {
         "name": "Shell Shock",
         "description": "Defeat a Giant Tortoise (underground jungle)",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "arapaima_slayer": {
         "name": "Easy as Arapai",
         "description": "Defeat an Arapaima (underground jungle)",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "piranha_predator": {
         "name": "I Prefer Tilapia",
         "description": "Defeat a Piranha (underground jungle)",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "moth_masher": {
         "name": "Into The Light",
         "description": "Defeat the Moth (underground jungle)",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "spiked_slime_squasher": {
         "name": "Slimed Out",
         "description": "Defeat a Spiked Jungle Slime (underground jungle)",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "jungle_bat_basher": {
         "name": "Battered",
         "description": "Defeat a Jungle Bat (underground jungle)",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "queen_bee_slayer": {
         "name": "Sting Operation",
         "description": "Defeat the Queen Bee",
-        "boost": 0.05  # 5%
+        "boost": 0.025  # 2.5%
     },
     "pve_master": {
         "name": "Master Mode",
@@ -2945,12 +2930,27 @@ HIDDEN_ACHIEVEMENTS = {
     "one_in_a_mikellion": {
         "name": "One in a Mikellion",
         "description": "Gather or harvest a plant with Mikellion rarity",
-        "boost": 2.0  # 200%
+        "boost": 1.0  # 100%
     },
     "slots_three_in_a_row": {
         "name": "777",
         "description": "Win /slots 3 times in a row",
         "boost": 0.20  # 20%
+    },
+    "just_like_tf2": {
+        "name": "Just Like TF2",
+        "description": "Get a critical /gather",
+        "boost": 0.05  # 5%
+    },
+    "moist": {
+        "name": "Moist",
+        "description": "Get 10 critical /gathers",
+        "boost": 0.05  # 5%
+    },
+    "no_honor": {
+        "name": "\"No Honor\"",
+        "description": "Steal a critical /gather",
+        "boost": 0.10  # 10%
     }
 }
 
@@ -3220,11 +3220,12 @@ PREMIUM_COOLDOWN_REDUCTIONS = {
     3: {"gather_reduction": 5, "harvest_reduction": 240, "mine_reduction": 480},
     4: {"gather_reduction": 7, "harvest_reduction": 420, "mine_reduction": 900},
 }
+# Display names must match Discord role names exactly (e.g. "🪴SAPLING ($15)" with no space after emoji)
 PREMIUM_DISPLAY = {
     0: "",
     1: "🌰 SEED ($3)",
     2: "🌱 SPROUT ($8)",
-    3: "🪴 SAPLING ($15)",
+    3: "🪴SAPLING ($15)",
     4: "🌲 EVERGREEN ($20)",
 }
 # Base daily /water amount per streak day for each premium rank
@@ -3264,10 +3265,9 @@ def get_premium_tier_from_member(member: discord.Member | None) -> int:
         if display_name and display_name in member_role_names:
             tier = max(tier, i)
 
-    # Fallback: simple names, case-insensitive
-    lower_names = {name.lower() for name in member_role_names}
+    # Fallback: role name contains tier name (e.g. "🪴SAPLING ($15)" contains "Sapling"), case-insensitive
     for i, legacy in enumerate(legacy_names, start=1):
-        if legacy.lower() in lower_names:
+        if any(legacy.lower() in name.lower() for name in member_role_names):
             tier = max(tier, i)
 
     return tier
@@ -3738,44 +3738,30 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         elif full_data is None and has_shop_item(user_id, "bloomstone"):
             final_value *= 3.0
 
-    # BETA TESTER: permanent 1.3x on all money gained
+    # All money buffs below apply to the SAME base value (additive stacking). No buff's result becomes the "new base".
+    base_for_buffs = float(final_value)
     beta_tester_mult = get_beta_tester_money_multiplier(user_id)
-    final_value *= beta_tester_mult
-    extra_money_from_beta_tester = final_value * (beta_tester_mult - 1.0) / beta_tester_mult if beta_tester_mult > 1.0 else 0.0
-
-    # SERVER BOOSTER: 1.50x on all money gained (member.premium_since)
     server_booster_mult = get_server_booster_money_multiplier(user_id)
-    final_value *= server_booster_mult
-    extra_money_from_server_booster = final_value * (server_booster_mult - 1.0) / server_booster_mult if server_booster_mult > 1.0 else 0.0
-
-    # PREMIUM TIER: 1.1x / 1.5x / 2x / 3x (Seed / Sprout / Sapling / Evergreen)
     premium_mult = get_premium_tier_money_multiplier(user_id)
-    final_value *= premium_mult
-    extra_money_from_premium = final_value * (premium_mult - 1.0) / premium_mult if premium_mult > 1.0 else 0.0
-
-    # Nether Star: 1.15x all money (shop item)
     nether_star_mult = get_nether_star_money_multiplier(user_id)
-    final_value *= nether_star_mult
-    extra_money_from_nether_star = final_value * (nether_star_mult - 1.0) / nether_star_mult if nether_star_mult > 1.0 else 0.0
-
-    # Palace Treasure: 1.5x money (shop item)
-    final_value *= get_palace_treasure_money_multiplier(user_id)
-
-    # Edward / Splash Potion of Luck: 1% each to all money (shop items)
-    final_value *= get_edward_splash_money_multiplier(user_id)
-    final_value *= get_eclipse_glasses_money_multiplier(user_id)
-    # Work Lunch: 10% more from gardener auto-gather/auto-harvest (when not player cooldown)
-    if not apply_cooldown and has_shop_item(user_id, "work_lunch"):
-        final_value *= 1.10
-    # Overtime Approval: 10% chance for gardener gather to grant double money
-    if not apply_cooldown and has_shop_item(user_id, "overtime_approval") and random.random() < 0.10:
-        final_value *= 2.0
-
-    # Alchemist's Pocketwatch: +5% money from /gather (shop item)
+    palace_mult = get_palace_treasure_money_multiplier(user_id)
+    edward_mult = get_edward_splash_money_multiplier(user_id)
+    eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
+    extra_money_from_beta_tester = base_for_buffs * (beta_tester_mult - 1.0) if beta_tester_mult > 1.0 else 0.0
+    extra_money_from_server_booster = base_for_buffs * (server_booster_mult - 1.0) if server_booster_mult > 1.0 else 0.0
+    extra_money_from_premium = base_for_buffs * (premium_mult - 1.0) if premium_mult > 1.0 else 0.0
+    extra_money_from_nether_star = base_for_buffs * (nether_star_mult - 1.0) if nether_star_mult > 1.0 else 0.0
+    extra_palace = base_for_buffs * (palace_mult - 1.0) if palace_mult > 1.0 else 0.0
+    extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
+    extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
+    work_lunch_extra = base_for_buffs * 0.10 if (not apply_cooldown and has_shop_item(user_id, "work_lunch")) else 0.0
+    overtime_extra = base_for_buffs * 1.0 if (not apply_cooldown and has_shop_item(user_id, "overtime_approval") and random.random() < 0.10) else 0.0
+    alchemist_extra = 0.0
     if full_data is not None and full_data.get("shop_inventory", {}).get("alchemists_pocketwatch", 0) >= 1:
-        final_value *= 1.05
+        alchemist_extra = base_for_buffs * 0.05
     elif full_data is None and has_shop_item(user_id, "alchemists_pocketwatch"):
-        final_value *= 1.05
+        alchemist_extra = base_for_buffs * 0.05
+    final_value = base_for_buffs + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra
 
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
@@ -3910,6 +3896,9 @@ GATHERABLE_ITEMS = [
     {"category": "Vegetable","name": "Sweet Potato 🍠", "base_value": 13.13},
 ]
 
+# Almanac: undiscovered (plant, ripeness) shown as 3x this emoji (custom :HIDDEN:)
+ALMANAC_HIDDEN_EMOJI = "<:HIDDEN:1478915430390304788>"
+
 # Custom Discord emojis for items that don't have a Unicode emoji in the name (CDN IDs from server)
 # Use lowercase emoji names so :flowey: and :raspberry: display correctly in #rares and elsewhere
 CUSTOM_ITEM_EMOJIS = {
@@ -4034,6 +4023,96 @@ LEVEL_OF_RIPENESS_FLOWERS = [
     {"name": "Celestial", "multiplier": 100, "chance": 0.05},
     {"name": "Mikellion", "multiplier": 200, "chance": 0.000101},
 ]
+
+# Almanac key separator (must match database.ALMANAC_KEY_SEP when checking entries)
+_ALMANAC_KEY_SEP = "||"
+
+
+def _almanac_slots_by_category_build():
+    """Build (category_name, list of (item_name, ripeness_name)) excluding Mikellion. Called once at module load."""
+    out = {}
+    for item in GATHERABLE_ITEMS:
+        cat = item["category"]
+        name = item["name"]
+        if cat == "Flower":
+            ripeness_list = [r["name"] for r in LEVEL_OF_RIPENESS_FLOWERS if r["name"] != "Mikellion"]
+        elif cat == "Fruit":
+            ripeness_list = [r["name"] for r in LEVEL_OF_RIPENESS_FRUITS if r["name"] != "Mikellion"]
+        elif cat == "Vegetable":
+            ripeness_list = [r["name"] for r in LEVEL_OF_RIPENESS_VEGETABLES if r["name"] != "Mikellion"]
+        else:
+            ripeness_list = []
+        if cat not in out:
+            out[cat] = []
+        for r in ripeness_list:
+            out[cat].append((name, r))
+    return out
+
+
+# Cached at module load for lightning-fast /almanac (no repeated iteration over GATHERABLE_ITEMS).
+_ALMANAC_SLOTS_BY_CATEGORY = _almanac_slots_by_category_build()
+_ALMANAC_TOTAL_SLOTS = sum(len(s) for s in _ALMANAC_SLOTS_BY_CATEGORY.values())
+_ALMANAC_COUNTABLE_KEYS = frozenset(
+    f"{item}{_ALMANAC_KEY_SEP}{rip}"
+    for slots in _ALMANAC_SLOTS_BY_CATEGORY.values()
+    for (item, rip) in slots
+)
+
+
+def _almanac_slots_by_category():
+    """Return cached (category_name -> list of (item_name, ripeness_name)) excluding Mikellion."""
+    return _ALMANAC_SLOTS_BY_CATEGORY
+
+
+def _almanac_total_slots_excluding_mikellion():
+    """Total number of (plant, ripeness) slots that count toward almanac completion (no Mikellion)."""
+    return _ALMANAC_TOTAL_SLOTS
+
+
+def _almanac_filled_count(almanac_entries: dict) -> int:
+    """Count how many of the countable (plant, ripeness) slots the user has (excluding Mikellion)."""
+    return sum(1 for k in almanac_entries if k in _ALMANAC_COUNTABLE_KEYS)
+
+
+def _almanac_section_filled(almanac_entries: dict, category: str) -> bool:
+    """True if every (plant, ripeness) slot for this category is filled (excluding Mikellion)."""
+    slots = _almanac_slots_by_category().get(category, [])
+    for (item_name, rip) in slots:
+        key = f"{item_name}{_ALMANAC_KEY_SEP}{rip}"
+        if key not in almanac_entries:
+            return False
+    return True
+
+
+async def check_almanac_achievements_async(user_id: int, channel_or_interaction, user_mention: str):
+    """After gather/harvest (or gardener): update almanac achievement level and section hidden achievements; notify if new."""
+    try:
+        almanac_entries = get_user_almanac_entries(user_id)
+        total_slots = _almanac_total_slots_excluding_mikellion()
+        filled = _almanac_filled_count(almanac_entries)
+        pct = (100.0 * filled / total_slots) if total_slots else 0
+        new_level = get_achievement_level_for_stat("almanac", int(round(pct)))
+        current_level = get_user_achievement_level(user_id, "almanac")
+        if new_level > current_level:
+            set_user_achievement_level(user_id, "almanac", new_level)
+            if channel_or_interaction and hasattr(channel_or_interaction, "channel"):
+                ch = channel_or_interaction.channel
+            else:
+                ch = channel_or_interaction
+            if ch:
+                await send_achievement_notification_async(ch, user_mention, "almanac", new_level)
+        for (hidden_key, cat) in [("flower_plower", "Flower"), ("parfaits", "Fruit"), ("eat_greens", "Vegetable")]:
+            if _almanac_section_filled(almanac_entries, cat) and not has_hidden_achievement(user_id, hidden_key):
+                unlock_hidden_achievement(user_id, hidden_key)
+                if channel_or_interaction and hasattr(channel_or_interaction, "channel"):
+                    ch = channel_or_interaction.channel
+                else:
+                    ch = channel_or_interaction
+                if ch:
+                    await send_hidden_achievement_notification_async(ch, user_mention, hidden_key)
+    except Exception as e:
+        print(f"Error in check_almanac_achievements_async: {e}")
+
 
 MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
 
@@ -6466,8 +6545,8 @@ def generate_slot_grid(bet: float = 0, balance: float = 1, middle_only: bool = F
     if balance <= 0 or bet <= 0:
         return grid
     ratio = min(1.0, bet / balance)
-    # Real 5x5 slots: higher bet = more "weight" toward a win. 1% bet → ~32% forced-win chance so wins feel frequent.
-    WIN_BIAS_MULTIPLIER = 32  # 1% bet → 32% forced win; 0.1% bet → 3.2%
+    # 1% bet → 10% forced-win chance; 0.1% bet → 1%. When forced, always one line (lower-payout).
+    WIN_BIAS_MULTIPLIER = 10  # 1% bet → 10% forced win; 0.1% bet → 1%
     win_bias = ratio * WIN_BIAS_MULTIPLIER
     if random.random() >= win_bias:
         return grid
@@ -6475,6 +6554,7 @@ def generate_slot_grid(bet: float = 0, balance: float = 1, middle_only: bool = F
     if middle_only:
         _fill_line_5x5(grid, "row", 2, emoji)
         return grid
+    # One line only when forced (lower-payout combo more often than multi-line)
     line_types = ["row", "col", "diag_main", "diag_anti", "v_top", "v_bottom"]
     line_type = random.choice(line_types)
     line_idx = random.randint(0, 4) if line_type in ("row", "col") else 0
@@ -6560,14 +6640,27 @@ class SlotsView(discord.ui.View):
         self.spun = False
         self.locked_columns = set()
         self.final_grid = None
+        self.session_start_balance = normalize_money(get_user_balance(self.user_id))
+        self.spins_this_session = 0
 
     def _middle_only(self):
         return self.bet_type == "0.1%"
 
     def _update_spin_button(self):
-        # Third button is SPIN (Bet 0.1%, Bet 1%, SPIN)
+        # Third button is SPIN (0.1%, 1%, SPIN)
         if len(self.children) >= 3:
             self.children[2].disabled = self.spinning or self.bet_type is None
+
+    def _session_status_line(self, current_balance: float) -> str:
+        """Return UP/DOWN/EVEN/BROKE EVEN line for display beneath bet. current_balance should be normalized."""
+        net = round(current_balance - self.session_start_balance, 2)
+        if self.spins_this_session == 0:
+            return "**EVEN:** $0"
+        if net > 0:
+            return f"**UP:** ${net:.2f}"
+        if net < 0:
+            return f"**DOWN:** ${abs(net):.2f}"
+        return "**BROKE EVEN:** $0"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -6583,11 +6676,14 @@ class SlotsView(discord.ui.View):
         if self.bet_type:
             pct = 0.001 if self.bet_type == "0.1%" else 0.01
             bet_amt = normalize_money(balance * pct)
-            desc_parts.append(f"Bet: **{self.bet_type}** (${bet_amt:.2f})")
+            desc_parts.append(f"**BET:** **{self.bet_type}** (${bet_amt:.2f})")
+            desc_parts.append(self._session_status_line(balance))
             if self.bet_type == "0.1%":
                 desc_parts.append("Win: middle row only.")
             else:
                 desc_parts.append("Win: any row, column, diagonal (X), or V.")
+        else:
+            desc_parts.append(self._session_status_line(balance))
         desc_parts.append("")
         desc_parts.append(format_slot_grid(self.grid, self.locked_columns, highlight_middle_row=self._middle_only()))
         embed = discord.Embed(
@@ -6665,6 +6761,7 @@ class SlotsView(discord.ui.View):
             update_user_balance(self.user_id, new_bal)
         curr_balance = get_user_balance(self.user_id)
         curr_balance = normalize_money(curr_balance)
+        self.spins_this_session += 1
 
         # Slots achievements: spin count + win streak (hidden 777 = 3 wins in a row)
         increment_user_slots_spin_count(self.user_id)
@@ -6686,9 +6783,10 @@ class SlotsView(discord.ui.View):
 
         title = "🎰 SLOTS - RESULT 🎰"
         bet_text = "**FREE SPIN** (Slot Token)" if use_free_spin else f"**${self.bet:.2f}** ({self.bet_type})"
+        session_line = self._session_status_line(curr_balance)
         result_embed = discord.Embed(
             title=title,
-            description=f"Bet: {bet_text}\n\n{format_slot_grid(self.grid, self.locked_columns, highlight_middle_row=middle_only)}",
+            description=f"**BET:** {bet_text}\n{session_line}\n\n{format_slot_grid(self.grid, self.locked_columns, highlight_middle_row=middle_only)}",
             color=discord.Color.green() if won else discord.Color.red(),
         )
         if won:
@@ -6721,7 +6819,7 @@ class SlotsView(discord.ui.View):
                 await send_achievement_notification(interaction, item[0], item[1])
             await asyncio.sleep(0.5)
 
-    @discord.ui.button(label="Bet 0.1%", style=discord.ButtonStyle.secondary, custom_id="slots_01pct", row=0)
+    @discord.ui.button(label="0.1%", style=discord.ButtonStyle.secondary, custom_id="slots_01pct", row=0)
     async def bet_01pct(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if not await safe_defer(interaction, ephemeral=False):
@@ -6737,7 +6835,7 @@ class SlotsView(discord.ui.View):
             print(f"Error in bet_01pct: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred.", ephemeral=True)
 
-    @discord.ui.button(label="Bet 1%", style=discord.ButtonStyle.secondary, custom_id="slots_1pct", row=0)
+    @discord.ui.button(label="1%", style=discord.ButtonStyle.secondary, custom_id="slots_1pct", row=0)
     async def bet_1pct(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if not await safe_defer(interaction, ephemeral=False):
@@ -6753,7 +6851,7 @@ class SlotsView(discord.ui.View):
             print(f"Error in bet_1pct: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred.", ephemeral=True)
 
-    @discord.ui.button(label="🎰 SPIN 🎰", style=discord.ButtonStyle.success, emoji="🎲", custom_id="slots_spin", row=0)
+    @discord.ui.button(label="SPIN", style=discord.ButtonStyle.success, emoji="🎲", custom_id="slots_spin", row=0)
     async def spin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if not await safe_defer(interaction, ephemeral=False):
@@ -6762,7 +6860,7 @@ class SlotsView(discord.ui.View):
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ Spin in progress!", ephemeral=True)
                 return
             if self.bet_type is None:
-                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Pick Bet 0.1% or Bet 1% first!", ephemeral=True)
+                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Pick 0.1% or 1% first!", ephemeral=True)
                 return
             self.spinning = True
             await self.animate_spin(interaction)
@@ -6807,7 +6905,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.11.2"
+            name="running /gather on V0.11.3"
         )
     )
     try:
@@ -7130,10 +7228,10 @@ def _gather_critical_path(member, user_id: int, channel_name: str, area: dict) -
     if chain_triggered:
         update_user_last_gather_time(user_id, 0)
 
-    # --- stealable roll: 1% for gather (× Palace Treasure mult for victim); cannot steal critical; stealable = no PvE ---
+    # --- stealable roll: 4% for gather (× Palace Treasure mult for victim); crits can be stealable; stealable = no PvE ---
     is_crit = gather_result.get("is_critical_gather", False)
     steal_chance = STEAL_CHANCE_GATHER * get_steal_chance_multiplier(user_id)
-    stealable = not is_crit and random.random() < steal_chance
+    stealable = random.random() < steal_chance
     steal_payload = None
     if stealable:
         steal_payload = {
@@ -7141,6 +7239,7 @@ def _gather_critical_path(member, user_id: int, channel_name: str, area: dict) -
             "item_name": gather_result["name"],
             "ripeness_name": gather_result["ripeness"],
             "category": gather_result["category"],
+            "is_critical_gather": is_crit,
         }
 
     return {
@@ -7227,6 +7326,18 @@ async def _gather_post_response(interaction: discord.Interaction, user_id: int,
         # Hidden achievement: One in a Mikellion (gather a plant with Mikellion rarity)
         if gather_result.get("ripeness") == "Mikellion" and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
             await send_hidden_achievement_notification(interaction, "one_in_a_mikellion")
+
+        # Hidden achievements: Just Like TF2 (first crit), Moist (10 crits)
+        if gather_result.get("is_critical_gather"):
+            if unlock_hidden_achievement(user_id, "just_like_tf2"):
+                await send_hidden_achievement_notification(interaction, "just_like_tf2")
+            await asyncio.to_thread(increment_critical_gathers_count, user_id)
+            crit_count = await asyncio.to_thread(get_user_critical_gathers_count, user_id)
+            if crit_count >= 10 and unlock_hidden_achievement(user_id, "moist"):
+                await send_hidden_achievement_notification(interaction, "moist")
+
+        # Almanac achievements (level + section hidden)
+        await check_almanac_achievements_async(user_id, interaction, interaction.user.mention)
     except Exception as e:
         print(f"Error in gather post-response: {e}")
 
@@ -7338,6 +7449,11 @@ class StealView(discord.ui.View):
 
         stealing_level_up = await asyncio.to_thread(_check_stealing_achievement)
 
+        # Hidden achievement: No Honor (steal a critical gather)
+        no_honor_unlocked = False
+        if self.steal_type == "gather" and payload.get("is_critical_gather") and unlock_hidden_achievement(stealer_id, "no_honor"):
+            no_honor_unlocked = True
+
         for child in self.children:
             child.disabled = True
 
@@ -7376,10 +7492,17 @@ class StealView(discord.ui.View):
                 interaction, interaction.response.edit_message, embed=embed, view=self)
             if stealing_level_up is not None:
                 await send_achievement_notification(interaction, "stealing", stealing_level_up)
+            if no_honor_unlocked:
+                await send_hidden_achievement_notification(interaction, "no_honor")
         except Exception:
             if stealing_level_up is not None:
                 try:
                     await send_achievement_notification(interaction, "stealing", stealing_level_up)
+                except Exception:
+                    pass
+            if no_honor_unlocked:
+                try:
+                    await send_hidden_achievement_notification(interaction, "no_honor")
                 except Exception:
                     pass
             await safe_interaction_response(
@@ -7547,6 +7670,17 @@ class BulletAntView(discord.ui.View):
                                 title=f"☠️ 🐜 Bullet Ant Swarm Defeated! ☠️",
                                 description=self.swarm_state["defeat_msg"],
                                 color=discord.Color.gold())
+                            total_hp = self.swarm_state.get("total_hp")
+                            display_attackers = _pve_cap_damage_by_hp(dict(self.swarm_state["attackers"]), total_hp) if total_hp else dict(self.swarm_state["attackers"])
+                            participants_lines = []
+                            for uid, dmg in sorted(display_attackers.items(), key=lambda x: -x[1]):
+                                member = interaction.guild.get_member(uid)
+                                name = member.display_name if member else f"User {uid}"
+                                participants_lines.append(f"**{name}** — {dmg} damage")
+                            participants_text = "\n".join(participants_lines) if participants_lines else "No participants"
+                            if len(participants_text) > 1024:
+                                participants_text = participants_text[:1020] + " …"
+                            defeat_embed.add_field(name="🏆 Contributors", value=participants_text, inline=False)
                             await intro_msg.edit(embed=defeat_embed)
                         except Exception as e:
                             print(f"Bullet Ant Swarm intro edit failed: {e}")
@@ -7698,6 +7832,17 @@ class BeeView(discord.ui.View):
                                 title=f"☠️ 🐝 Bee Swarm Defeated! ☠️",
                                 description=self.swarm_state["defeat_msg"],
                                 color=discord.Color.gold())
+                            total_hp = self.swarm_state.get("total_hp")
+                            display_attackers = _pve_cap_damage_by_hp(dict(self.swarm_state["attackers"]), total_hp) if total_hp else dict(self.swarm_state["attackers"])
+                            participants_lines = []
+                            for uid, dmg in sorted(display_attackers.items(), key=lambda x: -x[1]):
+                                member = interaction.guild.get_member(uid)
+                                name = member.display_name if member else f"User {uid}"
+                                participants_lines.append(f"**{name}** — {dmg} damage")
+                            participants_text = "\n".join(participants_lines) if participants_lines else "No participants"
+                            if len(participants_text) > 1024:
+                                participants_text = participants_text[:1020] + " …"
+                            defeat_embed.add_field(name="🏆 Contributors", value=participants_text, inline=False)
                             await intro_msg.edit(embed=defeat_embed)
                         except Exception as e:
                             print(f"Bee Swarm intro edit failed: {e}")
@@ -7907,8 +8052,8 @@ class BossView(discord.ui.View):
             await safe_interaction_response(interaction, interaction.response.edit_message, embed=progress_embed, view=self)
 
 
-async def _send_boss_warning_embed(guild: discord.Guild, boss: dict):
-    """Send 1-min warning embed with @here to ALL gathering grounds channels. No footer so it's not obvious a boss is spawning."""
+async def _send_boss_warning_embed(guild: discord.Guild, boss: dict, spawn_channel: discord.TextChannel):
+    """Send 1-min warning embed to ALL gathering channels; only @here in the channel where the boss will spawn. No footer."""
     channels = _get_guild_gather_channels(guild)
     text = boss.get("pre_spawn_text", "Something terrible is approaching...")
     embed = discord.Embed(
@@ -7918,7 +8063,10 @@ async def _send_boss_warning_embed(guild: discord.Guild, boss: dict):
     for ch in channels:
         try:
             if ch.permissions_for(guild.me).send_messages:
-                await ch.send("@here", embed=embed)
+                if ch.id == spawn_channel.id:
+                    await ch.send("@here", embed=embed)
+                else:
+                    await ch.send(embed=embed)
         except Exception as e:
             print(f"Boss warning embed failed in {ch.name}: {e}")
 
@@ -8402,6 +8550,7 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
     # Roll all items (pure CPU, zero DB)
     items_inc: dict[str, int] = {}
     ripeness_inc: dict[str, int] = {}
+    almanac_pairs: list = []
     total_balance = 0.0
     display_results = []
 
@@ -8448,25 +8597,26 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
         if has_bloomstone and cat == "Flower":
             fv *= 3.0
 
-        # BETA TESTER: same 1.3x as /gather
-        fv *= get_beta_tester_money_multiplier(user_id)
-        # SERVER BOOSTER: 1.50x (member.premium_since)
-        fv *= get_server_booster_money_multiplier(user_id)
-        # PREMIUM TIER: 1.1x / 1.5x / 2x / 3x
-        fv *= get_premium_tier_money_multiplier(user_id)
-        fv *= get_nether_star_money_multiplier(user_id)
-        fv *= get_palace_treasure_money_multiplier(user_id)
-        fv *= get_edward_splash_money_multiplier(user_id)
+        # All money buffs apply to the SAME base value (additive stacking) per item
+        base_for_buffs = float(fv)
+        beta_mult = get_beta_tester_money_multiplier(user_id)
+        sb_mult = get_server_booster_money_multiplier(user_id)
+        prem_mult = get_premium_tier_money_multiplier(user_id)
+        nether_mult = get_nether_star_money_multiplier(user_id)
+        palace_mult = get_palace_treasure_money_multiplier(user_id)
+        edward_mult = get_edward_splash_money_multiplier(user_id)
+        eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
+        fv = base_for_buffs * (1.0 + (beta_mult - 1.0) + (sb_mult - 1.0) + (prem_mult - 1.0) + (nether_mult - 1.0) + (palace_mult - 1.0) + (edward_mult - 1.0) + (eclipse_mult - 1.0))
         total_balance += fv
         name = item["name"]
         items_inc[name] = items_inc.get(name, 0) + 1
         ripeness_inc[rip["name"]] = ripeness_inc.get(rip["name"], 0) + 1
+        almanac_pairs.append((name, rip["name"]))
         display_results.append({"name": name, "value": fv})
 
     # Paladin's Shield: 10% more money from PvE (wild animal/boss)
     if has_shop_item(user_id, "paladins_shield"):
         total_balance *= 1.10
-    total_balance *= get_eclipse_glasses_money_multiplier(user_id)
     # Single batched DB write
     pre_total = full_data.get("gather_stats_total_items", 0) or full_data.get("total_forage_count", 0)
     pre_bloom_cycle = full_data.get("bloom_cycle_plants", 0)
@@ -8480,6 +8630,7 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
         pre_bloom_cycle=pre_bloom_cycle,
         set_cooldown=False,
         increment_command_count=False,
+        almanac_pairs=almanac_pairs,
     )
 
     return display_results, total_balance
@@ -9011,7 +9162,7 @@ async def gather(interaction: discord.Interaction):
             if random.random() < effective_boss_chance and bosses_candidates:
                 boss = random.choice(bosses_candidates)
                 pending_boss_spawn_guild_ids.add(guild_id)
-                await _send_boss_warning_embed(interaction.guild, boss)
+                await _send_boss_warning_embed(interaction.guild, boss, interaction.channel)
                 asyncio.create_task(_delayed_boss_spawn(interaction.guild, interaction.channel, boss, area_mult, 60.0))
                 pve_spawned = True
         # 3. PvE wild animal: only if no boss active and this channel has no PvE event
@@ -9130,7 +9281,7 @@ def _water_critical_path(user_id: int) -> dict:
         if new_water_streak_level > current_water_streak_level:
             set_user_achievement_level(user_id, "water_streak", new_water_streak_level)
             water_streak_level_up = new_water_streak_level
-        if consecutive_days == 366:
+        if consecutive_days == 29:
             leap_year_unlocked = unlock_hidden_achievement(user_id, "leap_year")
 
     return {
@@ -9167,6 +9318,94 @@ async def water(interaction: discord.Interaction):
             await send_hidden_achievement_notification(interaction, "leap_year")
     except Exception as e:
         print(f"Error in water command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+def _format_cooldown_seconds(seconds: int) -> str:
+    """Format seconds as human-readable time left (e.g. '2h 15m' or 'Ready')."""
+    if seconds <= 0:
+        return "Ready"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        m, s = divmod(seconds, 60)
+        return f"{m}m {s}s" if s else f"{m}m"
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if m or s:
+        return f"{h}h {m}m {s}s" if s else f"{h}h {m}m"
+    return f"{h}h"
+
+
+def _cooldowns_data_sync(user_id: int) -> dict:
+    """Gather all cooldown remaining times for /cooldowns. Runs in thread."""
+    data = {}
+    current_time = time.time()
+    EST_OFFSET = datetime.timedelta(hours=-5)
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    now_est = now_utc + EST_OFFSET
+
+    # /gather
+    can_g, time_g, _ = can_gather(user_id)
+    data["gather"] = 0 if can_g else time_g
+
+    # /harvest
+    can_h, time_h, _ = can_harvest(user_id)
+    data["harvest"] = 0 if can_h else time_h
+
+    # /mine
+    last_mine = get_user_last_mine_time(user_id)
+    mine_cd = MINE_COOLDOWN
+    mine_cd = max(0, mine_cd - get_invite_cooldown_reductions(user_id).get("mine_reduction", 0))
+    mine_cd = max(0, mine_cd - get_premium_cooldown_reductions(user_id).get("mine_reduction", 0))
+    if last_mine <= 0:
+        data["mine"] = 0
+    else:
+        end = last_mine + mine_cd
+        data["mine"] = max(0, int(end - current_time))
+
+    # /dailyshop — resets at 12 AM EST
+    data["dailyshop"] = max(0, int(_seconds_until_midnight_est()))
+
+    # /water — midnight EST, or 12 PM & 12 AM EST if water_double
+    has_double = get_invite_cooldown_reductions(user_id).get("water_double", False)
+    if has_double and now_est.hour < 12:
+        next_water_est = now_est.replace(hour=12, minute=0, second=0, microsecond=0)
+    else:
+        next_water_est = (now_est + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    target_utc = next_water_est - EST_OFFSET
+    data["water"] = max(0, int((target_utc - now_utc).total_seconds()))
+
+    # Death timer (/russian)
+    _, death_left = check_roulette_elimination_cooldown(user_id)
+    data["death"] = max(0, death_left)
+
+    return data
+
+
+@bot.tree.command(name="cooldowns", description="View time remaining on your cooldowns")
+async def cooldowns(interaction: discord.Interaction):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        user_id = interaction.user.id
+        data = await asyncio.to_thread(_cooldowns_data_sync, user_id)
+        lines = [
+            f"**/gather** - {_format_cooldown_seconds(data['gather'])}",
+            f"**/harvest** - {_format_cooldown_seconds(data['harvest'])}",
+            f"**/mine** - {_format_cooldown_seconds(data['mine'])}",
+            f"**New /dailyshop** - {_format_cooldown_seconds(data['dailyshop'])}",
+            f"**/water** - {_format_cooldown_seconds(data['water'])}",
+            f"**Death Timer** - {_format_cooldown_seconds(data['death'])}",
+        ]
+        embed = discord.Embed(
+            title=f"⏱️ {interaction.user.name}'s Cooldowns",
+            description="\n".join(lines),
+            color=discord.Color.blue(),
+        )
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+    except Exception as e:
+        print(f"Error in cooldowns command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
@@ -9384,39 +9623,29 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     if shop_inv.get("fuzzy_dice", 0) >= 1:
         total_value *= 1.05
 
-    # BETA TESTER: permanent 1.3x on all money gained
+    # All money buffs below apply to the SAME base value (additive stacking). No buff's result becomes the "new base".
+    base_for_buffs = float(total_value)
     beta_tester_mult = get_beta_tester_money_multiplier(user_id)
-    total_value *= beta_tester_mult
-    extra_money_from_beta_tester = total_value * (beta_tester_mult - 1.0) / beta_tester_mult if beta_tester_mult > 1.0 else 0.0
-
-    # SERVER BOOSTER: 1.50x on all money gained (member.premium_since)
     server_booster_mult = get_server_booster_money_multiplier(user_id)
-    total_value *= server_booster_mult
-    extra_money_from_server_booster = total_value * (server_booster_mult - 1.0) / server_booster_mult if server_booster_mult > 1.0 else 0.0
-
-    # PREMIUM TIER: 1.1x / 1.5x / 2x / 3x (Seed / Sprout / Sapling / Evergreen)
     premium_mult = get_premium_tier_money_multiplier(user_id)
-    total_value *= premium_mult
-    extra_money_from_premium = total_value * (premium_mult - 1.0) / premium_mult if premium_mult > 1.0 else 0.0
-
-    # Nether Star: 1.15x all money
     nether_star_mult = get_nether_star_money_multiplier(user_id)
-    total_value *= nether_star_mult
-    extra_money_from_nether_star = total_value * (nether_star_mult - 1.0) / nether_star_mult if nether_star_mult > 1.0 else 0.0
+    palace_mult = get_palace_treasure_money_multiplier(user_id)
+    edward_mult = get_edward_splash_money_multiplier(user_id)
+    eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
+    extra_money_from_beta_tester = base_for_buffs * (beta_tester_mult - 1.0) if beta_tester_mult > 1.0 else 0.0
+    extra_money_from_server_booster = base_for_buffs * (server_booster_mult - 1.0) if server_booster_mult > 1.0 else 0.0
+    extra_money_from_premium = base_for_buffs * (premium_mult - 1.0) if premium_mult > 1.0 else 0.0
+    extra_money_from_nether_star = base_for_buffs * (nether_star_mult - 1.0) if nether_star_mult > 1.0 else 0.0
+    extra_palace = base_for_buffs * (palace_mult - 1.0) if palace_mult > 1.0 else 0.0
+    extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
+    extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
+    work_lunch_extra = base_for_buffs * 0.10 if (not set_cooldown and has_shop_item(user_id, "work_lunch")) else 0.0
+    overtime_extra = base_for_buffs * 1.0 if (not set_cooldown and has_shop_item(user_id, "overtime_approval") and random.random() < 0.10) else 0.0
+    total_value = base_for_buffs + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra
 
-    # Palace Treasure: 1.5x money
-    total_value *= get_palace_treasure_money_multiplier(user_id)
-    # Edward / Splash Potion of Luck: 1% each to all money
-    total_value *= get_edward_splash_money_multiplier(user_id)
-    total_value *= get_eclipse_glasses_money_multiplier(user_id)
-    # Work Lunch / Overtime: gardener harvest only (set_cooldown=False)
-    if not set_cooldown and has_shop_item(user_id, "work_lunch"):
-        total_value *= 1.10
-    if not set_cooldown and has_shop_item(user_id, "overtime_approval") and random.random() < 0.10:
-        total_value *= 2.0
-
-    # ----- single batch write: items + ripeness + balance + counts + tree rings + cooldown -----
+    # ----- single batch write: items + ripeness + balance + counts + tree rings + cooldown + almanac -----
     num_items = total_items_to_harvest
+    almanac_pairs = [(g["name"], g["ripeness"]) for g in gathered_items]
     tree_rings_to_award = perform_harvest_batch_update(
         user_id=user_id,
         items_inc=items_inc,
@@ -9427,6 +9656,7 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         pre_bloom_cycle=pre_bloom_cycle,
         set_cooldown=set_cooldown,
         increment_command_count=increment_command_count,
+        almanac_pairs=almanac_pairs,
     )
 
     return {
@@ -9627,6 +9857,9 @@ async def _harvest_post_response(interaction: discord.Interaction, user_id: int,
         if result.get('achievement_unlocked'):
             ach_name, ach_level = result['achievement_unlocked']
             await send_achievement_notification(interaction, ach_name, ach_level)
+
+        # Almanac achievements (level + section hidden)
+        await check_almanac_achievements_async(user_id, interaction, interaction.user.mention)
     except Exception as e:
         print(f"Error in harvest post-response: {e}")
 
@@ -9875,7 +10108,7 @@ async def harvest(interaction: discord.Interaction):
             if random.random() < effective_boss_chance and bosses_candidates:
                 boss = random.choice(bosses_candidates)
                 pending_boss_spawn_guild_ids.add(guild_id)
-                await _send_boss_warning_embed(interaction.guild, boss)
+                await _send_boss_warning_embed(interaction.guild, boss, interaction.channel)
                 asyncio.create_task(_delayed_boss_spawn(interaction.guild, interaction.channel, boss, area_mult, 60.0))
                 pve_spawned = True
         # 3. PvE wild animal
@@ -9894,7 +10127,7 @@ async def harvest(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="achievements", description="View your achievements and progress!")
-@app_commands.describe(hidden="Show hidden achievements (discovered show description; undiscovered show ???????)")
+@app_commands.describe(hidden="Show hidden achievements (discovered show description; undiscovered show ???)")
 async def achievements(interaction: discord.Interaction, hidden: bool = False):
     try:
         if not await safe_defer(interaction, ephemeral=True):
@@ -9918,7 +10151,7 @@ async def achievements(interaction: discord.Interaction, hidden: bool = False):
             hidden_fields = []
             for key, h_data in HIDDEN_ACHIEVEMENTS.items():
                 name = h_data["name"]
-                desc = h_data["description"] if hidden_achievements_map.get(key, False) else "???????"
+                desc = h_data["description"] if hidden_achievements_map.get(key, False) else f"{ALMANAC_HIDDEN_EMOJI}{ALMANAC_HIDDEN_EMOJI}{ALMANAC_HIDDEN_EMOJI}"
                 hidden_fields.append((name, desc))
 
             MAX_FIELDS_PER_EMBED = 25
@@ -11114,45 +11347,90 @@ async def userstats(interaction: discord.Interaction):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
-# almanac command
-@bot.tree.command(name="almanac", description="View your collection of your gathered items!")
-async def almanac(interaction: discord.Interaction):
+# almanac command: sections (flowers/fruits/vegetables), pagination, ??? = 3x HIDDEN, completion % (excluding Mikellion)
+ALMANAC_PLANTS_PER_PAGE = 6
+
+
+class AlmanacView(discord.ui.View):
+    def __init__(self, user_id: int, section: str, almanac_entries: dict = None, timeout: float = 120):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.section = section  # "Flower" | "Fruit" | "Vegetable"
+        self.page = 0
+        # Use pre-fetched entries so pagination never hits the DB
+        self._almanac_entries = almanac_entries if almanac_entries is not None else get_user_almanac_entries(user_id)
+        self._filled = _almanac_filled_count(self._almanac_entries)
+        self._total_slots = _ALMANAC_TOTAL_SLOTS
+        self._slots = _ALMANAC_SLOTS_BY_CATEGORY.get(section, [])
+        self._by_plant: dict[str, list[str]] = {}
+        for (item_name, rip) in self._slots:
+            self._by_plant.setdefault(item_name, []).append(rip)
+        self._plant_list = list(self._by_plant.keys())
+        self._max_page = max(0, (len(self._plant_list) - 1) // ALMANAC_PLANTS_PER_PAGE)
+
+    def _build_embed(self) -> discord.Embed:
+        pct = (100.0 * self._filled / self._total_slots) if self._total_slots else 0
+        start = self.page * ALMANAC_PLANTS_PER_PAGE
+        end = min(start + ALMANAC_PLANTS_PER_PAGE, len(self._plant_list))
+        plants_on_page = self._plant_list[start:end]
+        lines = []
+        entries = self._almanac_entries
+        for item_name in plants_on_page:
+            emoji = get_item_display_emoji(item_name)
+            emoji_str = f"{emoji} " if emoji else ""
+            desc = ITEM_DESCRIPTIONS.get(item_name, "A mysterious item from nature!")
+            parts = []
+            for rip in self._by_plant[item_name]:
+                key = f"{item_name}{_ALMANAC_KEY_SEP}{rip}"
+                if key in entries:
+                    parts.append(rip)
+                else:
+                    parts.append(f"{ALMANAC_HIDDEN_EMOJI}{ALMANAC_HIDDEN_EMOJI}{ALMANAC_HIDDEN_EMOJI}")
+            line = f"{emoji_str}**{item_name}** — \"{desc}\"\n  " + " | ".join(parts)
+            lines.append(line)
+        body = "\n\n".join(lines) if lines else "*No plants in this section.*"
+        title = f"📚 Almanac — {self.section}s"
+        embed = discord.Embed(title=title, description=body[:4000], color=discord.Color.green())
+        embed.set_footer(text=f"Page {self.page + 1}/{self._max_page + 1} • Almanac: {self._filled}/{self._total_slots} ({pct:.1f}%)")
+        return embed
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, custom_id="almanac_prev")
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.defer(ephemeral=True)
+            return
+        self.page = max(0, self.page - 1)
+        await interaction.response.edit_message(embed=self._build_embed(), view=self)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary, custom_id="almanac_next")
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.defer(ephemeral=True)
+            return
+        self.page = min(self._max_page, self.page + 1)
+        await interaction.response.edit_message(embed=self._build_embed(), view=self)
+
+
+@bot.tree.command(name="almanac", description="View your almanac: plants and ripeness you've gathered (by section)")
+@app_commands.describe(section="Section to view: flowers, fruits, or vegetables")
+@app_commands.choices(section=[
+    app_commands.Choice(name="Flowers", value="flowers"),
+    app_commands.Choice(name="Fruits", value="fruits"),
+    app_commands.Choice(name="Vegetables", value="vegetables"),
+])
+async def almanac(interaction: discord.Interaction, section: app_commands.Choice[str] = None):
     try:
         if not await safe_defer(interaction, ephemeral=True):
             return
-        
         user_id = interaction.user.id
-        user_items = get_user_items(user_id)
-        
-        if not user_items:
-            embed = discord.Embed(
-                title=f"{interaction.user.name}'s Almanac",
-                description="Your collection is empty! Start gathering items with `/gather` or `/harvest` to fill it up!",
-                color=discord.Color.orange()
-            )
-            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
-            return
-        
-        # Build the almanac text
-        almanac_text = ""
-        for item_name, count in user_items.items():
-            # Get description or use a default one
-            description = ITEM_DESCRIPTIONS.get(item_name, "A mysterious item from nature!")
-            # Use custom emoji for Flowey/Raspberry/Golden Apple/Enchanted Golden Apple, else from name
-            emoji = get_item_display_emoji(item_name)
-            emoji_prefix = f"{emoji} " if emoji else ""
-            # Plant name without the trailing emoji (avoid double emoji)
-            display_name = (item_name.replace(emoji, "").strip() if emoji else item_name).upper()
-            # Format: emoji PLANT NAME xCount : "Description"
-            almanac_text += f"{emoji_prefix}{display_name} x{count} : \"{description}\"\n"
-        
-        embed = discord.Embed(
-            title=f"{interaction.user.name}'s Almanac",
-            description=almanac_text,
-            color=discord.Color.green()
-        )
-        
-        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+        # Single DB read for almanac; view caches it so prev/next never hit DB
+        almanac_entries = get_user_almanac_entries(user_id)
+        section_map = {"flowers": "Flower", "fruits": "Fruit", "vegetables": "Vegetable"}
+        choice = section.value if section else "flowers"
+        section_cat = section_map.get(choice, "Flower")
+        view = AlmanacView(user_id, section_cat, almanac_entries=almanac_entries)
+        embed = view._build_embed()
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view, ephemeral=True)
     except Exception as e:
         print(f"Error in almanac command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
@@ -13100,7 +13378,7 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
             if hidden_map.get(key, False):
                 embed_hidden.add_field(name=name, value=data["description"], inline=False)
             else:
-                embed_hidden.add_field(name=name, value="???????", inline=False)
+                embed_hidden.add_field(name=name, value=f"{ALMANAC_HIDDEN_EMOJI}{ALMANAC_HIDDEN_EMOJI}{ALMANAC_HIDDEN_EMOJI}", inline=False)
 
         # ── 6. Wild Animals spawn reference (for admin) ──
         animal_mult, _ = _pve_spawn_multiplier()
@@ -15389,6 +15667,7 @@ async def gardener_background_task():
                                                 has_mikellion = any(item.get("ripeness") == "Mikellion" for item in harvest_result.get("gathered_items", []))
                                                 if has_mikellion and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
                                                     await send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion")
+                                                await check_almanac_achievements_async(user_id, lawn_channel, mention)
                                                 break
                                             except Exception as e:
                                                 print(f"Error sending gardener harvest-upgrade notification to #lawn in {guild.name} for user {user_id}: {e}")
@@ -15427,6 +15706,7 @@ async def gardener_background_task():
                                                     # Hidden achievement: One in a Mikellion (gardener gathered Mikellion)
                                                     if gather_result.get("ripeness") == "Mikellion" and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
                                                         await send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion")
+                                                    await check_almanac_achievements_async(user_id, lawn_channel, member.mention)
                                                     break
                                             except Exception as e:
                                                 print(f"Error sending gardener notification to #lawn channel in {guild.name} for user {user_id}: {e}")
@@ -15492,6 +15772,7 @@ async def secret_gardener_background_task():
                                             has_mikellion = any(item.get("ripeness") == "Mikellion" for item in harvest_result.get("gathered_items", []))
                                             if has_mikellion and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
                                                 await send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion")
+                                            await check_almanac_achievements_async(user_id, lawn_channel, member.mention)
                                         except Exception as e:
                                             print(f"Error sending secret gardener harvest notification: {e}")
                                     break
@@ -15521,6 +15802,7 @@ async def secret_gardener_background_task():
                                             # Hidden achievement: One in a Mikellion (secret gardener gathered Mikellion)
                                             if gather_result.get("ripeness") == "Mikellion" and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
                                                 await send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion")
+                                            await check_almanac_achievements_async(user_id, lawn_channel, member.mention)
                                         except Exception as e:
                                             print(f"Error sending secret gardener notification: {e}")
                                     break
@@ -15966,15 +16248,14 @@ async def hourly_event_check():
                         except Exception as e:
                             print(f"Error sending end embed to {guild.name}: {e}")
                     
+                    # Clear event from DB immediately so event_cleanup_task doesn't also send end embeds (prevents duplicates)
+                    clear_event(event_id)
+                    clear_expired_events()
                     print(f"Sent end message for hourly event: {event_info['name']} (5 seconds remaining)")
                     
                     # Wait for remaining 5 seconds until event actually ends
                     await asyncio.sleep(5)
-                    
-                    # Remove event from database (ensure it's cleared)
-                    clear_event(event_id)
-                    clear_expired_events()  # Double-check cleanup
-                    print(f"Ended hourly event: {event_info['name']} and cleared from database")
+                    print(f"Ended hourly event: {event_info['name']}")
             
             # Wait for the configured interval before next check
             print(f"Hourly event check completed. Waiting {HOURLY_EVENT_INTERVAL} seconds until next check...")
@@ -16080,15 +16361,14 @@ async def daily_event_check():
                         except Exception as e:
                             print(f"Error sending end embed to {guild.name}: {e}")
                     
+                    # Clear event from DB immediately so event_cleanup_task doesn't also send end embeds (prevents duplicates)
+                    clear_event(event_id)
+                    clear_expired_events()
                     print(f"Sent end message for daily event: {event_info['name']} (5 seconds remaining)")
                     
                     # Wait for remaining 5 seconds until event actually ends
                     await asyncio.sleep(5)
-                    
-                    # Remove event from database
-                    clear_event(event_id)
-                    clear_expired_events()
-                    print(f"Ended daily event: {event_info['name']} and cleared from database")
+                    print(f"Ended daily event: {event_info['name']}")
             
             # Wait for the configured interval before next check
             print(f"Daily event check completed. Waiting {DAILY_EVENT_INTERVAL} seconds until next check...")
@@ -16715,15 +16995,22 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             subtotal = base_sale_value + extra_from_bloom + extra_from_water + extra_from_achievement + extra_from_daily
             # Rank is multiplicative on subtotal
             extra_from_rank = subtotal * (rank_perma_buff_multiplier - 1.0)
-            total_sale_value = subtotal + extra_from_rank
-            total_sale_value *= get_beta_tester_money_multiplier(user_id)
-            total_sale_value *= get_server_booster_money_multiplier(user_id)
-            total_sale_value *= get_premium_tier_money_multiplier(user_id)
-            total_sale_value *= get_nether_star_money_multiplier(user_id)
-            total_sale_value *= get_edward_splash_money_multiplier(user_id)
-            if has_shop_item(user_id, "msi_afterburner"):
-                total_sale_value *= 1.20
-            total_sale_value *= get_eclipse_glasses_money_multiplier(user_id)
+            # All money buffs below apply to the SAME base value (additive stacking)
+            base_for_buffs = float(subtotal + extra_from_rank)
+            beta_mult = get_beta_tester_money_multiplier(user_id)
+            sb_mult = get_server_booster_money_multiplier(user_id)
+            prem_mult = get_premium_tier_money_multiplier(user_id)
+            nether_mult = get_nether_star_money_multiplier(user_id)
+            edward_mult = get_edward_splash_money_multiplier(user_id)
+            eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
+            extra_beta = base_for_buffs * (beta_mult - 1.0) if beta_mult > 1.0 else 0.0
+            extra_booster = base_for_buffs * (sb_mult - 1.0) if sb_mult > 1.0 else 0.0
+            extra_premium = base_for_buffs * (prem_mult - 1.0) if prem_mult > 1.0 else 0.0
+            extra_ns = base_for_buffs * (nether_mult - 1.0) if nether_mult > 1.0 else 0.0
+            extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
+            extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
+            extra_msi = base_for_buffs * 0.20 if has_shop_item(user_id, "msi_afterburner") else 0.0
+            total_sale_value = base_for_buffs + extra_beta + extra_booster + extra_premium + extra_ns + extra_edward + extra_eclipse + extra_msi
             # Add money to balance (with boosts)
             current_balance = get_user_balance(user_id)
             new_balance = current_balance + total_sale_value
@@ -16772,24 +17059,21 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
                     value=f"{rank_perma_buff_multiplier:.2f}x - **+${extra_from_rank:.2f}**",
                     inline=False
                 )
-            if get_user_beta_tester(user_id):
-                extra_beta = total_sale_value * (BETA_TESTER_MONEY_MULTIPLIER - 1.0) / BETA_TESTER_MONEY_MULTIPLIER
+            if extra_beta > 0:
                 embed.add_field(
                     name="🧪 Beta Tester!",
                     value=f"{BETA_TESTER_MONEY_MULTIPLIER:.2f}x - **+${extra_beta:.2f}**",
                     inline=False
                 )
-            if get_user_server_booster(user_id):
-                extra_booster = total_sale_value * (SERVER_BOOSTER_MONEY_MULTIPLIER - 1.0) / SERVER_BOOSTER_MONEY_MULTIPLIER
+            if extra_booster > 0:
                 embed.add_field(
                     name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
                     value=f"{SERVER_BOOSTER_MONEY_MULTIPLIER:.2f}x - **+${extra_booster:.2f}**",
                     inline=False
                 )
             premium_tier = get_user_premium_tier(user_id)
-            if premium_tier >= 1:
+            if extra_premium > 0:
                 mult = PREMIUM_MONEY_MULTIPLIERS.get(premium_tier, 1.0)
-                extra_premium = total_sale_value * (mult - 1.0) / mult
                 embed.add_field(
                     name=PREMIUM_DISPLAY.get(premium_tier, "Premium"),
                     value=f"{mult:.2f}x - **+${extra_premium:.2f}**",
@@ -16802,7 +17086,6 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
                 item_boost_sources.append("Nether Star")
 
             if item_boost_sources:
-                extra_ns = total_sale_value * (NETHER_STAR_MONEY_MULTIPLIER - 1.0) / NETHER_STAR_MONEY_MULTIPLIER if has_shop_item(user_id, "nether_star") else 0.0
                 value_parts = [f"**+${extra_ns:.2f}**"] if extra_ns > 0 else []
                 value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
                 embed.add_field(
@@ -16867,15 +17150,22 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         subtotal = base_sale_value + extra_from_bloom + extra_from_water + extra_from_achievement + extra_from_daily
         # Rank is multiplicative on subtotal
         extra_from_rank = subtotal * (rank_perma_buff_multiplier - 1.0)
-        sale_value = subtotal + extra_from_rank
-        sale_value *= get_beta_tester_money_multiplier(user_id)
-        sale_value *= get_server_booster_money_multiplier(user_id)
-        sale_value *= get_premium_tier_money_multiplier(user_id)
-        sale_value *= get_nether_star_money_multiplier(user_id)
-        sale_value *= get_edward_splash_money_multiplier(user_id)
-        if has_shop_item(user_id, "msi_afterburner"):
-            sale_value *= 1.20
-        sale_value *= get_eclipse_glasses_money_multiplier(user_id)
+        # All money buffs below apply to the SAME base value (additive stacking)
+        base_for_buffs = float(subtotal + extra_from_rank)
+        beta_mult = get_beta_tester_money_multiplier(user_id)
+        sb_mult = get_server_booster_money_multiplier(user_id)
+        prem_mult = get_premium_tier_money_multiplier(user_id)
+        nether_mult = get_nether_star_money_multiplier(user_id)
+        edward_mult = get_edward_splash_money_multiplier(user_id)
+        eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
+        extra_beta = base_for_buffs * (beta_mult - 1.0) if beta_mult > 1.0 else 0.0
+        extra_booster = base_for_buffs * (sb_mult - 1.0) if sb_mult > 1.0 else 0.0
+        extra_premium = base_for_buffs * (prem_mult - 1.0) if prem_mult > 1.0 else 0.0
+        extra_ns = base_for_buffs * (nether_mult - 1.0) if nether_mult > 1.0 else 0.0
+        extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
+        extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
+        extra_msi = base_for_buffs * 0.20 if has_shop_item(user_id, "msi_afterburner") else 0.0
+        sale_value = base_for_buffs + extra_beta + extra_booster + extra_premium + extra_ns + extra_edward + extra_eclipse + extra_msi
         # Update holdings (subtract)
         update_user_crypto_holdings(user_id, coin, -amount)
         
@@ -16926,24 +17216,21 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
                 value=f"{rank_perma_buff_multiplier:.2f}x - **+${extra_from_rank:.2f}**",
                 inline=False
             )
-        if get_user_beta_tester(user_id):
-            extra_beta = sale_value * (BETA_TESTER_MONEY_MULTIPLIER - 1.0) / BETA_TESTER_MONEY_MULTIPLIER
+        if extra_beta > 0:
             embed.add_field(
                 name="🧪 Beta Tester!",
                 value=f"{BETA_TESTER_MONEY_MULTIPLIER:.2f}x - **+${extra_beta:.2f}**",
                 inline=False
             )
-        if get_user_server_booster(user_id):
-            extra_booster = sale_value * (SERVER_BOOSTER_MONEY_MULTIPLIER - 1.0) / SERVER_BOOSTER_MONEY_MULTIPLIER
+        if extra_booster > 0:
             embed.add_field(
                 name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
                 value=f"{SERVER_BOOSTER_MONEY_MULTIPLIER:.2f}x - **+${extra_booster:.2f}**",
                 inline=False
             )
         premium_tier = get_user_premium_tier(user_id)
-        if premium_tier >= 1:
+        if extra_premium > 0:
             mult = PREMIUM_MONEY_MULTIPLIERS.get(premium_tier, 1.0)
-            extra_premium = sale_value * (mult - 1.0) / mult
             embed.add_field(
                 name=PREMIUM_DISPLAY.get(premium_tier, "Premium"),
                 value=f"{mult:.2f}x - **+${extra_premium:.2f}**",
@@ -16957,7 +17244,6 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             item_boost_sources.append("Nether Star")
 
         if item_boost_sources:
-            extra_ns = sale_value * (NETHER_STAR_MONEY_MULTIPLIER - 1.0) / NETHER_STAR_MONEY_MULTIPLIER if has_shop_item(user_id, "nether_star") else 0.0
             value_parts = [f"**+${extra_ns:.2f}**"] if extra_ns > 0 else []
             value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
             embed.add_field(

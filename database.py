@@ -83,6 +83,7 @@ def _ensure_user_document(user_id: int) -> None:
         "total_forage_count": 0,
         "items": {},
         "ripeness_stats": {},
+        "almanac_entries": {},
         "gather_stats": {
             "total_items": 0,
             "categories": {},
@@ -155,6 +156,9 @@ def _ensure_user_document(user_id: int) -> None:
                 "spazmatism_silenced": False,
                 "pve_master": False,
                 "slots_three_in_a_row": False,
+                "just_like_tf2": False,
+                "moist": False,
+                "no_honor": False,
             },
             "areas_unlocked": 0,
             "slots": 0
@@ -186,6 +190,7 @@ def _ensure_user_document(user_id: int) -> None:
         "daily_shop_last_date_est": "",
         "gathers_stolen": 0,
         "harvests_stolen": 0,
+        "critical_gathers_count": 0,
     }
     users.update_one(
         {"_id": int(user_id)},
@@ -248,7 +253,8 @@ def perform_gather_update(user_id: int, balance_increment: float, item_name: str
     
     new_bloom_cycle = current_bloom_cycle + 1
     
-    # Build the update operation with all increments and sets
+    # Almanac: record (item, ripeness) for /almanac completion
+    almanac_key = _almanac_key(item_name, ripeness_name)
     update_ops = {
         "$inc": {
             "balance": float(balance_increment),
@@ -261,6 +267,7 @@ def perform_gather_update(user_id: int, balance_increment: float, item_name: str
         },
         "$set": {
             "bloom_cycle_plants": new_bloom_cycle,
+            f"almanac_entries.{almanac_key}": 1,
         }
     }
     
@@ -324,14 +331,18 @@ def perform_batch_gather_update(user_id: int, results: list, apply_cooldown: boo
         cat = r["category"]
         categories_inc[f"gather_stats.categories.{cat}"] = categories_inc.get(f"gather_stats.categories.{cat}", 0) + 1
     gather_items_inc = {}
+    almanac_set = {}
     for r in results:
         name = r["name"]
         gather_items_inc[f"gather_stats.items.{name}"] = gather_items_inc.get(f"gather_stats.items.{name}", 0) + 1
+        rn = r.get("ripeness", "Normal")
+        almanac_set[_almanac_key(name, rn)] = 1
 
     interval = get_tree_ring_interval(user_id)
     tree_rings = sum(1 for i in range(n) if ((current_total + 1 + i) % interval == 0) and (current_total + 1 + i) > 0)
     new_bloom_cycle = current_bloom_cycle + n
 
+    almanac_set_ops = {f"almanac_entries.{k}": 1 for k in almanac_set}
     update_ops = {
         "$inc": {
             "balance": total_balance,
@@ -342,7 +353,7 @@ def perform_batch_gather_update(user_id: int, results: list, apply_cooldown: boo
             **categories_inc,
             **gather_items_inc,
         },
-        "$set": {"bloom_cycle_plants": new_bloom_cycle},
+        "$set": {"bloom_cycle_plants": new_bloom_cycle, **almanac_set_ops},
     }
     if tree_rings > 0:
         update_ops["$inc"]["tree_rings"] = tree_rings
@@ -525,6 +536,47 @@ def get_user_ripeness_stats(user_id: int) -> Dict[str, int]:
     doc = users.find_one({"_id": int(user_id)}, {"ripeness_stats": 1})
     stats: Dict[str, int] = doc.get("ripeness_stats", {}) if doc else {}
     return dict(sorted(stats.items(), key=_get_item_count, reverse=True))
+
+
+ALMANAC_KEY_SEP = "||"
+
+
+def _almanac_key(item_name: str, ripeness_name: str) -> str:
+    """Build almanac entry key for (item, ripeness)."""
+    return f"{item_name}{ALMANAC_KEY_SEP}{ripeness_name}"
+
+
+def get_user_almanac_entries(user_id: int) -> Dict[str, int]:
+    """Return user's almanac entries: key (item||ripeness) -> count (1 if discovered)."""
+    users = _get_users_collection()
+    doc = users.find_one({"_id": int(user_id)}, {"almanac_entries": 1})
+    return doc.get("almanac_entries", {}) if doc else {}
+
+
+def add_almanac_entry(user_id: int, item_name: str, ripeness_name: str) -> None:
+    """Record that the user has gathered this (item, ripeness) in the almanac."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    key = _almanac_key(item_name, ripeness_name)
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {f"almanac_entries.{key}": 1}},
+        upsert=True,
+    )
+
+
+def add_almanac_entries_batch(user_id: int, keys: list) -> None:
+    """Record multiple (item, ripeness) keys in the almanac in one write. keys: list of 'item||ripeness' strings."""
+    if not keys:
+        return
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    set_ops = {f"almanac_entries.{k}": 1 for k in keys}
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": set_ops},
+        upsert=True,
+    )
 
 
 def get_user_last_gather_time(user_id: int) -> float:
@@ -1631,6 +1683,7 @@ def wipe_user_plants(user_id: int) -> None:
             },
             "total_forage_count": 0,
             "bloom_cycle_plants": 0,
+            "almanac_entries": {},
             # Reset planter achievement since it's based on total_items
             "achievements.planter": 0,
             # Reset all cooldowns
@@ -1686,6 +1739,7 @@ def wipe_user_all(user_id: int) -> None:
             "gpus": [],
             "items": {},
             "ripeness_stats": {},
+            "almanac_entries": {},
             "gather_stats": {
                 "total_items": 0,
                 "categories": {},
@@ -1712,6 +1766,7 @@ def wipe_user_all(user_id: int) -> None:
                 "russian_roulette": 0,
                 "slayer": 0,
                 "stealing": 0,
+                "almanac": 0,
                 "hidden_achievements_discovered": 0,
                 "hidden_achievements": {
                     "john_rockefeller": False,
@@ -1740,6 +1795,9 @@ def wipe_user_all(user_id: int) -> None:
                     "spazmatism_silenced": False,
                     "pve_master": False,
                     "slots_three_in_a_row": False,
+                    "just_like_tf2": False,
+                    "moist": False,
+                    "no_honor": False,
                 },
                 "areas_unlocked": 0,
                 "slots": 0
@@ -1789,6 +1847,7 @@ def wipe_user_all(user_id: int) -> None:
             "daily_shop_last_date_est": "",
             "gathers_stolen": 0,
             "harvests_stolen": 0,
+            "critical_gathers_count": 0,
         }},
         upsert=True,
     )
@@ -1935,6 +1994,25 @@ def get_user_total_steals(user_id: int) -> int:
     if not doc:
         return 0
     return int(doc.get("gathers_stolen", 0)) + int(doc.get("harvests_stolen", 0))
+
+
+def get_user_critical_gathers_count(user_id: int) -> int:
+    """Return total critical /gathers for achievement tracking (e.g. Moist)."""
+    users = _get_users_collection()
+    doc = users.find_one({"_id": int(user_id)}, {"critical_gathers_count": 1})
+    if not doc:
+        return 0
+    return int(doc.get("critical_gathers_count", 0))
+
+
+def increment_critical_gathers_count(user_id: int) -> None:
+    """Increment critical gathers count by 1."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$inc": {"critical_gathers_count": 1}},
+        upsert=True,
+    )
 
 
 def get_user_total_pve_defeats(user_id: int) -> int:
@@ -2726,6 +2804,7 @@ def perform_harvest_batch_update(
     pre_bloom_cycle: int,
     set_cooldown: bool = False,
     increment_command_count: bool = False,
+    almanac_pairs: list = None,
 ) -> int:
     """Perform **all** harvest-related writes in a single MongoDB operation.
 
@@ -2735,6 +2814,7 @@ def perform_harvest_batch_update(
     When *set_cooldown* is True the harvest cooldown is set in the same write.
     When *increment_command_count* is True the harvest_command_count is
     incremented in the same write.
+    *almanac_pairs*: optional list of (item_name, ripeness_name) for almanac entries.
 
     Returns the number of Tree Rings awarded by this harvest.
     """
@@ -2769,6 +2849,9 @@ def perform_harvest_batch_update(
     set_ops: Dict[str, object] = {"bloom_cycle_plants": new_bloom_cycle}
     if set_cooldown:
         set_ops["last_harvest_time"] = float(time.time())
+    if almanac_pairs:
+        for (item_name, ripeness_name) in almanac_pairs:
+            set_ops[f"almanac_entries.{_almanac_key(item_name, ripeness_name)}"] = 1
 
     users.update_one(
         {"_id": int(user_id)},
