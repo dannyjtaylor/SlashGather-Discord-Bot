@@ -6897,7 +6897,7 @@ async def slots(interaction: discord.Interaction):
 #         user_balances[user_id] = 100.00
 #     return user_balances[user_id]
 
-# on readygit commi
+# on ready
 @bot.event 
 async def on_ready():
     print(f"Slash Gather, {bot.user.name}")
@@ -9376,9 +9376,12 @@ def _cooldowns_data_sync(user_id: int) -> dict:
     target_utc = next_water_est - EST_OFFSET
     data["water"] = max(0, int((target_utc - now_utc).total_seconds()))
 
-    # Death timer (/russian)
+    # Death timer (/russian) — also blocks /gather, /harvest, /mine
     _, death_left = check_roulette_elimination_cooldown(user_id)
     data["death"] = max(0, death_left)
+    # When dead, show same cooldown for /mine as /gather and /harvest (death time)
+    if data["death"] > 0:
+        data["mine"] = max(data["mine"], data["death"])
 
     return data
 
