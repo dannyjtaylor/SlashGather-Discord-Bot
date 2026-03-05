@@ -246,7 +246,7 @@ def perform_gather_update(user_id: int, balance_increment: float, item_name: str
             current_total = int(doc.get("gather_stats", {}).get("total_items", 0))
         current_bloom_cycle = int(doc.get("bloom_cycle_plants", 0))
     
-    # Check if this gather will cross the tree-ring milestone (100 plants, or 50 with Time Machine)
+    # Check if this gather will cross the tree-ring milestone (100 plants, or 50 with Future Gadget 204)
     new_total = current_total + 1
     interval = get_tree_ring_interval(user_id)
     should_award_tree_ring = (new_total % interval == 0) and new_total > 0
@@ -1218,7 +1218,7 @@ def has_shop_item(user_id: int, item_id: str) -> bool:
 
 
 def get_tree_ring_interval(user_id: int) -> int:
-    """Return plants needed per tree ring: 50 or 100 (Time Machine) minus premium reduction (Seed 5, Sprout 8, Sapling 15, Evergreen 25)."""
+    """Return plants needed per tree ring: 50 or 100 (Future Gadget 204) minus premium reduction (Seed 5, Sprout 8, Sapling 15, Evergreen 25)."""
     inv = get_user_shop_inventory(user_id)
     base = 50 if inv.get("time_machine", 0) >= 1 else 100
     tier = get_user_premium_tier(user_id)

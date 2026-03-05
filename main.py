@@ -1742,6 +1742,17 @@ PVE_BOSSES = [
         "pre_spawn_text": "Queen Bee has awoken!",
         "server_defeat_msg": "The **Queen Bee** has been defeated! The underground jungle is safe again.",
     },
+    {
+        "id": "the_roaring_knight",
+        "name": "The Roaring Knight",
+        "emoji": "⚔️",
+        "hp_range": (410, 500),
+        "color": 0x000000,
+        "description": "A tall, armored figure emerges from the darkness... The Roaring Knight has arrived!",
+        "defeat_msg": "A Black Shard chips off The Roaring Knight's blade! It promptly retreats!",
+        "pre_spawn_text": "A Dark Fountain erupts in the distance...",
+        "server_defeat_msg": "The Roaring Knight retreats! The Dark Fountain closes and conditions return to normal.",
+    },
 ]
 # Twins: spawn both Retinazer and Spazmatism together; both must be defeated to unblock channels.
 PVE_BOSSES_TWINS_IDS = {"retinazer", "spazmatism"}
@@ -1778,6 +1789,7 @@ PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT = {
     "spiked_jungle_slime": "spiked_slime_squasher",
     "jungle_bat": "jungle_bat_basher",
     "queen_bee": "queen_bee_slayer",
+    "the_roaring_knight": "the_roaring_knight_repelled",
 }
 PVE_MASTER_REQUIRED_IDS = frozenset(PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT.keys())
 active_boss_events: dict[int, list] = {}  # guild_id -> list of {channel_id, boss, hp, max_hp}
@@ -3303,11 +3315,25 @@ def get_premium_virtual_gardeners(user_id: int) -> list:
 
 
 NETHER_STAR_MONEY_MULTIPLIER = 1.15
+BLACK_SHARD_MONEY_MULTIPLIER = 1.2
 
 
 def get_nether_star_money_multiplier(user_id: int) -> float:
     """Return 1.15 if user has Nether Star (shop item), else 1.0."""
     return NETHER_STAR_MONEY_MULTIPLIER if has_shop_item(user_id, "nether_star") else 1.0
+
+
+SHADOW_CRYSTAL_MONEY_MULTIPLIER = 1.05
+
+
+def get_shadow_crystal_money_multiplier(user_id: int) -> float:
+    """Return 1.05 if user has Shadow Crystal (shop item), else 1.0."""
+    return SHADOW_CRYSTAL_MONEY_MULTIPLIER if has_shop_item(user_id, "shadow_crystal") else 1.0
+
+
+def get_black_shard_money_multiplier(user_id: int) -> float:
+    """Return 1.2 if user has Black Shard (shop item or from Roaring Knight), else 1.0."""
+    return BLACK_SHARD_MONEY_MULTIPLIER if has_shop_item(user_id, "black_shard") else 1.0
 
 
 PALACE_TREASURE_MONEY_MULTIPLIER = 1.5
@@ -3350,7 +3376,7 @@ def get_steal_chance_multiplier(user_id: int) -> float:
 
 def get_pve_damage_multiplier(user_id: int, is_boss: bool = False) -> int:
     """Return total damage per hit for PvE (wild animals and optionally bosses). Base 1, weapons stack additively.
-    King's Blade +3, Zenith +2, Death Note +2, Split Soul Katana +1, Inverted Spear +1 (enemies and bosses),
+    King's Blade +3, Zenith +2, Death Note +2, Black Knife +2, Split Soul Katana +1, Inverted Spear +1 (enemies and bosses),
     Diamond Sword +1, Ancient Staff +1, Reaver Karambit +1, Nail +1, Evoker +1, Thorfinn's Dagger +1."""
     damage = 1
     if has_shop_item(user_id, "kings_blade"):
@@ -3358,6 +3384,8 @@ def get_pve_damage_multiplier(user_id: int, is_boss: bool = False) -> int:
     if has_shop_item(user_id, "zenith"):
         damage += 2  # 1 -> 3
     if has_shop_item(user_id, "death_note"):
+        damage += 2  # +2 for enemies
+    if has_shop_item(user_id, "black_knife"):
         damage += 2  # +2 for enemies
     if has_shop_item(user_id, "split_soul_katana"):
         damage += 1  # +1 for enemies
@@ -3744,6 +3772,8 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     server_booster_mult = get_server_booster_money_multiplier(user_id)
     premium_mult = get_premium_tier_money_multiplier(user_id)
     nether_star_mult = get_nether_star_money_multiplier(user_id)
+    black_shard_mult = get_black_shard_money_multiplier(user_id)
+    shadow_crystal_mult = get_shadow_crystal_money_multiplier(user_id)
     palace_mult = get_palace_treasure_money_multiplier(user_id)
     edward_mult = get_edward_splash_money_multiplier(user_id)
     eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
@@ -3751,6 +3781,8 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     extra_money_from_server_booster = base_for_buffs * (server_booster_mult - 1.0) if server_booster_mult > 1.0 else 0.0
     extra_money_from_premium = base_for_buffs * (premium_mult - 1.0) if premium_mult > 1.0 else 0.0
     extra_money_from_nether_star = base_for_buffs * (nether_star_mult - 1.0) if nether_star_mult > 1.0 else 0.0
+    extra_money_from_black_shard = base_for_buffs * (black_shard_mult - 1.0) if black_shard_mult > 1.0 else 0.0
+    extra_money_from_shadow_crystal = base_for_buffs * (shadow_crystal_mult - 1.0) if shadow_crystal_mult > 1.0 else 0.0
     extra_palace = base_for_buffs * (palace_mult - 1.0) if palace_mult > 1.0 else 0.0
     extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
     extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
@@ -3761,7 +3793,7 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         alchemist_extra = base_for_buffs * 0.05
     elif full_data is None and has_shop_item(user_id, "alchemists_pocketwatch"):
         alchemist_extra = base_for_buffs * 0.05
-    final_value = base_for_buffs + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra
+    final_value = base_for_buffs + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra
 
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
@@ -3808,6 +3840,10 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         "extra_money_from_premium": extra_money_from_premium,
         "nether_star_multiplier": nether_star_mult,
         "extra_money_from_nether_star": extra_money_from_nether_star,
+        "black_shard_multiplier": black_shard_mult,
+        "extra_money_from_black_shard": extra_money_from_black_shard,
+        "shadow_crystal_multiplier": shadow_crystal_mult,
+        "extra_money_from_shadow_crystal": extra_money_from_shadow_crystal,
         "seasonal_multiplier": seasonal_multiplier,
         "seasonal_label": seasonal_label,
         "tree_ring_awarded": tree_ring_awarded,
@@ -7069,7 +7105,7 @@ async def on_invite_delete(invite):
 
 # ----- Auto-log rare occurrences to #rares -----
 # Only these plant ripenesses get posted to #rares (NOT Perfectly Ripe or Full Bloom — those are too common).
-# Also posted to #rares: netherite+ imbue rolls (_post_rares_imbue), Nether Star claims (_post_rares_nether_star_claim).
+# Also posted to #rares: netherite+ imbue rolls (_post_rares_imbue), Nether Star claims (_post_rares_nether_star_claim), Black Shard claims (_post_rares_black_shard_claim).
 _PLANT_RARES: dict[str, tuple[str, str]] = {
     "Legendary": ("LEGENDARY", "LEGENDARY"),
     "Netherite": ("NETHERITE", "NETHERITE"),
@@ -7155,6 +7191,14 @@ async def _post_rares_nether_star_claim(guild: discord.Guild, user: discord.Memb
     if not guild or not user:
         return
     msg = f"{NETHER_STAR_EMOJI} {user.mention} claimed the **Nether Star** from the Wither!"
+    await _post_to_rares_channel(guild, msg)
+
+
+async def _post_rares_black_shard_claim(guild: discord.Guild, user: discord.Member) -> None:
+    """Post a Black Shard claim (from Roaring Knight defeat) to #rares."""
+    if not guild or not user:
+        return
+    msg = f"{BLACK_SHARD_EMOJI} {user.mention} claimed the **Black Shard** from The Roaring Knight!"
     await _post_to_rares_channel(guild, msg)
 
 
@@ -7889,12 +7933,17 @@ def _get_guild_gather_channels(guild: discord.Guild) -> list[discord.TextChannel
 # Nether Star (Wither drop): custom animated emoji for claim button and shop
 NETHER_STAR_EMOJI = "<a:netherstar:1476237557221163210>"
 NETHER_STAR_EMOJI_PARTIAL = discord.PartialEmoji(name="netherstar", id=1476237557221163210, animated=True)
+# Black Shard (Roaring Knight drop): custom emoji for claim button and shop
+BLACK_SHARD_EMOJI = "<:blackshard:1478988887110975519>"
+BLACK_SHARD_EMOJI_PARTIAL = discord.PartialEmoji(name="blackshard", id=1478988887110975519, animated=False)
 
 
 def _format_item_boost_source(name: str) -> str:
-    """Format an item boost source for embed display; adds Nether Star emoji next to Nether Star."""
+    """Format an item boost source for embed display; adds Nether Star / Black Shard emoji next to name."""
     if name == "Nether Star":
         return f"{NETHER_STAR_EMOJI} **NETHER STAR**"
+    if name == "Black Shard":
+        return f"{BLACK_SHARD_EMOJI} **BLACK SHARD**"
     return f"**{name.upper()}**"
 
 
@@ -7932,6 +7981,43 @@ class NetherStarClaimView(discord.ui.View):
             asyncio.create_task(_post_rares_nether_star_claim(interaction.guild, interaction.user))
         await interaction.followup.send(
             f"{NETHER_STAR_EMOJI} You claimed the **Nether Star**! You now have **1.15x all Money**!",
+            ephemeral=True)
+
+
+class BlackShardClaimView(discord.ui.View):
+    """One-time claim button after Roaring Knight defeat. First user without a Black Shard gets it; button locks after claim."""
+
+    def __init__(self, claimed_ref: list):
+        super().__init__(timeout=None)
+        self.claimed_ref = claimed_ref  # [None] or [user_id] after claim
+
+    @discord.ui.button(label="Claim Black Shard!", style=discord.ButtonStyle.success, emoji=BLACK_SHARD_EMOJI_PARTIAL, custom_id="roaring_knight_black_shard_claim")
+    async def claim_black_shard(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        user_id = interaction.user.id
+        if self.claimed_ref[0] is not None:
+            await safe_interaction_response(
+                interaction, interaction.response.send_message,
+                "❌ Someone else already claimed the Black Shard!", ephemeral=True)
+            return
+        if has_shop_item(user_id, "black_shard"):
+            await safe_interaction_response(
+                interaction, interaction.response.send_message,
+                "❌ You already have a Black Shard! You can't claim a second one.", ephemeral=True)
+            return
+        self.claimed_ref[0] = user_id
+        add_shop_item_to_user(user_id, "black_shard", 1)
+        button.disabled = True
+        button.label = "Claimed!"
+        embed = interaction.message.embeds[0].copy() if interaction.message.embeds else discord.Embed(title="The Roaring Knight Defeated", color=discord.Color.gold())
+        embed.add_field(name=f"{BLACK_SHARD_EMOJI} Black Shard", value=f"**Claimed by {interaction.user.mention}!**", inline=False)
+        embed.set_footer(text="1.2x all Money buff active!")
+        await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+        if interaction.guild:
+            asyncio.create_task(_post_rares_black_shard_claim(interaction.guild, interaction.user))
+        await interaction.followup.send(
+            f"{BLACK_SHARD_EMOJI} You claimed the **Black Shard**! You now have **1.2x all Money**!",
             ephemeral=True)
 
 
@@ -7991,6 +8077,10 @@ class BossView(discord.ui.View):
                 if self.boss["id"] == "wither":
                     nether_claimed_ref = [None]
                     claim_view = NetherStarClaimView(claimed_ref=nether_claimed_ref)
+                    await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=claim_view)
+                elif self.boss["id"] == "the_roaring_knight":
+                    black_shard_claimed_ref = [None]
+                    claim_view = BlackShardClaimView(claimed_ref=black_shard_claimed_ref)
                     await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=claim_view)
                 else:
                     await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
@@ -8603,10 +8693,11 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
         sb_mult = get_server_booster_money_multiplier(user_id)
         prem_mult = get_premium_tier_money_multiplier(user_id)
         nether_mult = get_nether_star_money_multiplier(user_id)
+        shadow_crystal_mult = get_shadow_crystal_money_multiplier(user_id)
         palace_mult = get_palace_treasure_money_multiplier(user_id)
         edward_mult = get_edward_splash_money_multiplier(user_id)
         eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
-        fv = base_for_buffs * (1.0 + (beta_mult - 1.0) + (sb_mult - 1.0) + (prem_mult - 1.0) + (nether_mult - 1.0) + (palace_mult - 1.0) + (edward_mult - 1.0) + (eclipse_mult - 1.0))
+        fv = base_for_buffs * (1.0 + (beta_mult - 1.0) + (sb_mult - 1.0) + (prem_mult - 1.0) + (nether_mult - 1.0) + (shadow_crystal_mult - 1.0) + (palace_mult - 1.0) + (edward_mult - 1.0) + (eclipse_mult - 1.0))
         total_balance += fv
         name = item["name"]
         items_inc[name] = items_inc.get(name, 0) + 1
@@ -8971,6 +9062,8 @@ async def gather(interaction: discord.Interaction):
             item_boost_sources.append("Alchemist's Pocketwatch")
         if gather_result.get("extra_money_from_nether_star", 0) > 0:
             item_boost_sources.append("Nether Star")
+        if gather_result.get("extra_money_from_black_shard", 0) > 0:
+            item_boost_sources.append("Black Shard")
 
         if is_crit:
             hoe_enc = gather_result.get('hoe_enchant')
@@ -9022,8 +9115,10 @@ async def gather(interaction: discord.Interaction):
                 embed.add_field(name=PREMIUM_DISPLAY.get(tier, "Premium"),
                     value=f"{gather_result['premium_tier_multiplier']:.2f}x - **+${gather_result['extra_money_from_premium']:.2f}**", inline=False)
             if item_boost_sources:
-                extra = gather_result.get("extra_money_from_nether_star", 0)
-                value_parts = [f"**+${extra:.2f}**"] if extra > 0 else []
+                extra_ns = gather_result.get("extra_money_from_nether_star", 0)
+                extra_bs = gather_result.get("extra_money_from_black_shard", 0)
+                total_extra = extra_ns + extra_bs
+                value_parts = [f"**+${total_extra:.2f}**"] if total_extra > 0 else []
                 value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
                 embed.add_field(
                     name="📦 Item Boost",
@@ -9076,8 +9171,10 @@ async def gather(interaction: discord.Interaction):
                 embed.add_field(name=PREMIUM_DISPLAY.get(tier, "Premium"),
                     value=f"{gather_result['premium_tier_multiplier']:.2f}x - **+${gather_result['extra_money_from_premium']:.2f}**", inline=False)
             if item_boost_sources:
-                extra = gather_result.get("extra_money_from_nether_star", 0)
-                value_parts = [f"**+${extra:.2f}**"] if extra > 0 else []
+                extra_ns = gather_result.get("extra_money_from_nether_star", 0)
+                extra_bs = gather_result.get("extra_money_from_black_shard", 0)
+                total_extra = extra_ns + extra_bs
+                value_parts = [f"**+${total_extra:.2f}**"] if total_extra > 0 else []
                 value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
                 embed.add_field(
                     name="📦 Item Boost",
@@ -9337,6 +9434,22 @@ def _format_cooldown_seconds(seconds: int) -> str:
     return f"{h}h"
 
 
+def _format_reduction_seconds(seconds: int) -> str:
+    """Format reduction in seconds for display (e.g. '−15s', '−5m', '−1h 20m')."""
+    if seconds <= 0:
+        return "−0s"
+    if seconds < 60:
+        return f"−{seconds}s"
+    if seconds < 3600:
+        m, s = divmod(seconds, 60)
+        return f"−{m}m {s}s" if s else f"−{m}m"
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if m or s:
+        return f"−{h}h {m}m {s}s" if s else f"−{h}h {m}m"
+    return f"−{h}h"
+
+
 def _cooldowns_data_sync(user_id: int) -> dict:
     """Gather all cooldown remaining times for /cooldowns. Runs in thread."""
     data = {}
@@ -9383,6 +9496,50 @@ def _cooldowns_data_sync(user_id: int) -> dict:
     if data["death"] > 0:
         data["mine"] = max(data["mine"], data["death"])
 
+    # Death penalty duration (5 min with Gambler's Revolver, else 30 min)
+    data["death_penalty_seconds"] = get_roulette_elimination_cooldown_seconds(user_id)
+    data["has_gamblers_revolver"] = has_shop_item(user_id, "gamblers_revolver")
+
+    # Total cooldown reductions (for display)
+    invite_cd = get_invite_cooldown_reductions(user_id)
+    premium_cd = get_premium_cooldown_reductions(user_id)
+    active_events = get_active_events_cached()
+    hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
+    daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
+
+    # Gather: shoes + events + hoe enchant + invite + premium
+    user_upgrades = get_user_basket_upgrades(user_id)
+    shoes_tier = user_upgrades.get("shoes", 0)
+    gather_red = (SHOES_UPGRADES[shoes_tier - 1]["reduction"] if shoes_tier > 0 else 0)
+    if hourly_event and hourly_event.get("effects", {}).get("event_id") == "speed_harvest":
+        gather_red += 8
+    if daily_event and daily_event.get("effects", {}).get("event_id") == "speed_day":
+        gather_red += 5
+    hoe_enchant = get_user_hoe_attunement(user_id)
+    if hoe_enchant:
+        gather_red += hoe_enchant.get("cooldown_reduction", 0)
+    gather_red += invite_cd.get("gather_reduction", 0)
+    gather_red += premium_cd.get("gather_reduction", 0)
+    data["gather_reduction_total"] = gather_red
+
+    # Harvest: upgrade tier + events + tractor enchant + invite + premium
+    harvest_upgrades = get_user_harvest_upgrades(user_id)
+    cooldown_tier = harvest_upgrades.get("cooldown", 0)
+    harvest_red = (HARVEST_COOLDOWN_UPGRADES[cooldown_tier - 1]["reduction"] if cooldown_tier > 0 else 0)
+    if hourly_event and hourly_event.get("effects", {}).get("event_id") == "speed_harvest":
+        harvest_red += 120
+    if daily_event and daily_event.get("effects", {}).get("event_id") == "speed_day":
+        harvest_red += 60
+    tractor_enchant = get_user_tractor_attunement(user_id)
+    if tractor_enchant:
+        harvest_red += tractor_enchant.get("cooldown_reduction", 0)
+    harvest_red += invite_cd.get("harvest_reduction", 0)
+    harvest_red += premium_cd.get("harvest_reduction", 0)
+    data["harvest_reduction_total"] = harvest_red
+
+    # Mine: invite + premium only
+    data["mine_reduction_total"] = invite_cd.get("mine_reduction", 0) + premium_cd.get("mine_reduction", 0)
+
     return data
 
 
@@ -9396,6 +9553,8 @@ async def cooldowns(interaction: discord.Interaction):
         death_seconds = data["death"]
         is_dead = death_seconds > 0
         dead_suffix = " (Dead)" if is_dead else ""
+        has_revolver = data.get("has_gamblers_revolver", False)
+        death_penalty_desc = "5 min (Gambler's Revolver)" if has_revolver else "30 min"
         russian_status = "Alive" if death_seconds <= 0 else f"Dead ({_format_cooldown_seconds(death_seconds)})"
         lines = [
             f"**/gather** - {_format_cooldown_seconds(data['gather'])}{dead_suffix}",
@@ -9404,7 +9563,14 @@ async def cooldowns(interaction: discord.Interaction):
             f"**New /dailyshop** - {_format_cooldown_seconds(data['dailyshop'])}",
             f"**/water** - {_format_cooldown_seconds(data['water'])}",
             f"**/russian Status** - {russian_status}",
+            f"**Death penalty if eliminated** - {death_penalty_desc}",
         ]
+        # Total cooldown reductions for /gather, /harvest, /mine
+        gather_red = data.get("gather_reduction_total", 0)
+        harvest_red = data.get("harvest_reduction_total", 0)
+        mine_red = data.get("mine_reduction_total", 0)
+        reduction_line = f"**Reductions:** /gather {_format_reduction_seconds(gather_red)}, /harvest {_format_reduction_seconds(harvest_red)}, /mine {_format_reduction_seconds(mine_red)}"
+        lines.append(reduction_line)
         embed = discord.Embed(
             title=f"⏱️ {interaction.user.name}'s Cooldowns",
             description="\n".join(lines),
@@ -9636,6 +9802,8 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     server_booster_mult = get_server_booster_money_multiplier(user_id)
     premium_mult = get_premium_tier_money_multiplier(user_id)
     nether_star_mult = get_nether_star_money_multiplier(user_id)
+    black_shard_mult = get_black_shard_money_multiplier(user_id)
+    shadow_crystal_mult = get_shadow_crystal_money_multiplier(user_id)
     palace_mult = get_palace_treasure_money_multiplier(user_id)
     edward_mult = get_edward_splash_money_multiplier(user_id)
     eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
@@ -9643,12 +9811,14 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     extra_money_from_server_booster = base_for_buffs * (server_booster_mult - 1.0) if server_booster_mult > 1.0 else 0.0
     extra_money_from_premium = base_for_buffs * (premium_mult - 1.0) if premium_mult > 1.0 else 0.0
     extra_money_from_nether_star = base_for_buffs * (nether_star_mult - 1.0) if nether_star_mult > 1.0 else 0.0
+    extra_money_from_black_shard = base_for_buffs * (black_shard_mult - 1.0) if black_shard_mult > 1.0 else 0.0
+    extra_money_from_shadow_crystal = base_for_buffs * (shadow_crystal_mult - 1.0) if shadow_crystal_mult > 1.0 else 0.0
     extra_palace = base_for_buffs * (palace_mult - 1.0) if palace_mult > 1.0 else 0.0
     extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
     extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
     work_lunch_extra = base_for_buffs * 0.10 if (not set_cooldown and has_shop_item(user_id, "work_lunch")) else 0.0
     overtime_extra = base_for_buffs * 1.0 if (not set_cooldown and has_shop_item(user_id, "overtime_approval") and random.random() < 0.10) else 0.0
-    total_value = base_for_buffs + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra
+    total_value = base_for_buffs + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra
 
     # ----- single batch write: items + ripeness + balance + counts + tree rings + cooldown + almanac -----
     num_items = total_items_to_harvest
@@ -9696,6 +9866,8 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         "extra_money_from_premium": extra_money_from_premium,
         "nether_star_multiplier": nether_star_mult,
         "extra_money_from_nether_star": extra_money_from_nether_star,
+        "black_shard_multiplier": black_shard_mult,
+        "extra_money_from_black_shard": extra_money_from_black_shard,
     }
 
 async def perform_harvest_for_user(user_id: int, allow_chain: bool = True,
@@ -10024,10 +10196,14 @@ async def harvest(interaction: discord.Interaction):
             item_boost_sources.append("Fuzzy Dice")
         if result.get("extra_money_from_nether_star", 0) > 0:
             item_boost_sources.append("Nether Star")
+        if result.get("extra_money_from_black_shard", 0) > 0:
+            item_boost_sources.append("Black Shard")
 
         if item_boost_sources:
-            extra = result.get("extra_money_from_nether_star", 0)
-            value_parts = [f"**+${extra:.2f}**"] if extra > 0 else []
+            extra_ns = result.get("extra_money_from_nether_star", 0)
+            extra_bs = result.get("extra_money_from_black_shard", 0)
+            total_extra = extra_ns + extra_bs
+            value_parts = [f"**+${total_extra:.2f}**"] if total_extra > 0 else []
             value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
             embed.add_field(
                 name="📦 Item Boost",
@@ -10649,10 +10825,16 @@ DAILY_SHOP_ITEMS = {
         "effect": "1% to all money",
     },
     "time_machine": {
-        "name": "Time Machine",
-        "description": "Gathering in the past, present, and future!",
+        "name": "Future Gadget 204, 2nd Edition Ver. 2.31",
+        "description": "El Psy Kongroo. The Phone Microwave (tentative)—gathering across world lines!",
         "cost": 700,
         "effect": "You get 1 Tree Ring every 50 plants instead of 100",
+    },
+    "shadow_crystal": {
+        "name": "Shadow Crystal",
+        "description": "An invisible crystal that still casts a shadow, obtained from a jester, puppet, a knight, and an old man...",
+        "cost": 50,
+        "effect": "1.05x Money",
     },
     "splash_potion_of_luck": {
         "name": "Splash Potion of Luck",
@@ -10677,6 +10859,19 @@ DAILY_SHOP_ITEMS = {
         "description": "If you're a true warrior, you shouldn't need this.",
         "cost": 95,
         "effect": "+1 ATK to Enemies",
+    },
+    "black_knife": {
+        "name": "Black Knife",
+        "description": "A long, shadowy & pixelated blade able to make enemies swoon!",
+        "cost": 200,
+        "effect": "+2 ATK to Enemies",
+    },
+    "black_shard": {
+        "name": "Black Shard",
+        "description": "A small chip of extremely hard glass. Oddly, it's nearly opaque.",
+        "cost": 275,
+        "effect": "1.2x to Money",
+        "emoji": BLACK_SHARD_EMOJI,
     },
     "decoys": {
         "name": "Decoys",
@@ -10757,10 +10952,9 @@ MAX_DAILY_SHOP_PURCHASES = 3
 
 def get_daily_shop_offerings(date_est: str, user_id: int = None) -> list:
     """
-    Return up to 3 item ids for the given EST date (YYYY-MM-DD).
-
-    For a specific user_id, this always picks up to 3 items the user does **not**
-    already own. If they own all but 1–2 items, the shop will show only that many.
+    Return item ids for the given EST date (YYYY-MM-DD).
+    For a user: up to (3 + premium tier) items they don't own (Seed=4, Sprout=5, Sapling=6, Evergreen=7).
+    Without user: up to 3 items.
     """
     seed = f"{date_est}_{user_id}" if user_id is not None else date_est
     rng = random.Random(seed)
@@ -10772,14 +10966,15 @@ def get_daily_shop_offerings(date_est: str, user_id: int = None) -> list:
         return rng.sample(all_ids, k)
 
     # For a user: deterministically shuffle all items, then take the first
-    # three that the user does NOT already own.
+    # (3 + premium tier) that the user does NOT already own.
+    max_offerings = get_effective_daily_shop_max_purchases(user_id)
     shuffled = all_ids[:]
     rng.shuffle(shuffled)
     offerings_for_day: list[str] = []
     for item_id in shuffled:
         if not has_shop_item(user_id, item_id):
             offerings_for_day.append(item_id)
-            if len(offerings_for_day) >= 3:
+            if len(offerings_for_day) >= max_offerings:
                 break
     return offerings_for_day
 
@@ -12188,129 +12383,107 @@ async def imbue(interaction: discord.Interaction, tool: app_commands.Choice[str]
             "\u274c An error occurred. Please try again.", ephemeral=True)
 
 
-# Hire View with pagination
+# Hire View with pagination (gardeners 1-5, then premium 6-9 by tier, then Secret Gardener)
 class HireView(discord.ui.View):
     def __init__(self, user_id: int, timeout=300):
         super().__init__(timeout=timeout)
         self.user_id = user_id
-        self.current_page = 0  # 0-5 for gardeners 1-5 + secret gardener page 6
-        self.total_pages = 6
-    
+        self.current_page = 0
+        # 5 regular + premium tier pages (1-4) + 1 secret = 6 + tier
+        self.total_pages = 6 + get_user_premium_tier(user_id)
+
+    def _page_to_slot_id(self, page: int) -> int | None:
+        """Return gardener slot_id (1-9) for this page, or None if Secret Gardener page."""
+        if page == self.total_pages - 1:
+            return None  # Secret Gardener
+        if page < 5:
+            return page + 1  # Gardeners 1-5
+        return 6 + (page - 5)  # Premium gardeners 6-9
+
     def create_embed(self, page: int) -> discord.Embed:
         """Create the embed for a specific gardener page."""
-        # Page 5 (index) = Secret Gardener page (page 6 of 6)
-        if page == 5:
+        slot_id = self._page_to_slot_id(page)
+        # Secret Gardener (last page)
+        if slot_id is None:
             return self._create_secret_gardener_embed()
-        
-        slot_id = page + 1  # Convert 0-4 to 1-5
+        # Premium gardener (slot 6-9)
+        if slot_id >= 6:
+            tier = get_user_premium_tier(self.user_id)
+            if slot_id > 5 + tier:
+                return self._create_secret_gardener_embed()  # shouldn't happen
+            tier_name = PREMIUM_ROLE_NAMES[slot_id - 6]  # Seed, Sprout, Sapling, Evergreen
+            chance = PREMIUM_GARDENER_CHANCES.get(slot_id, 0.05) * 100
+            embed = discord.Embed(
+                title=f"🪴 {tier_name} Gardener",
+                description=f"Included with your **{tier_name}** premium tier! This gardener has a **{chance:.0f}%** chance to /gather every minute.",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Status", value="**ACTIVE** ✅ (Premium)", inline=False)
+            embed.set_footer(text=f"Page {page + 1} of {self.total_pages}")
+            return embed
+        # Regular gardener 1-5
         gardeners = get_user_gardeners(self.user_id)
         balance = get_user_balance(self.user_id)
         gardener_dict = {g["id"]: g for g in gardeners}
         gardener = gardener_dict.get(slot_id)
         price = bloom_scaled_price(self.user_id, GARDENER_PRICES[slot_id - 1])
-        
-        # Get the chance for this gardener level
-        gardener_chance = GARDENER_CHANCES.get(slot_id, 0.05) * 100  # Convert to percentage
+        gardener_chance = GARDENER_CHANCES.get(slot_id, 0.05) * 100
         description_text = f"💰 Your Balance: **${balance:,.2f}**\n\nHire gardeners to automatically gather items for you! This gardener has a **{gardener_chance:.0f}%** chance to gather every minute."
-        
         embed = discord.Embed(
             title=f"🌱 Gardener #{slot_id}",
             description=description_text,
             color=discord.Color.green()
         )
-        
         if gardener:
-            # Gardener is hired - show stats and tool info
             plants_gathered = gardener.get("plants_gathered", 0)
             total_money = gardener.get("total_money_earned", 0.0)
             has_tool = gardener.get("has_tool", False)
             tool_info = GARDENER_TOOLS.get(slot_id, {"name": "Tool", "cost": 0, "chance": 0})
-            tool_chance_pct = round(tool_info["chance"] * 100, 1)  # avoid float display like 14.000000000002
-            # Show 1 decimal for small chances so 0.5% doesn't display as "0%" (.0f rounds 0.5 to 0)
+            tool_chance_pct = round(tool_info["chance"] * 100, 1)
             tool_chance_str = f"{tool_chance_pct:.1f}%" if tool_chance_pct < 1 else f"{tool_chance_pct:.0f}%"
-            
-            embed.add_field(
-                name="Status",
-                value="**HIRED** ✅",
-                inline=False
-            )
-            embed.add_field(
-                name="Plants Gathered",
-                value=f"**{plants_gathered}**",
-                inline=True
-            )
-            embed.add_field(
-                name="Total Money Earned",
-                value=f"**${total_money:,.2f}**",
-                inline=True
-            )
+            embed.add_field(name="Status", value="**HIRED** ✅", inline=False)
+            embed.add_field(name="Plants Gathered", value=f"**{plants_gathered}**", inline=True)
+            embed.add_field(name="Total Money Earned", value=f"**${total_money:,.2f}**", inline=True)
             if has_tool:
-                embed.add_field(
-                    name="Tool",
-                    value=f"**{tool_info['name']}** ✅ for a **{tool_chance_str}** chance to auto harvest",
-                    inline=False
-                )
+                embed.add_field(name="Tool", value=f"**{tool_info['name']}** ✅ for a **{tool_chance_str}** chance to auto harvest", inline=False)
             else:
-                embed.add_field(
-                    name="Tool",
-                    value=f"Buy **{tool_info['name']}** for a **{tool_chance_str}** chance to auto harvest",
-                    inline=False
-                )
+                embed.add_field(name="Tool", value=f"Buy **{tool_info['name']}** for a **{tool_chance_str}** chance to auto harvest", inline=False)
         else:
-            # Gardener slot is available
             can_afford = "✅" if balance >= price else "❌"
-            embed.add_field(
-                name="Status",
-                value="**Available**",
-                inline=False
-            )
-            embed.add_field(
-                name="Price",
-                value=f"**${price:,.2f}** {can_afford}",
-                inline=True
-            )
-        
+            embed.add_field(name="Status", value="**Available**", inline=False)
+            embed.add_field(name="Price", value=f"**${price:,.2f}** {can_afford}", inline=True)
         embed.set_footer(text=f"Page {page + 1} of {self.total_pages}")
-        
         return embed
-    
+
     def _create_secret_gardener_embed(self) -> discord.Embed:
-        """Create the Secret Gardener page embed (page 6 of 6)."""
+        """Create the Secret Gardener page embed (last page)."""
         sg_unlocked = has_secret_gardener(self.user_id)
         sg_harvest = has_secret_gardener_harvest(self.user_id)
-        
         embed = discord.Embed(
             title="\U0001f331\u2728 Secret Gardener",
             description="A mysterious gardener with incredible abilities!",
             color=discord.Color.purple() if sg_unlocked else discord.Color.dark_grey()
         )
-        
-        # Status field
         if sg_unlocked:
             embed.add_field(name="Status", value="**UNLOCKED** \u2705", inline=False)
         else:
             embed.add_field(name="Status", value="\U0001f512 Locked \u2014 Invite 10 people to unlock!", inline=False)
-        
-        # Gather Chance
         embed.add_field(name="Gather Chance", value="**50%** chance to /gather every minute", inline=False)
-        
-        # Auto Harvest
         if sg_harvest:
             embed.add_field(name="Auto Harvest", value="**UNLOCKED** \u2705 \u2014 Can auto-harvest like other gardeners!", inline=False)
         else:
             embed.add_field(name="Auto Harvest", value="\U0001f512 Locked \u2014 Invite 12 people to unlock!", inline=False)
-        
-        embed.set_footer(text=f"Page 6 of {self.total_pages}")
+        embed.set_footer(text=f"Page {self.total_pages} of {self.total_pages}")
         return embed
     
     def update_buttons(self):
         """Update button states based on current page and gardener status."""
-        # Update navigation buttons
         self.previous_button.disabled = self.current_page == 0
         self.next_button.disabled = self.current_page >= self.total_pages - 1
-        
-        # Secret Gardener page (page 5 index = page 6 display)
-        if self.current_page == 5:
+        slot_id = self._page_to_slot_id(self.current_page)
+
+        # Secret Gardener page (last page)
+        if slot_id is None:
             self.hire_button.disabled = True
             self.hire_button.label = "Invite Reward Only"
             self.hire_button.style = discord.ButtonStyle.secondary
@@ -12318,37 +12491,40 @@ class HireView(discord.ui.View):
             self.buy_tool_button.label = "No Tool Needed"
             self.buy_tool_button.style = discord.ButtonStyle.secondary
             return
-        
-        # Update hire button
-        slot_id = self.current_page + 1
+
+        # Premium gardener page (slot 6-9): no hire, no tool
+        if slot_id >= 6:
+            tier_name = PREMIUM_ROLE_NAMES[slot_id - 6]
+            self.hire_button.disabled = True
+            self.hire_button.label = f"Included with {tier_name}"
+            self.hire_button.style = discord.ButtonStyle.secondary
+            self.buy_tool_button.disabled = True
+            self.buy_tool_button.label = "—"
+            self.buy_tool_button.style = discord.ButtonStyle.secondary
+            return
+
+        # Regular gardener 1-5
         gardeners = get_user_gardeners(self.user_id)
         gardener_dict = {g["id"]: g for g in gardeners}
         gardener = gardener_dict.get(slot_id)
         balance = get_user_balance(self.user_id)
         price = bloom_scaled_price(self.user_id, GARDENER_PRICES[slot_id - 1])
-        
         if gardener:
-            # Already hired
             self.hire_button.disabled = True
             self.hire_button.label = "Already Hired"
             self.hire_button.style = discord.ButtonStyle.secondary
         elif balance < price:
-            # Can't afford
             self.hire_button.disabled = True
             self.hire_button.label = f"Hire (Need ${price:,.0f})"
             self.hire_button.style = discord.ButtonStyle.secondary
         elif len(gardeners) >= 5:
-            # Max gardeners reached
             self.hire_button.disabled = True
             self.hire_button.label = "Max Gardeners"
             self.hire_button.style = discord.ButtonStyle.secondary
         else:
-            # Can hire
             self.hire_button.disabled = False
             self.hire_button.label = f"Hire for ${price:,.0f}"
             self.hire_button.style = discord.ButtonStyle.success
-        
-        # Update buy tool button
         tool_info = GARDENER_TOOLS.get(slot_id, {"name": "Tool", "cost": 0})
         if gardener:
             if gardener.get("has_tool", False):
@@ -12412,8 +12588,10 @@ class HireView(discord.ui.View):
             if interaction.user.id != self.user_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your hiring center!", ephemeral=True)
                 return
-            
-            slot_id = self.current_page + 1
+            slot_id = self._page_to_slot_id(self.current_page)
+            if slot_id is None or slot_id >= 6:
+                await safe_defer(interaction)
+                return
             gardeners = get_user_gardeners(self.user_id)
             gardener_dict = {g["id"]: g for g in gardeners}
             
@@ -12467,8 +12645,10 @@ class HireView(discord.ui.View):
             if interaction.user.id != self.user_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your hiring center!", ephemeral=True)
                 return
-            
-            slot_id = self.current_page + 1
+            slot_id = self._page_to_slot_id(self.current_page)
+            if slot_id is None or slot_id >= 6:
+                await safe_defer(interaction)
+                return
             gardeners = get_user_gardeners(self.user_id)
             gardener_dict = {g["id"]: g for g in gardeners}
             gardener = gardener_dict.get(slot_id)
@@ -12524,7 +12704,7 @@ async def hire(interaction: discord.Interaction):
             return
         
         user_id = interaction.user.id
-        
+        sync_premium_tier_from_member(interaction.user)
         view = HireView(user_id)
         embed = view.create_embed(0)  # Start on page 0 (Gardener #1)
         view.update_buttons()
@@ -17010,16 +17190,20 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             sb_mult = get_server_booster_money_multiplier(user_id)
             prem_mult = get_premium_tier_money_multiplier(user_id)
             nether_mult = get_nether_star_money_multiplier(user_id)
+            black_shard_mult = get_black_shard_money_multiplier(user_id)
+            shadow_crystal_mult = get_shadow_crystal_money_multiplier(user_id)
             edward_mult = get_edward_splash_money_multiplier(user_id)
             eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
             extra_beta = base_for_buffs * (beta_mult - 1.0) if beta_mult > 1.0 else 0.0
             extra_booster = base_for_buffs * (sb_mult - 1.0) if sb_mult > 1.0 else 0.0
             extra_premium = base_for_buffs * (prem_mult - 1.0) if prem_mult > 1.0 else 0.0
             extra_ns = base_for_buffs * (nether_mult - 1.0) if nether_mult > 1.0 else 0.0
+            extra_bs = base_for_buffs * (black_shard_mult - 1.0) if black_shard_mult > 1.0 else 0.0
+            extra_sc = base_for_buffs * (shadow_crystal_mult - 1.0) if shadow_crystal_mult > 1.0 else 0.0
             extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
             extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
             extra_msi = base_for_buffs * 0.20 if has_shop_item(user_id, "msi_afterburner") else 0.0
-            total_sale_value = base_for_buffs + extra_beta + extra_booster + extra_premium + extra_ns + extra_edward + extra_eclipse + extra_msi
+            total_sale_value = base_for_buffs + extra_beta + extra_booster + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi
             # Add money to balance (with boosts)
             current_balance = get_user_balance(user_id)
             new_balance = current_balance + total_sale_value
@@ -17093,9 +17277,12 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             item_boost_sources = []
             if has_shop_item(user_id, "nether_star"):
                 item_boost_sources.append("Nether Star")
+            if has_shop_item(user_id, "black_shard"):
+                item_boost_sources.append("Black Shard")
 
             if item_boost_sources:
-                value_parts = [f"**+${extra_ns:.2f}**"] if extra_ns > 0 else []
+                total_item_extra = extra_ns + extra_bs
+                value_parts = [f"**+${total_item_extra:.2f}**"] if total_item_extra > 0 else []
                 value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
                 embed.add_field(
                     name="📦 Item Boost",
@@ -17165,16 +17352,20 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         sb_mult = get_server_booster_money_multiplier(user_id)
         prem_mult = get_premium_tier_money_multiplier(user_id)
         nether_mult = get_nether_star_money_multiplier(user_id)
+        black_shard_mult = get_black_shard_money_multiplier(user_id)
+        shadow_crystal_mult = get_shadow_crystal_money_multiplier(user_id)
         edward_mult = get_edward_splash_money_multiplier(user_id)
         eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
         extra_beta = base_for_buffs * (beta_mult - 1.0) if beta_mult > 1.0 else 0.0
         extra_booster = base_for_buffs * (sb_mult - 1.0) if sb_mult > 1.0 else 0.0
         extra_premium = base_for_buffs * (prem_mult - 1.0) if prem_mult > 1.0 else 0.0
         extra_ns = base_for_buffs * (nether_mult - 1.0) if nether_mult > 1.0 else 0.0
+        extra_bs = base_for_buffs * (black_shard_mult - 1.0) if black_shard_mult > 1.0 else 0.0
+        extra_sc = base_for_buffs * (shadow_crystal_mult - 1.0) if shadow_crystal_mult > 1.0 else 0.0
         extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
         extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
         extra_msi = base_for_buffs * 0.20 if has_shop_item(user_id, "msi_afterburner") else 0.0
-        sale_value = base_for_buffs + extra_beta + extra_booster + extra_premium + extra_ns + extra_edward + extra_eclipse + extra_msi
+        sale_value = base_for_buffs + extra_beta + extra_booster + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi
         # Update holdings (subtract)
         update_user_crypto_holdings(user_id, coin, -amount)
         
@@ -17251,9 +17442,12 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             item_boost_sources.append("Cryptobro's Shadow")
         if has_shop_item(user_id, "nether_star"):
             item_boost_sources.append("Nether Star")
+        if has_shop_item(user_id, "black_shard"):
+            item_boost_sources.append("Black Shard")
 
         if item_boost_sources:
-            value_parts = [f"**+${extra_ns:.2f}**"] if extra_ns > 0 else []
+            total_item_extra = extra_ns + extra_bs
+            value_parts = [f"**+${total_item_extra:.2f}**"] if total_item_extra > 0 else []
             value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
             embed.add_field(
                 name="📦 Item Boost",
