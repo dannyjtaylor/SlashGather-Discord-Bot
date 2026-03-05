@@ -1078,11 +1078,49 @@ def normalize_money(amount: float) -> float:
     """Round money to exactly 2 decimal places to avoid floating point precision issues."""
     return round(amount, 2)
 
+
 def validate_money_precision(amount: float) -> bool:
     """Check if a money amount has at most 2 decimal places (no fractional cents)."""
     # Multiply by 100 to convert to cents, then check if it's an integer
     cents = amount * 100
     return abs(cents - round(cents)) < 0.0001  # Small epsilon for floating point comparison
+
+
+def format_money(amount: float | int) -> str:
+    """Format a money value with commas, at most 2 decimals, and hide .00.
+
+    Examples:
+    - 1234        -> "$1,234"
+    - 1234.5      -> "$1,234.50"
+    - 1234.567    -> "$1,234.57"
+    - 336000000.00000006 -> "$336,000,000"
+    """
+    # Normalize to two decimal places first to clamp any floating point noise
+    normalized = normalize_money(float(amount))
+    # Treat tiny values as zero
+    if abs(normalized) < 0.0005:
+        normalized = 0.0
+
+    # If effectively a whole dollar amount, omit the decimal places
+    if abs(normalized - int(normalized)) < 0.0005:
+        return f"${int(normalized):,}"
+    # Otherwise, show exactly two decimal places
+    return f"${normalized:,.2f}"
+
+
+def format_signed_money(amount: float | int) -> str:
+    """Format money with an explicit + / - sign, hiding .00 when possible.
+
+    Used for profit displays where sign matters.
+    """
+    normalized = normalize_money(float(amount))
+    if abs(normalized) < 0.0005:
+        return "$0"
+    sign = "+" if normalized > 0 else "-"
+    value = abs(normalized)
+    if abs(value - int(value)) < 0.0005:
+        return f"{sign}${int(value):,}"
+    return f"{sign}${value:,.2f}"
 
 def can_afford_rounded(balance: float, amount: float) -> bool:
     """Check if balance is sufficient for amount, accounting for floating point precision.
@@ -1856,7 +1894,7 @@ def check_area_access(member, channel_name: str, user_id: int) -> tuple[bool, st
 
     # Check if this area is unlocked
     if not unlocked_areas.get(channel_name, False):
-        return False, f"❌ You haven't unlocked **{area['display_name']}** yet! Use `/unlock {channel_name}` to unlock it for **${area['unlock_cost']:,}**."
+        return False, f"❌ You haven't unlocked **{area['display_name']}** yet! Use `/unlock {channel_name}` to unlock it for **{format_money(area['unlock_cost'])}**."
 
     # Check planter rank: use the higher of Discord role level and DB-derived level (bloom_cycle_plants)
     # so e.g. PLANTER X who just leveled up can use mire even if role hasn't synced yet
@@ -3945,6 +3983,7 @@ GATHERABLE_ITEMS = [
     {"category": "Fruit","name": "Golden Apple", "base_value": 15},
     {"category": "Fruit","name": "Enchanted Golden Apple", "base_value": 25},
     {"category": "Fruit","name": "Fruit of the Spirit 🍇", "base_value": 6.9},
+    {"category": "Fruit","name": "Glowberry", "base_value": 4.5},
 
     {"category": "Vegetable","name": "Carrot 🥕", "base_value": 2},
     {"category": "Vegetable","name": "Potato 🥔", "base_value": 1},
@@ -3977,6 +4016,7 @@ CUSTOM_ITEM_EMOJIS = {
     "Raspberry": "<:raspberry:1473550163711627399>",
     "Golden Apple": "<:goldenapple:1476645453415055657>",
     "Enchanted Golden Apple": "<a:enchantedgoldapple:1476645603931984014>",
+    "Glowberry": "<:glowberry:1479154254576091136>",
 }
 
 def get_item_display_emoji(item_name: str) -> str:
@@ -4047,6 +4087,7 @@ ITEM_DESCRIPTIONS = {
      "Golden Apple": "Half-a-heartedly comes in clutch! Commonly referred to as a Gapple.",
      "Enchanted Golden Apple": "A ambrosiac creation from the hands of Notch himself!",
      "Fruit of the Spirit 🍇": "A holy harvest of love, joy, and peace.",
+     "Glowberry": "Found in a lush cave, this berry can produce light!",
      "Fortnite Battle Pass 🌸": "You just WHAT out of your WHAT?",
      "Rainbow Eucalyptus 🌈": "A tree trunk painted with every color of the rainbow!",
 }
@@ -4460,7 +4501,7 @@ async def start_roulette_game(channel, game_id):
             color = discord.Color.dark_red()
         )
         embed.add_field(name="🔫 Bullets Loaded", value=f"{game.bullets}/6", inline=True)
-        embed.add_field(name="💰 Total Pot", value=f"${game.pot:.2f}", inline=True)
+        embed.add_field(name="💰 Total Pot", value=format_money(game.pot), inline=True)
         embed.add_field(name="🎮 Players", value=f"{len(game.players)}/{game.max_players}", inline=True)
         await channel.send(embed=embed)
         await asyncio.sleep(2)
@@ -4519,7 +4560,7 @@ async def play_roulette_round(channel, game_id):
             description = f"**{winner['name']}** is the last man standing!\n\n**But the game isn't over. Will they try their luck?**",
             color = discord.Color.gold()
         )
-        embed.add_field(name="💰 Current Winnings", value=f"${game.pot + winner['current_stake']:.2f}", inline=True)
+        embed.add_field(name="💰 Current Winnings", value=format_money(game.pot + winner['current_stake']), inline=True)
         embed.add_field(name="📈 Current Multiplier", value=f"{game.calculate_total_multiplier(winner['rounds_survived']):.2f}x", inline=True)
         embed.add_field(name="🎯 Rounds Survived", value=f"{winner['rounds_survived']}", inline=True)
         embed.add_field(name="🔫 Bullets Left", value=f"{game.bullets}/6", inline=True)
@@ -4541,7 +4582,7 @@ async def play_roulette_round(channel, game_id):
         color=discord.Color.orange()
     )
     embed.add_field(name="💀 Bullets Remaining", value=f"{game.bullets}/6", inline=True)
-    embed.add_field(name="💰 Current Stake", value=f"${current_player['current_stake']:.2f}", inline=True)
+    embed.add_field(name="💰 Current Stake", value=format_money(current_player['current_stake']), inline=True)
     embed.add_field(name="🎯 Rounds Survived", value=f"{current_player['rounds_survived']}", inline=True)
     embed.add_field(name="📈 Current Multiplier", value=f"{game.calculate_total_multiplier(current_player['rounds_survived']):.2f}x", inline=True)
     
@@ -4570,8 +4611,8 @@ async def play_roulette_round(channel, game_id):
             color=discord.Color.dark_red()
         )
         embed.add_field(name="💀 Status", value="ELIMINATED", inline=True)
-        embed.add_field(name="💸 Lost", value=f"${current_player['current_stake']:.2f}", inline=True)
-        embed.add_field(name="💰 Pot Now", value=f"${game.pot:.2f}", inline=True)
+        embed.add_field(name="💸 Lost", value=format_money(current_player['current_stake']), inline=True)
+        embed.add_field(name="💰 Pot Now", value=format_money(game.pot), inline=True)
         embed.add_field(name="🔫 Bullets Left", value=f"{game.bullets}/6", inline=True)
         embed.add_field(name="👥 Players Alive", value=f"{len(game.get_alive_players())}", inline=True)
 
@@ -4636,7 +4677,7 @@ async def play_roulette_round(channel, game_id):
                     description=f"**{next_player['name']}**, it's your turn!\n\nClick **Pull Trigger** to continue or **Cash Out** to leave with your winnings.\n\n⏰ **You have 5 minutes to decide, or you'll automatically cash out.**",
                     color=discord.Color.gold()
                 )
-            embed.add_field(name="💰 Potential Winnings", value=f"${potential_winnings:.2f}", inline=True)
+            embed.add_field(name="💰 Potential Winnings", value=format_money(potential_winnings), inline=True)
             embed.add_field(name="🔫 Bullets", value=f"{game.bullets}/6", inline=True)
             embed.add_field(name="💀 Death Odds", value=f"{(game.bullets/6)*100:.1f}%", inline=True)
             embed.add_field(name="📈 Current Multiplier", value=f"{game.calculate_total_multiplier(next_player['rounds_survived']):.2f}x", inline=True)
@@ -4668,7 +4709,7 @@ async def play_roulette_round(channel, game_id):
             )
         new_multiplier = game.calculate_total_multiplier(current_player['rounds_survived'])
         embed.add_field(name="✅ Status", value="ALIVE", inline=True)
-        embed.add_field(name="💰 Current Stake", value=f"${current_player['current_stake']:.2f}", inline=True)
+        embed.add_field(name="💰 Current Stake", value=format_money(current_player['current_stake']), inline=True)
         embed.add_field(name="📈 Multiplier", value=f"{new_multiplier:.2f}x", inline=True)
         embed.add_field(name="🎯 Rounds Survived", value=f"{current_player['rounds_survived']}", inline=True)
         await msg.edit(embed=embed)
@@ -4687,7 +4728,7 @@ async def play_roulette_round(channel, game_id):
         )
         embed.add_field(name="🔫 Bullets Reloaded", value=f"{game.bullets}/6", inline=True)
         embed.add_field(name="👥 Players Remaining", value=f"{len(alive_players)}", inline=True)
-        embed.add_field(name="💰 Total Pot", value=f"${game.pot:.2f}", inline=True)
+        embed.add_field(name="💰 Total Pot", value=format_money(game.pot), inline=True)
         
         await channel.send(embed=embed)
         await asyncio.sleep(2)
@@ -4732,7 +4773,7 @@ async def play_roulette_round(channel, game_id):
             color=discord.Color.gold()
         )
     
-    embed.add_field(name="💰 Potential Winnings", value=f"${potential_winnings:.2f}", inline=True)
+    embed.add_field(name="💰 Potential Winnings", value=format_money(potential_winnings), inline=True)
     embed.add_field(name="🔫 Bullets", value=f"{game.bullets}/6", inline=True)
     embed.add_field(name="💀 Death Odds", value=f"{(game.bullets/6)*100:.1f}%", inline=True)
     embed.add_field(name="📈 Current Multiplier", value=f"{game.calculate_total_multiplier(next_player['rounds_survived']):.2f}x", inline=True)
@@ -4914,7 +4955,11 @@ class RouletteJoinView(discord.ui.View):
                 description=f"**{game.host_name}** cancelled the game.\n\nAll bets have been refunded.",
                 color=discord.Color.red()
             )
-            embed.add_field(name="💰 Refunded", value=f"${game.bet_amount:.2f} to {refunded_count} player(s)", inline=True)
+            embed.add_field(
+                name="💰 Refunded",
+                value=f"{format_money(game.bet_amount)} to {refunded_count} player(s)",
+                inline=True,
+            )
             
             await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=None)
         except Exception as e:
@@ -5024,8 +5069,12 @@ class RouletteContinueView(discord.ui.View):
                 description=f"**{player['name']}** decided to walk away!",
                 color=discord.Color.gold()
             )
-            embed.add_field(name="💵 Winnings", value=f"${winnings:.2f}", inline=True)
-            embed.add_field(name="💸 Profit", value=f"${normalize_money(winnings - normalize_money(game.bet_amount)):.2f}", inline=True)
+            embed.add_field(name="💵 Winnings", value=format_money(winnings), inline=True)
+            embed.add_field(
+                name="💸 Profit",
+                value=format_money(normalize_money(winnings - normalize_money(game.bet_amount))),
+                inline=True,
+            )
             embed.add_field(name="📈 Multiplier Achieved", value=f"{game.calculate_total_multiplier(player['rounds_survived']):.2f}x", inline=True)
             embed.add_field(name="🎯 Rounds Survived", value=f"{player['rounds_survived']}", inline=True)
             
@@ -5108,8 +5157,12 @@ class RouletteContinueView(discord.ui.View):
             description=f"**{player['name']}** timed out and was automatically cashed out!",
             color=discord.Color.orange()
         )
-        embed.add_field(name="💵 Winnings", value=f"${winnings:.2f}", inline=True)
-        embed.add_field(name="💸 Profit", value=f"${normalize_money(winnings - normalize_money(game.bet_amount)):.2f}", inline=True)
+        embed.add_field(name="💵 Winnings", value=format_money(winnings), inline=True)
+        embed.add_field(
+            name="💸 Profit",
+            value=format_money(normalize_money(winnings - normalize_money(game.bet_amount))),
+            inline=True,
+        )
         embed.add_field(name="📈 Multiplier Achieved", value=f"{game.calculate_total_multiplier(player['rounds_survived']):.2f}x", inline=True)
         embed.add_field(name="🎯 Rounds Survived", value=f"{player['rounds_survived']}", inline=True)
         
@@ -5163,8 +5216,8 @@ async def end_roulette_game(channel, game_id):
             description=f"**{winner['name']}** is the last one standing!",
             color=discord.Color.gold()
         )
-        embed.add_field(name="💰 Total Winnings", value=f"${total_winnings:.2f}", inline=True)
-        embed.add_field(name="💸 Net Profit", value=f"${profit:.2f}", inline=True)
+        embed.add_field(name="💰 Total Winnings", value=format_money(total_winnings), inline=True)
+        embed.add_field(name="💸 Net Profit", value=format_money(profit), inline=True)
         embed.add_field(name="📈 Final Multiplier", value=f"{game.calculate_total_multiplier(winner['rounds_survived']):.2f}x", inline=True)
         embed.add_field(name="🎯 Rounds Survived", value=f"{winner['rounds_survived']}", inline=True)
         embed.add_field(name="💀 Opponents Eliminated", value=f"{len(game.players) - 1}", inline=True)
@@ -5201,7 +5254,11 @@ async def end_roulette_game(channel, game_id):
                 mult = game.calculate_total_multiplier(data["rounds_survived"])
                 embed.add_field(
                     name=f"**{data['name']}**",
-                    value=f"💵 ${winnings:.2f} winnings | 💸 ${profit:+.2f} profit\n📈 {mult:.2f}x multiplier | 🎯 {data['rounds_survived']} rounds",
+                    value=(
+                        f"💵 {format_money(winnings)} winnings | "
+                        f"💸 {format_signed_money(profit)} profit\n"
+                        f"📈 {mult:.2f}x multiplier | 🎯 {data['rounds_survived']} rounds"
+                    ),
                     inline=False
                 )
             await channel.send(embed=embed)
@@ -5212,7 +5269,7 @@ async def end_roulette_game(channel, game_id):
                 description="Nobody survived... The pot is lost to the void.",
                 color=discord.Color.dark_red()
             )
-            embed.add_field(name="💰 Lost Pot", value=f"${game.pot:.2f}", inline=True)
+            embed.add_field(name="💰 Lost Pot", value=format_money(game.pot), inline=True)
             await channel.send(embed=embed)
         else:
             # Mixed: some cashed out, some died — show results for each player
@@ -5228,14 +5285,18 @@ async def end_roulette_game(channel, game_id):
                     mult = game.calculate_total_multiplier(data["rounds_survived"])
                     embed.add_field(
                         name=f"**{data['name']}** — Cashed out",
-                        value=f"💵 ${winnings:.2f} winnings | 💸 ${profit:+.2f} profit\n📈 {mult:.2f}x multiplier | 🎯 {data['rounds_survived']} rounds",
+                        value=(
+                            f"💵 {format_money(winnings)} winnings | "
+                            f"💸 {format_signed_money(profit)} profit\n"
+                            f"📈 {mult:.2f}x multiplier | 🎯 {data['rounds_survived']} rounds"
+                        ),
                         inline=False
                     )
                 else:
                     lost = normalize_money(data["current_stake"])
                     embed.add_field(
                         name=f"**{data['name']}** — Eliminated",
-                        value=f"💀 Lost ${lost:.2f}",
+                        value=f"💀 Lost {format_money(lost)}",
                         inline=False
                     )
             await channel.send(embed=embed)
@@ -5593,7 +5654,7 @@ async def _gathemon_award_winner_gathers(winner_id: int, loser_id: int, num_plan
         description=f"{header}{emoji_display}",
         color=discord.Color.gold(),
     )
-    reward_embed.add_field(name="💰 Total Earned", value=f"**${total_value:,.2f}**", inline=True)
+    reward_embed.add_field(name="💰 Total Earned", value=f"**{format_money(total_value)}**", inline=True)
     try:
         await channel.send(f"<@{winner_id}>", embed=reward_embed)
     except Exception as e:
@@ -6029,10 +6090,10 @@ async def end_gathership_game(channel, game_id: str, winner_id: int, loser_id: i
     loser_mention = f"<@{loser_id}>"
     embed = discord.Embed(
         title="🏆 MAYFLOWER — GAME OVER 🏆",
-        description=f"{winner_mention} sank all of {loser_mention}'s ships and wins **${total_pot:.2f}**!",
+        description=f"{winner_mention} sank all of {loser_mention}'s ships and wins **{format_money(total_pot)}**!",
         color=discord.Color.gold()
     )
-    # embed.add_field(name="💰 Winner takes", value=f"${total_pot:.2f}", inline=True)
+    # embed.add_field(name="💰 Winner takes", value=format_money(total_pot), inline=True)
     await channel.send(embed=embed)
 
 
@@ -6072,7 +6133,7 @@ class GathershipLobbyView(discord.ui.View):
             host_mention = f"<@{game.host_id}>"
             opponent_mention = f"<@{game.opponent_id}>"
             embed.description = f"{host_mention} is challenging {opponent_mention} to **MAYFLOWER**!\n\n✅ {opponent_mention} has joined! Host can start."
-            embed.set_field_at(0, name="💰 Bet", value=f"${game.bet:.2f}", inline=True)
+            embed.set_field_at(0, name="💰 Bet", value=format_money(game.bet), inline=True)
             # Reset 5-minute timeout when opponent joins (backend only; no UI mention)
             fresh_view = GathershipLobbyView(self.game_id, self.host_id, self.opponent_id, timeout=300)
             await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=fresh_view)
@@ -6483,7 +6544,12 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
         current_balance = normalize_money(current_balance)
         
         if not can_afford_rounded(current_balance, bet):
-            await safe_interaction_response(interaction, interaction.followup.send, f"You do not have enough balance to bet **${bet:.2f}**, {interaction.user.name}.", ephemeral=False)
+            await safe_interaction_response(
+                interaction,
+                interaction.followup.send,
+                f"You do not have enough balance to bet **{format_money(bet)}**, {interaction.user.name}.",
+                ephemeral=False,
+            )
             return
         
         # Deduct bet first
@@ -6532,13 +6598,21 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
             # They win - get double their bet back (bet was already deducted, so add 2*bet)
             new_balance = normalize_money(new_balance_after_bet + (bet * 2))
             update_user_balance(user_id, new_balance)
-            message = f"You placed **${bet:.2f}** on **{choice}**!\nThe coin landed on **{coin_result}**! You doubled your bet!!\nYour new balance is **${new_balance:.2f}**."
+            message = (
+                f"You placed **{format_money(bet)}** on **{choice}**!\n"
+                f"The coin landed on **{coin_result}**! You doubled your bet!!\n"
+                f"Your new balance is **{format_money(new_balance)}**."
+            )
         else:
             # They lose - bet was already deducted
             new_balance = new_balance_after_bet
             # Get the opposite choice for display (lowercase)
             opposite = "tails" if choice.lower() == "heads" else "heads"
-            message = f"You placed **${bet:.2f}** on **{choice}**!\nOuch {interaction.user.name}, the coin landed on **{opposite}**. You lost **${bet:.2f}**.\nYour new balance is **${new_balance:.2f}**."
+            message = (
+                f"You placed **{format_money(bet)}** on **{choice}**!\n"
+                f"Ouch {interaction.user.name}, the coin landed on **{opposite}**. You lost **{format_money(bet)}**.\n"
+                f"Your new balance is **{format_money(new_balance)}**."
+            )
         
         # Send the main coinflip result message first
         await safe_interaction_response(interaction, interaction.followup.send, message, ephemeral=False)
@@ -6728,9 +6802,9 @@ class SlotsView(discord.ui.View):
         if self.spins_this_session == 0:
             return "**EVEN:** $0"
         if net > 0:
-            return f"**UP:** ${net:.2f}"
+            return f"**UP:** {format_money(net)}"
         if net < 0:
-            return f"**DOWN:** ${abs(net):.2f}"
+            return f"**DOWN:** {format_money(abs(net))}"
         return "**BROKE EVEN:** $0"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -6743,11 +6817,11 @@ class SlotsView(discord.ui.View):
         title = "🎰 SLOTS - SPINNING... 🎰" if is_spinning else "🎰 SLOTS 🎰"
         balance = get_user_balance(self.user_id)
         balance = normalize_money(balance)
-        desc_parts = [f"Balance: **${balance:.2f}**"]
+        desc_parts = [f"Balance: **{format_money(balance)}**"]
         if self.bet_type:
             pct = 0.001 if self.bet_type == "0.1%" else 0.01
             bet_amt = normalize_money(balance * pct)
-            desc_parts.append(f"**BET:** **{self.bet_type}** (${bet_amt:.2f})")
+            desc_parts.append(f"**BET:** **{self.bet_type}** ({format_money(bet_amt)})")
             desc_parts.append(self._session_status_line(balance))
             if self.bet_type == "0.1%":
                 desc_parts.append("Win: middle row only.")
@@ -6853,7 +6927,7 @@ class SlotsView(discord.ui.View):
             achievements_unlocked.append(("slots", new_slots_level))
 
         title = "🎰 SLOTS - RESULT 🎰"
-        bet_text = "**FREE SPIN** (Slot Token)" if use_free_spin else f"**${self.bet:.2f}** ({self.bet_type})"
+        bet_text = "**FREE SPIN** (Slot Token)" if use_free_spin else f"**{format_money(self.bet)}** ({self.bet_type})"
         session_line = self._session_status_line(curr_balance)
         result_embed = discord.Embed(
             title=title,
@@ -6863,14 +6937,21 @@ class SlotsView(discord.ui.View):
         if won:
             result_embed.add_field(
                 name="🎉 YOU WON! 🎉",
-                value=f"**{line_count}** line(s)! You won **${winnings:.2f}**!\nBalance: **${curr_balance:.2f}**.",
+                value=(
+                    f"**{line_count}** line(s)! You won **{format_money(winnings)}**!\n"
+                    f"Balance: **{format_money(curr_balance)}**."
+                ),
                 inline=False,
             )
         else:
-            lost_text = "Free spin used — no winnings this time." if use_free_spin else f"You lost **${self.bet:.2f}**."
+            lost_text = (
+                "Free spin used — no winnings this time."
+                if use_free_spin
+                else f"You lost **{format_money(self.bet)}**."
+            )
             result_embed.add_field(
                 name="❌ You Lost",
-                value=f"{lost_text}\nBalance: **${curr_balance:.2f}**.",
+                value=f"{lost_text}\nBalance: **{format_money(curr_balance)}**.",
                 inline=False,
             )
         result_embed.set_footer(text="Click SPIN to play again!")
@@ -6976,7 +7057,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.11.3"
+            name="running /gather on V0.11.4"
         )
     )
     try:
@@ -7206,7 +7287,7 @@ async def _post_rares_plant(guild: discord.Guild, user: discord.Member, source: 
     # e.g. ":IMBUE_L: @User caught a LEGENDARY *Strawberry 🍓* in a GATHER worth $2,216,775.69! | **[FOREST]**"
     msg = (
         f"{rarity_emoji} {user.mention} caught a **{label}** *{item_display}* "
-        f"in a **{source}** worth **${value:,.2f}**! | **{area_tag}**"
+        f"in a **{source}** worth **{format_money(value)}**! | **{area_tag}**"
     )
     await _post_to_rares_channel(guild, msg)
 
@@ -7280,7 +7361,12 @@ def _gather_critical_path(member, user_id: int, channel_name: str, area: dict) -
             prev_display = GATHERING_AREAS[prev]["display_name"]
             return {"area_error": f"❌ You must unlock **{prev_display}** before accessing **{area['display_name']}**!"}
         if not unlocked.get(channel_name, False):
-            return {"area_error": f"❌ You haven't unlocked **{area['display_name']}** yet! Use `/unlock {channel_name}` to unlock it for **${area['unlock_cost']:,}**."}
+            return {
+                "area_error": (
+                    f"❌ You haven't unlocked **{area['display_name']}** yet! "
+                    f"Use `/unlock {channel_name}` to unlock it for **{format_money(area['unlock_cost'])}**."
+                )
+            }
         if effective_planter_level < area.get("required_planter_level", 0):
             return {"area_error": f"❌ You must be **{area['required_planter_rank']}** or above to gather in **{area['display_name']}**! You need to gather more plants to rank up."}
 
@@ -7981,6 +8067,9 @@ NETHER_STAR_EMOJI_PARTIAL = discord.PartialEmoji(name="netherstar", id=147623755
 # Black Shard (Roaring Knight drop): custom emoji for claim button and shop
 BLACK_SHARD_EMOJI = "<:blackshard:1478988887110975519>"
 BLACK_SHARD_EMOJI_PARTIAL = discord.PartialEmoji(name="blackshard", id=1478988887110975519, animated=False)
+# End Crystal (Ender Dragon Obsidian Towers): custom emoji for embeds and buttons
+END_CRYSTAL_EMOJI = "<:endcrystal:1479156246081835050>"
+END_CRYSTAL_EMOJI_PARTIAL = discord.PartialEmoji(name="endcrystal", id=1479156246081835050, animated=False)
 
 
 def _format_item_boost_source(name: str) -> str:
@@ -8274,20 +8363,20 @@ class ObsidianTowerView(discord.ui.View):
         if self.defeated:
             embed = discord.Embed(
                 title="🖤 Obsidian Tower 🖤",
-                description="This tower's End Crystal has been broken.",
+                description=f"This tower's End Crystal {END_CRYSTAL_EMOJI} has been broken.",
                 color=0x1a1a2e)
             embed.add_field(name="HP", value=f"**0** / **{ENDER_DRAGON_TOWER_HP}**\n{_tower_hp_bar(0)}", inline=False)
-            embed.add_field(name="Status", value="☠️ **End Crystal Broken!**", inline=False)
+            embed.add_field(name="Status", value=f"**End Crystal** {END_CRYSTAL_EMOJI} **Broken!**", inline=False)
             embed.set_footer(text="The tower has no effect!")
         else:
             embed = discord.Embed(
                 title="🖤 Obsidian Tower 🖤",
-                description="An **End Crystal** powers this tower. Damage the tower, then **Break End Crystal** to stop the Ender Dragon's regeneration!",
+                description=f"An **End Crystal** {END_CRYSTAL_EMOJI} powers this tower. Damage the tower, then **Break End Crystal** to stop the Ender Dragon's regeneration!",
                 color=0x1a1a2e)
             embed.add_field(name="HP", value=f"**{self.tower_hp}** / **{ENDER_DRAGON_TOWER_HP}**\n{_tower_hp_bar(self.tower_hp)}", inline=False)
             if last_hit:
                 embed.add_field(name="⚔️ Last Hit", value=f"**{last_hit}**!", inline=False)
-            embed.set_footer(text="Break all End Crystals in every channel, then defeat the Ender Dragon!")
+            embed.set_footer(text=f"Break all End Crystals {END_CRYSTAL_EMOJI} in every channel, then defeat the Ender Dragon!")
         return embed
 
     @discord.ui.button(label="⚔️ Attack", style=discord.ButtonStyle.danger, custom_id="obsidian_tower_attack")
@@ -8297,7 +8386,7 @@ class ObsidianTowerView(discord.ui.View):
         async with self._lock:
             if self.defeated:
                 await safe_interaction_response(interaction, interaction.response.send_message,
-                    "This tower's End Crystal has already been broken!", ephemeral=True)
+                    f"This tower's End Crystal {END_CRYSTAL_EMOJI} has already been broken!", ephemeral=True)
                 return
             damage = get_pve_damage_multiplier(interaction.user.id)
             self.tower_hp = max(0, self.tower_hp - damage)
@@ -8310,14 +8399,14 @@ class ObsidianTowerView(discord.ui.View):
             progress_embed = self._embed(interaction.user.display_name)
             await safe_interaction_response(interaction, interaction.response.edit_message, embed=progress_embed, view=self)
 
-    @discord.ui.button(label="Break End Crystal", style=discord.ButtonStyle.secondary, custom_id="obsidian_tower_break_crystal", disabled=True)
+    @discord.ui.button(label="Break End Crystal", style=discord.ButtonStyle.secondary, emoji=END_CRYSTAL_EMOJI_PARTIAL, custom_id="obsidian_tower_break_crystal", disabled=True)
     async def break_crystal(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await safe_defer(interaction, ephemeral=False):
             return
         async with self._lock:
             if self.defeated:
                 await safe_interaction_response(interaction, interaction.response.send_message,
-                    "This End Crystal has already been broken!", ephemeral=True)
+                    f"This End Crystal {END_CRYSTAL_EMOJI} has already been broken!", ephemeral=True)
                 return
             if self.tower_hp > 0:
                 await safe_interaction_response(interaction, interaction.response.send_message,
@@ -8325,7 +8414,7 @@ class ObsidianTowerView(discord.ui.View):
                 return
             self.defeated = True
             button.disabled = True
-            button.label = "☠️ Crystal Broken!"
+            button.label = "<:endcrystal:1479156246081835050> Crystal Broken!"
             if self.guild_id in ender_dragon_towers:
                 ender_dragon_towers[self.guild_id].discard(self.channel_id)
             victory_embed = self._embed()
@@ -8362,7 +8451,7 @@ class EnderDragonView(discord.ui.View):
             color=self.boss["color"])
         embed.add_field(name="HP", value=f"**{hp}** / **{max_hp}**\n{self._hp_bar()}", inline=False)
         if towers_up > 0:
-            embed.add_field(name="❤️ Regeneration", value=f"**{towers_up}** End Crystal(s) still power the dragon. It recovers **{towers_up * ENDER_DRAGON_REGEN_PER_CRYSTAL}** HP/sec!", inline=False)
+            embed.add_field(name="❤️ Regeneration", value=f"**{towers_up}** End Crystal(s) {END_CRYSTAL_EMOJI} still power the dragon. It recovers **{towers_up * ENDER_DRAGON_REGEN_PER_CRYSTAL}** HP/sec!", inline=False)
         if last_hit:
             embed.add_field(name="⚔️ Last Hit", value=f"**{last_hit}**!", inline=False)
         embed.set_footer(text="All gathering channels are BLOCKED until the Ender Dragon is defeated!")
@@ -8455,7 +8544,7 @@ def _ender_dragon_embed_from_entry(entry: dict, boss: dict, guild_id: int) -> di
         color=boss["color"])
     embed.add_field(name="HP", value=f"**{hp}** / **{max_hp}**\n{bar}", inline=False)
     if towers_up > 0:
-        embed.add_field(name="❤️ Regeneration", value=f"**{towers_up}** End Crystal(s) still power the dragon. It recovers **{towers_up * ENDER_DRAGON_REGEN_PER_CRYSTAL}** HP/sec!", inline=False)
+        embed.add_field(name="❤️ Regeneration", value=f"**{towers_up}** End Crystal(s) {END_CRYSTAL_EMOJI} still power the dragon. It recovers **{towers_up * ENDER_DRAGON_REGEN_PER_CRYSTAL}** HP/sec!", inline=False)
     embed.set_footer(text="All gathering channels are BLOCKED until the Ender Dragon is defeated!")
     return embed
 
@@ -8517,7 +8606,7 @@ async def trigger_ender_dragon_event(channel: discord.TextChannel, area_multipli
         description=boss["description"],
         color=boss["color"])
     embed.add_field(name="HP", value=f"**{hp}** / **{hp}**\n{'🟥' * 20}", inline=False)
-    embed.add_field(name="❤️ Regeneration", value="Destroy the **End Crystals** on Obsidian Towers in other channels to stop the dragon's regeneration!", inline=False)
+    embed.add_field(name="❤️ Regeneration", value=f"Destroy the **End Crystals** {END_CRYSTAL_EMOJI} on Obsidian Towers in other channels to stop the dragon's regeneration!", inline=False)
     embed.add_field(name="⚔️ How to Fight", value="Press **Attack**!", inline=False)
     embed.set_footer(text="All gathering channels are BLOCKED until the Ender Dragon is defeated!")
     view = EnderDragonView(boss=boss, entry=entry, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_multiplier)
@@ -8860,7 +8949,7 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
                 description=f"{header}{emoji_display}",
                 color=discord.Color.green())
             reward_embed.add_field(
-                name="💰 Total Earned", value=f"**${total_value:,.2f}**", inline=True)
+                name="💰 Total Earned", value=f"**{format_money(total_value)}**", inline=True)
             reward_embed.set_footer(text="Thanks for defending the gathering grounds!")
 
             # Send reward embed via DM (ephemeral-style) to avoid cluttering the channel
@@ -9124,7 +9213,7 @@ async def gather(interaction: discord.Interaction):
                     f"and got a **CRIT**!\n\n"
                     f"\U0001f4a5 **2X MONEY** \U0001f4a5"),
                 color=discord.Color.orange())
-            embed.add_field(name="Value", value=f"**${gather_result['base_value']:.2f}**", inline=True)
+            embed.add_field(name="Value", value=f"**{format_money(gather_result['base_value'])}**", inline=True)
             embed.add_field(name="Ripeness", value=f"{rip_emoji} {gather_result['ripeness']}".strip(), inline=True)
             embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
 
@@ -9132,38 +9221,42 @@ async def gather(interaction: discord.Interaction):
             if bloom_count > 0 and gather_result.get('extra_money_from_bloom', 0) > 0:
                 multiplier_percent = (gather_result['bloom_multiplier'] - 1.0) * 100
                 embed.add_field(name="<:TreeRing:1474244868288282817> Tree Ring Boost",
-                    value=f"+{multiplier_percent:.1f}% - **+${gather_result['extra_money_from_bloom']:.2f}**", inline=False)
+                    value=f"+{multiplier_percent:.1f}% - **+{format_money(gather_result['extra_money_from_bloom'])}**", inline=False)
             bloom_rank = _bloom_count_to_rank(bloom_count)
             if bloom_rank != "PINE I" and gather_result.get('extra_money_from_rank', 0) > 0:
+                rank_percent = (gather_result['rank_perma_buff_multiplier'] - 1.0) * 100
                 embed.add_field(name="⭐ Rank Boost",
-                    value=f"{gather_result['rank_perma_buff_multiplier']:.2f}x - **+${gather_result['extra_money_from_rank']:.2f}**", inline=False)
+                    value=f"+{rank_percent:.1f}% - **+${gather_result['extra_money_from_rank']:.2f}**", inline=False)
             if gather_result.get('extra_money_from_achievement', 0) > 0:
                 achievement_percent = (gather_result['achievement_multiplier'] - 1.0) * 100
                 embed.add_field(name="🏆 Achievement Boost",
-                    value=f"+{achievement_percent:.1f}% - **+${gather_result['extra_money_from_achievement']:.2f}**", inline=False)
+                    value=f"+{achievement_percent:.1f}% - **+{format_money(gather_result['extra_money_from_achievement'])}**", inline=False)
             if gather_result.get('extra_money_from_daily', 0) > 0:
                 daily_bonus_percent = (gather_result['daily_bonus_multiplier'] - 1.0) * 100
                 embed.add_field(name="💧 Water Streak Boost",
-                    value=f"+{daily_bonus_percent:.1f}% - **+${gather_result['extra_money_from_daily']:.2f}**", inline=False)
+                    value=f"+{daily_bonus_percent:.1f}% - **+{format_money(gather_result['extra_money_from_daily'])}**", inline=False)
 
             embed.add_field(name="\u2728 Imbuement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
             embed.add_field(name="\U0001f4a5 Critical Multiplier",
-                value=f"${pre_crit_value:.2f} \u2192 **${gather_result['value']:.2f}**", inline=False)
+                value=f"{format_money(pre_crit_value)} \u2192 **{format_money(gather_result['value'])}**", inline=False)
             if gather_result.get('extra_money_from_beta_tester', 0) > 0:
+                beta_percent = (gather_result['beta_tester_multiplier'] - 1.0) * 100
                 embed.add_field(name="🧪 Beta Tester!",
-                    value=f"{gather_result['beta_tester_multiplier']:.2f}x - **+${gather_result['extra_money_from_beta_tester']:.2f}**", inline=False)
+                    value=f"+{beta_percent:.1f}% - **+{format_money(gather_result['extra_money_from_beta_tester'])}**", inline=False)
             if gather_result.get('extra_money_from_server_booster', 0) > 0:
+                booster_percent = (gather_result['server_booster_multiplier'] - 1.0) * 100
                 embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
-                    value=f"{gather_result['server_booster_multiplier']:.2f}x - **+${gather_result['extra_money_from_server_booster']:.2f}**", inline=False)
+                    value=f"+{booster_percent:.1f}% - **+{format_money(gather_result['extra_money_from_server_booster'])}**", inline=False)
             if gather_result.get('extra_money_from_premium', 0) > 0:
                 tier = get_user_premium_tier(user_id)
+                premium_percent = (gather_result['premium_tier_multiplier'] - 1.0) * 100
                 embed.add_field(name=PREMIUM_DISPLAY.get(tier, "Premium"),
-                    value=f"{gather_result['premium_tier_multiplier']:.2f}x - **+${gather_result['extra_money_from_premium']:.2f}**", inline=False)
+                    value=f"+{premium_percent:.1f}% - **+{format_money(gather_result['extra_money_from_premium'])}**", inline=False)
             if item_boost_sources:
                 extra_ns = gather_result.get("extra_money_from_nether_star", 0)
                 extra_bs = gather_result.get("extra_money_from_black_shard", 0)
                 total_extra = extra_ns + extra_bs
-                value_parts = [f"**+${total_extra:.2f}**"] if total_extra > 0 else []
+                value_parts = [f"**+{format_money(total_extra)}**"] if total_extra > 0 else []
                 value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
                 embed.add_field(
                     name="📦 Item Boost",
@@ -9172,15 +9265,15 @@ async def gather(interaction: discord.Interaction):
                 )
             month_name = gather_result.get("month_name", "—")
             embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
-            embed.add_field(name="\U0001f4b0 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
-            embed.add_field(name="\U0001f4b5 New Balance", value=f"**${gather_result['new_balance']:.2f}**", inline=True)
+            embed.add_field(name="\U0001f4b0 Total Earned", value=f"**{format_money(gather_result['value'])}**", inline=True)
+            embed.add_field(name="\U0001f4b5 New Balance", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
         else:
             desc_prefix = f"{rip_emoji} " if rip_emoji else ""
             embed = discord.Embed(
                 title="You Gathered!",
                 description=f"{desc_prefix}You foraged for a(n) **{item_display}**!",
                 color=discord.Color.green())
-            embed.add_field(name="Value", value=f"**${gather_result['base_value']:.2f}**", inline=True)
+            embed.add_field(name="Value", value=f"**{format_money(gather_result['base_value'])}**", inline=True)
             embed.add_field(name="Ripeness", value=f"{rip_emoji} {gather_result['ripeness']}".strip(), inline=True)
             embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
 
@@ -9188,38 +9281,42 @@ async def gather(interaction: discord.Interaction):
             if bloom_count > 0 and gather_result.get('extra_money_from_bloom', 0) > 0:
                 multiplier_percent = (gather_result['bloom_multiplier'] - 1.0) * 100
                 embed.add_field(name="<:TreeRing:1474244868288282817> Tree Ring Boost",
-                    value=f"+{multiplier_percent:.1f}% - **+${gather_result['extra_money_from_bloom']:.2f}**", inline=False)
+                    value=f"+{multiplier_percent:.1f}% - **+{format_money(gather_result['extra_money_from_bloom'])}**", inline=False)
 
             bloom_rank = _bloom_count_to_rank(bloom_count)
             if bloom_rank != "PINE I" and gather_result.get('extra_money_from_rank', 0) > 0:
+                rank_percent = (gather_result['rank_perma_buff_multiplier'] - 1.0) * 100
                 embed.add_field(name="⭐ Rank Boost",
-                    value=f"{gather_result['rank_perma_buff_multiplier']:.2f}x - **+${gather_result['extra_money_from_rank']:.2f}**", inline=False)
+                    value=f"+{rank_percent:.1f}% - **+{format_money(gather_result['extra_money_from_rank'])}**", inline=False)
 
             if gather_result.get('extra_money_from_achievement', 0) > 0:
                 achievement_percent = (gather_result['achievement_multiplier'] - 1.0) * 100
                 embed.add_field(name="🏆 Achievement Boost",
-                    value=f"+{achievement_percent:.1f}% - **+${gather_result['extra_money_from_achievement']:.2f}**", inline=False)
+                    value=f"+{achievement_percent:.1f}% - **+{format_money(gather_result['extra_money_from_achievement'])}**", inline=False)
 
             if gather_result.get('extra_money_from_daily', 0) > 0:
                 daily_bonus_percent = (gather_result['daily_bonus_multiplier'] - 1.0) * 100
                 embed.add_field(name="💧 Water Streak Boost",
-                    value=f"+{daily_bonus_percent:.1f}% - **+${gather_result['extra_money_from_daily']:.2f}**", inline=False)
+                    value=f"+{daily_bonus_percent:.1f}% - **+{format_money(gather_result['extra_money_from_daily'])}**", inline=False)
 
             if gather_result.get('extra_money_from_beta_tester', 0) > 0:
+                beta_percent = (gather_result['beta_tester_multiplier'] - 1.0) * 100
                 embed.add_field(name="🧪 Beta Tester!",
-                    value=f"{gather_result['beta_tester_multiplier']:.2f}x - **+${gather_result['extra_money_from_beta_tester']:.2f}**", inline=False)
+                    value=f"+{beta_percent:.1f}% - **+{format_money(gather_result['extra_money_from_beta_tester'])}**", inline=False)
             if gather_result.get('extra_money_from_server_booster', 0) > 0:
+                booster_percent = (gather_result['server_booster_multiplier'] - 1.0) * 100
                 embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
-                    value=f"{gather_result['server_booster_multiplier']:.2f}x - **+${gather_result['extra_money_from_server_booster']:.2f}**", inline=False)
+                    value=f"+{booster_percent:.1f}% - **+{format_money(gather_result['extra_money_from_server_booster'])}**", inline=False)
             if gather_result.get('extra_money_from_premium', 0) > 0:
                 tier = get_user_premium_tier(user_id)
+                premium_percent = (gather_result['premium_tier_multiplier'] - 1.0) * 100
                 embed.add_field(name=PREMIUM_DISPLAY.get(tier, "Premium"),
-                    value=f"{gather_result['premium_tier_multiplier']:.2f}x - **+${gather_result['extra_money_from_premium']:.2f}**", inline=False)
+                    value=f"+{premium_percent:.1f}% - **+{format_money(gather_result['extra_money_from_premium'])}**", inline=False)
             if item_boost_sources:
                 extra_ns = gather_result.get("extra_money_from_nether_star", 0)
                 extra_bs = gather_result.get("extra_money_from_black_shard", 0)
                 total_extra = extra_ns + extra_bs
-                value_parts = [f"**+${total_extra:.2f}**"] if total_extra > 0 else []
+                value_parts = [f"**+{format_money(total_extra)}**"] if total_extra > 0 else []
                 value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
                 embed.add_field(
                     name="📦 Item Boost",
@@ -9236,8 +9333,8 @@ async def gather(interaction: discord.Interaction):
 
             month_name = gather_result.get("month_name", "—")
             embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
-            embed.add_field(name="\U0001f4b0 Total Earned", value=f"**${gather_result['value']:.2f}**", inline=True)
-            embed.add_field(name="\U0001f4b5 New Balance", value=f"**${gather_result['new_balance']:.2f}**", inline=True)
+            embed.add_field(name="\U0001f4b0 Total Earned", value=f"**{format_money(gather_result['value'])}**", inline=True)
+            embed.add_field(name="\U0001f4b5 New Balance", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
 
         # === Send the response ASAP (with optional STEAL button) ===
         view = None
@@ -9411,7 +9508,11 @@ def _water_critical_path(user_id: int) -> dict:
         tree_rings_awarded = 10
 
     water_label = "💧💧 **Double Water!** " if not is_first_water_today else ""
-    message = f"{water_label}You've been rewarded with **${money_reward:,.2f}**. Your streak is **{consecutive_days}**! (**{daily_bonus_multiplier:.2f}x**)"
+    daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
+    message = (
+        f"{water_label}You've been rewarded with **{format_money(money_reward)}**. "
+        f"Your streak is **{consecutive_days}**! (+{daily_bonus_percent:.1f}% money)"
+    )
     if tree_rings_awarded > 0:
         message += f" You've been awarded **{tree_rings_awarded} Tree Rings**!"
 
@@ -10196,14 +10297,14 @@ async def harvest(interaction: discord.Interaction):
         if bloom_count > 0 and extra_money_from_bloom > 0:
             multiplier_percent = (bloom_multiplier - 1.0) * 100
             embed.add_field(name="<:TreeRing:1474244868288282817> Tree Ring Boost",
-                value=f"+{multiplier_percent:.1f}% - **+${extra_money_from_bloom:.2f}**", inline=False)
+                value=f"+{multiplier_percent:.1f}% - **+{format_money(extra_money_from_bloom)}**", inline=False)
 
         achievement_multiplier = get_achievement_multiplier(user_id, full_data=full_data)
         extra_money_from_achievement = total_base_value * (achievement_multiplier - 1.0)
         if extra_money_from_achievement > 0:
             achievement_percent = (achievement_multiplier - 1.0) * 100
             embed.add_field(name="🏆 Achievement Boost",
-                value=f"+{achievement_percent:.1f}% - **+${extra_money_from_achievement:.2f}**", inline=False)
+                value=f"+{achievement_percent:.1f}% - **+{format_money(extra_money_from_achievement)}**", inline=False)
 
         daily_rate_display = 0.08 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.04
         daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * daily_rate_display)
@@ -10211,7 +10312,7 @@ async def harvest(interaction: discord.Interaction):
         if extra_money_from_daily > 0:
             daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
             embed.add_field(name="💧 Water Streak Boost",
-                value=f"+{daily_bonus_percent:.1f}% - **+${extra_money_from_daily:.2f}**", inline=False)
+                value=f"+{daily_bonus_percent:.1f}% - **+{format_money(extra_money_from_daily)}**", inline=False)
 
         bloom_rank = _bloom_count_to_rank(bloom_count)
         rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
@@ -10221,19 +10322,23 @@ async def harvest(interaction: discord.Interaction):
             enchant_total = total_base_value * enchant_money_bonus if enchant_money_bonus != 0 else 0.0
             total_subtotal = total_base_value + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + enchant_total
             extra_money_from_rank = total_subtotal * (rank_perma_buff_multiplier - 1.0)
+            rank_percent = (rank_perma_buff_multiplier - 1.0) * 100
             embed.add_field(name="⭐ Rank Boost",
-                value=f"{rank_perma_buff_multiplier:.2f}x - **+${extra_money_from_rank:.2f}**", inline=False)
+                value=f"+{rank_percent:.1f}% - **+{format_money(extra_money_from_rank)}**", inline=False)
 
         if result.get("extra_money_from_beta_tester", 0) > 0:
+            beta_percent = (result['beta_tester_multiplier'] - 1.0) * 100
             embed.add_field(name="🧪 Beta Tester!",
-                value=f"{result['beta_tester_multiplier']:.2f}x - **+${result['extra_money_from_beta_tester']:.2f}**", inline=False)
+                value=f"+{beta_percent:.1f}% - **+{format_money(result['extra_money_from_beta_tester'])}**", inline=False)
         if result.get("extra_money_from_server_booster", 0) > 0:
+            booster_percent = (result['server_booster_multiplier'] - 1.0) * 100
             embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
-                value=f"{result['server_booster_multiplier']:.2f}x - **+${result['extra_money_from_server_booster']:.2f}**", inline=False)
+                value=f"+{booster_percent:.1f}% - **+{format_money(result['extra_money_from_server_booster'])}**", inline=False)
         if result.get("extra_money_from_premium", 0) > 0:
             tier = get_user_premium_tier(user_id)
+            premium_percent = (result['premium_tier_multiplier'] - 1.0) * 100
             embed.add_field(name=PREMIUM_DISPLAY.get(tier, "Premium"),
-                value=f"{result['premium_tier_multiplier']:.2f}x - **+${result['extra_money_from_premium']:.2f}**", inline=False)
+                value=f"+{premium_percent:.1f}% - **+{format_money(result['extra_money_from_premium'])}**", inline=False)
         # Daily shop / item boosts that affected this harvest
         item_boost_sources = []
         shop_inv = full_data.get("shop_inventory", {}) if full_data else {}
@@ -10250,7 +10355,7 @@ async def harvest(interaction: discord.Interaction):
             extra_ns = result.get("extra_money_from_nether_star", 0)
             extra_bs = result.get("extra_money_from_black_shard", 0)
             total_extra = extra_ns + extra_bs
-            value_parts = [f"**+${total_extra:.2f}**"] if total_extra > 0 else []
+            value_parts = [f"**+{format_money(total_extra)}**"] if total_extra > 0 else []
             value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
             embed.add_field(
                 name="📦 Item Boost",
@@ -10269,8 +10374,8 @@ async def harvest(interaction: discord.Interaction):
         month_name = result.get("month_name", "")
         if month_name:
             embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
-        embed.add_field(name="💰 Total Value", value=f"**${total_value:.2f}**", inline=True)
-        embed.add_field(name="💵 New Balance", value=f"**${current_balance:.2f}**", inline=True)
+        embed.add_field(name="💰 Total Value", value=f"**{format_money(total_value)}**", inline=True)
+        embed.add_field(name="💵 New Balance", value=f"**{format_money(current_balance)}**", inline=True)
 
         # === Send the response ASAP (with optional STEAL button) ===
         view = None
@@ -10631,7 +10736,13 @@ def _unlock_critical_path(member, user_id: int, area_key: str) -> dict:
     user_balance = get_user_balance(user_id)
     if user_balance < unlock_cost:
         money_needed = unlock_cost - user_balance
-        return {"success": False, "error": f"❌ You need **${money_needed:,.2f}** more to unlock **{area_data['display_name']}**, {name}! (Cost: **${unlock_cost:,}**)"}
+        return {
+            "success": False,
+            "error": (
+                f"❌ You need **{format_money(money_needed)}** more to unlock **{area_data['display_name']}**, {name}! "
+                f"(Cost: **{format_money(unlock_cost)}**)"
+            ),
+        }
     new_balance = normalize_money(user_balance - unlock_cost)
     update_user_balance(user_id, new_balance)
     unlock_user_area(user_id, area_key)
@@ -11824,19 +11935,6 @@ class BasketUpgradeView(discord.ui.View):
             print(f"Error in buy_soil: {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
-    @discord.ui.button(label="", style=discord.ButtonStyle.secondary, emoji="🔄", row=2)
-    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            if interaction.user.id != self.user_id:
-                await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your gear shop!", ephemeral=True)
-                return
-            
-            embed = self.create_embed()
-            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
-        except Exception as e:
-            print(f"Error in refresh (gear): {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
-    
     async def handle_purchase(self, interaction: discord.Interaction, upgrade_type: str, upgrade_list: list, upgrade_name: str):
         try:
             if interaction.user.id != self.user_id:
@@ -12089,19 +12187,6 @@ class HarvestUpgradeView(discord.ui.View):
             await self.handle_purchase(interaction, "cooldown", HARVEST_COOLDOWN_UPGRADES, HARVEST_COOLDOWN_PRICES, "Workers")
         except Exception as e:
             print(f"Error in buy_cooldown: {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
-    
-    @discord.ui.button(label="", style=discord.ButtonStyle.secondary, emoji="🔄", row=2)
-    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            if interaction.user.id != self.user_id:
-                await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your harvest shop!", ephemeral=True)
-                return
-            
-            embed = self.create_embed()
-            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
-        except Exception as e:
-            print(f"Error in refresh (harvest): {e}")
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
     
     async def handle_purchase(self, interaction: discord.Interaction, upgrade_type: str, upgrade_list: list, price_list: list, upgrade_name: str):
@@ -15907,7 +15992,7 @@ async def gardener_background_task():
                                                     emoji = get_item_display_emoji(item["name"])
                                                     gmo = " GMO! ✨" if item["is_gmo"] else ""
                                                     prefix = f"{rip_em} " if rip_em else ""
-                                                    lines.append(f"{prefix}{emoji} ({item['ripeness']}){gmo}")
+                                                    lines.append(f"{prefix}{emoji} (**{item['ripeness']}**){gmo}")
                                                 items_display = "\n".join(lines) or "No items"
                                                 # Discord embed field value limit is 1024 characters
                                                 if len(items_display) > 1024:
@@ -16016,7 +16101,7 @@ async def secret_gardener_background_task():
                                                 emoji = get_item_display_emoji(item["name"])
                                                 gmo = " GMO! ✨" if item["is_gmo"] else ""
                                                 prefix = f"{rip_em} " if rip_em else ""
-                                                lines.append(f"{prefix}{emoji} ({item['ripeness']}){gmo}")
+                                                lines.append(f"{prefix}{emoji} (**{item['ripeness']}**){gmo}")
                                             items_display = "\n".join(lines) or "No items"
                                             embed.add_field(name="\U0001f4e6 Items Harvested", value=items_display, inline=False)
                                             embed.add_field(name="\U0001f4b0 Total Value", value=f"**${total_value:,.2f}**", inline=True)
@@ -17188,225 +17273,69 @@ def _sell_initial_sync(member, user_id: int) -> dict:
     return {"holdings": holdings, "prices": prices}
 
 
-@bot.tree.command(name="sell", description="Sell your cryptocurrency holdings")
-@app_commands.choices(coin=[
-    app_commands.Choice(name="RootCoin (RTC)", value="RTC"),
-    app_commands.Choice(name="Terrarium (TER)", value="TER"),
-    app_commands.Choice(name="Canopy (CNY)", value="CNY"),
-    app_commands.Choice(name="All", value="all"),
-])
-async def sell(interaction: discord.Interaction, coin: str, amount: float = None):
-    try:
-        if not await safe_defer(interaction, ephemeral=False):
-            return
+def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -> dict:
+    """
+    Run in thread: all DB work + math for /sell.
 
-        user_id = interaction.user.id
-        initial = await asyncio.to_thread(_sell_initial_sync, interaction.user, user_id)
-        holdings = initial["holdings"]
-        prices = initial["prices"]
-        
-        # Handle "all" option
-        if coin == "all":
-            # Sell all crypto holdings
-            base_sale_value = 0.0
-            sold_items = []
-            
-            for crypto_coin in CRYPTO_COINS:
-                symbol = crypto_coin["symbol"]
-                user_holding = holdings.get(symbol, 0.0)
-                
-                if user_holding > 0:
-                    coin_base_price = crypto_coin["base_price"]
-                    coin_price = prices.get(symbol, coin_base_price)
-                    sale_value = user_holding * coin_price
-                    base_sale_value += sale_value
-                    
-                    # Update holdings (subtract)
-                    update_user_crypto_holdings(user_id, symbol, -user_holding)
-                    
-                    sold_items.append(f"{symbol}: {user_holding:.4f} (${sale_value:.2f})")
-            
-            if base_sale_value == 0:
-                await safe_interaction_response(interaction, interaction.followup.send,
-                    f"❌ You don't have any cryptocurrency to sell, {interaction.user.name}!",
-                    ephemeral=True)
-                return
-            
-            # Apply boosts to sale value (additive from base, then rank multiplies subtotal)
-            bloom_multiplier = get_bloom_multiplier(user_id)
-            water_multiplier = get_water_multiplier(user_id)
-            rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
-            achievement_multiplier = get_achievement_multiplier(user_id)
-            daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
-            
-            # Calculate additive boosts from base
-            extra_from_bloom = base_sale_value * (bloom_multiplier - 1.0)
-            extra_from_water = base_sale_value * (water_multiplier - 1.0)
-            extra_from_achievement = base_sale_value * (achievement_multiplier - 1.0)
-            extra_from_daily = base_sale_value * (daily_bonus_multiplier - 1.0)
-            
-            # Subtotal before rank
-            subtotal = base_sale_value + extra_from_bloom + extra_from_water + extra_from_achievement + extra_from_daily
-            # Rank is multiplicative on subtotal
-            extra_from_rank = subtotal * (rank_perma_buff_multiplier - 1.0)
-            # All money buffs below apply to the SAME base value (additive stacking)
-            base_for_buffs = float(subtotal + extra_from_rank)
-            beta_mult = get_beta_tester_money_multiplier(user_id)
-            sb_mult = get_server_booster_money_multiplier(user_id)
-            prem_mult = get_premium_tier_money_multiplier(user_id)
-            nether_mult = get_nether_star_money_multiplier(user_id)
-            black_shard_mult = get_black_shard_money_multiplier(user_id)
-            shadow_crystal_mult = get_shadow_crystal_money_multiplier(user_id)
-            edward_mult = get_edward_splash_money_multiplier(user_id)
-            eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
-            extra_beta = base_for_buffs * (beta_mult - 1.0) if beta_mult > 1.0 else 0.0
-            extra_booster = base_for_buffs * (sb_mult - 1.0) if sb_mult > 1.0 else 0.0
-            extra_premium = base_for_buffs * (prem_mult - 1.0) if prem_mult > 1.0 else 0.0
-            extra_ns = base_for_buffs * (nether_mult - 1.0) if nether_mult > 1.0 else 0.0
-            extra_bs = base_for_buffs * (black_shard_mult - 1.0) if black_shard_mult > 1.0 else 0.0
-            extra_sc = base_for_buffs * (shadow_crystal_mult - 1.0) if shadow_crystal_mult > 1.0 else 0.0
-            extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
-            extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
-            extra_msi = base_for_buffs * 0.20 if has_shop_item(user_id, "msi_afterburner") else 0.0
-            total_sale_value = base_for_buffs + extra_beta + extra_booster + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi
-            # Add money to balance (with boosts)
-            current_balance = get_user_balance(user_id)
-            new_balance = current_balance + total_sale_value
-            update_user_balance(user_id, new_balance)
+    Returns a dict describing either an error:
+        {"error": <message>, "ephemeral": bool}
+    or a success:
+        {"embed": discord.Embed}
+    so the async /sell handler can send the response without touching the DB.
+    """
+    initial = _sell_initial_sync(member, user_id)
+    holdings: dict = initial["holdings"]
+    prices: dict = initial["prices"]
 
-            # Get updated holdings
-            updated_holdings = get_user_crypto_holdings(user_id)
+    member_name = getattr(member, "name", "you")
 
-            # Create success embed
-            embed = discord.Embed(
-                title="💰 Sale Successful!",
-                description=f"You sold all your cryptocurrency for **${total_sale_value:.2f}**!",
-                color=discord.Color.green()
-            )
-            embed.add_field(name="Sold", value="\n".join(sold_items) if sold_items else "None", inline=False)
-            
-            # Show boosts if applicable
-            bloom_count = get_user_bloom_count(user_id)
-            if bloom_count > 0 and extra_from_bloom > 0:
-                multiplier_percent = (bloom_multiplier - 1.0) * 100
-                embed.add_field(
-                    name="<:TreeRing:1474244868288282817> Tree Ring Boost",
-                    value=f"+{multiplier_percent:.1f}% - **+${extra_from_bloom:.2f}**",
-                    inline=False
-                )
-            # Show achievement boost if applicable
-            if extra_from_achievement > 0:
-                achievement_percent = (achievement_multiplier - 1.0) * 100
-                embed.add_field(
-                    name="🏆 Achievement Boost",
-                    value=f"+{achievement_percent:.1f}% - **+${extra_from_achievement:.2f}**",
-                    inline=False
-                )
-            if extra_from_daily > 0:
-                daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
-                embed.add_field(
-                    name="💧 Water Streak Boost",
-                    value=f"+{daily_bonus_percent:.1f}% - **+${extra_from_daily:.2f}**",
-                    inline=False
-                )
-            # Show rank perma buff if applicable (only if not PINE I) - multiplicative on subtotal
-            bloom_rank = get_bloom_rank(user_id)
-            if bloom_rank != "PINE I" and extra_from_rank > 0:
-                embed.add_field(
-                    name="⭐ Rank Boost",
-                    value=f"{rank_perma_buff_multiplier:.2f}x - **+${extra_from_rank:.2f}**",
-                    inline=False
-                )
-            if extra_beta > 0:
-                embed.add_field(
-                    name="🧪 Beta Tester!",
-                    value=f"{BETA_TESTER_MONEY_MULTIPLIER:.2f}x - **+${extra_beta:.2f}**",
-                    inline=False
-                )
-            if extra_booster > 0:
-                embed.add_field(
-                    name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
-                    value=f"{SERVER_BOOSTER_MONEY_MULTIPLIER:.2f}x - **+${extra_booster:.2f}**",
-                    inline=False
-                )
-            premium_tier = get_user_premium_tier(user_id)
-            if extra_premium > 0:
-                mult = PREMIUM_MONEY_MULTIPLIERS.get(premium_tier, 1.0)
-                embed.add_field(
-                    name=PREMIUM_DISPLAY.get(premium_tier, "Premium"),
-                    value=f"{mult:.2f}x - **+${extra_premium:.2f}**",
-                    inline=False
-                )
+    # Handle "all" option
+    if coin == "all":
+        # Sell all crypto holdings
+        base_sale_value = 0.0
+        sold_items: list[str] = []
+        # Track updated holdings locally to avoid an extra DB read
+        updated_holdings = {
+            "RTC": float(holdings.get("RTC", 0.0)),
+            "TER": float(holdings.get("TER", 0.0)),
+            "CNY": float(holdings.get("CNY", 0.0)),
+        }
 
-            # Item Boosts (shop / dailyshop items affecting this sale)
-            item_boost_sources = []
-            if has_shop_item(user_id, "nether_star"):
-                item_boost_sources.append("Nether Star")
-            if has_shop_item(user_id, "black_shard"):
-                item_boost_sources.append("Black Shard")
+        for crypto_coin in CRYPTO_COINS:
+            symbol = crypto_coin["symbol"]
+            user_holding = holdings.get(symbol, 0.0)
 
-            if item_boost_sources:
-                total_item_extra = extra_ns + extra_bs
-                value_parts = [f"**+${total_item_extra:.2f}**"] if total_item_extra > 0 else []
-                value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
-                embed.add_field(
-                    name="📦 Item Boost",
-                    value="\n".join(value_parts),
-                    inline=False
-                )
-            
-            embed.add_field(name="Remaining Holdings", value=f"RTC: {updated_holdings['RTC']:.4f}\nTER: {updated_holdings['TER']:.4f}\nCNY: {updated_holdings['CNY']:.4f}", inline=False)
-            embed.add_field(name="New Balance", value=f"${new_balance:.2f}", inline=False)
-            
-            await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
-            return
-        
-        # Original logic for selling a specific coin
-        # Check if user has any of this coin
-        user_holding = holdings.get(coin, 0.0)
-        
-        if user_holding <= 0:
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"❌ You don't have any {coin} to sell, {interaction.user.name}!",
-                ephemeral=True)
-            return
-        
-        # If amount not specified, sell all
-        if amount is None:
-            amount = user_holding
-        elif amount > user_holding:
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"❌ You only have {user_holding:.4f} {coin}, but tried to sell {amount:.4f} {coin}!",
-                ephemeral=True)
-            return
-        elif amount <= 0:
-            await safe_interaction_response(interaction, interaction.followup.send,
-                f"❌ Invalid amount! Please sell a positive amount.",
-                ephemeral=True)
-            return
-        
-        # Calculate base sale value
-        # Get base price for the coin
-        coin_info = next((c for c in CRYPTO_COINS if c["symbol"] == coin), None)
-        coin_base_price = coin_info["base_price"] if coin_info else 855.0
-        coin_price = prices.get(coin, coin_base_price)
-        base_sale_value = amount * coin_price
-        if has_shop_item(user_id, "cryptobro_shadow"):
-            base_sale_value *= 1.50
-        
+            if user_holding > 0:
+                coin_base_price = crypto_coin["base_price"]
+                coin_price = prices.get(symbol, coin_base_price)
+                sale_value = user_holding * coin_price
+                base_sale_value += sale_value
+
+                # Update holdings in DB (subtract) and locally
+                update_user_crypto_holdings(user_id, symbol, -user_holding)
+                updated_holdings[symbol] = updated_holdings.get(symbol, 0.0) - user_holding
+
+                sold_items.append(f"{symbol}: {user_holding:.4f} (${sale_value:.2f})")
+
+        if base_sale_value == 0:
+            return {
+                "error": f"❌ You don't have any cryptocurrency to sell, {member_name}!",
+                "ephemeral": True,
+            }
+
         # Apply boosts to sale value (additive from base, then rank multiplies subtotal)
         bloom_multiplier = get_bloom_multiplier(user_id)
         water_multiplier = get_water_multiplier(user_id)
         rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
         achievement_multiplier = get_achievement_multiplier(user_id)
         daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
-        
+
         # Calculate additive boosts from base
         extra_from_bloom = base_sale_value * (bloom_multiplier - 1.0)
         extra_from_water = base_sale_value * (water_multiplier - 1.0)
         extra_from_achievement = base_sale_value * (achievement_multiplier - 1.0)
         extra_from_daily = base_sale_value * (daily_bonus_multiplier - 1.0)
-        
+
         # Subtotal before rank
         subtotal = base_sale_value + extra_from_bloom + extra_from_water + extra_from_achievement + extra_from_daily
         # Rank is multiplicative on subtotal
@@ -17430,25 +17359,21 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
         extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
         extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
         extra_msi = base_for_buffs * 0.20 if has_shop_item(user_id, "msi_afterburner") else 0.0
-        sale_value = base_for_buffs + extra_beta + extra_booster + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi
-        # Update holdings (subtract)
-        update_user_crypto_holdings(user_id, coin, -amount)
-        
+        total_sale_value = base_for_buffs + extra_beta + extra_booster + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi
+
         # Add money to balance (with boosts)
         current_balance = get_user_balance(user_id)
-        new_balance = current_balance + sale_value
+        new_balance = current_balance + total_sale_value
         update_user_balance(user_id, new_balance)
-        
-        # Get updated holdings
-        updated_holdings = get_user_crypto_holdings(user_id)
-        
+
         # Create success embed
         embed = discord.Embed(
             title="💰 Sale Successful!",
-            description=f"You sold **{amount:.4f} {coin}** for **${sale_value:.2f}**!",
-            color=discord.Color.green()
+            description=f"You sold all your cryptocurrency for **${total_sale_value:.2f}**!",
+            color=discord.Color.green(),
         )
-        
+        embed.add_field(name="Sold", value="\n".join(sold_items) if sold_items else "None", inline=False)
+
         # Show boosts if applicable
         bloom_count = get_user_bloom_count(user_id)
         if bloom_count > 0 and extra_from_bloom > 0:
@@ -17456,7 +17381,7 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             embed.add_field(
                 name="<:TreeRing:1474244868288282817> Tree Ring Boost",
                 value=f"+{multiplier_percent:.1f}% - **+${extra_from_bloom:.2f}**",
-                inline=False
+                inline=False,
             )
         # Show achievement boost if applicable
         if extra_from_achievement > 0:
@@ -17464,50 +17389,54 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             embed.add_field(
                 name="🏆 Achievement Boost",
                 value=f"+{achievement_percent:.1f}% - **+${extra_from_achievement:.2f}**",
-                inline=False
+                inline=False,
             )
         if extra_from_daily > 0:
             daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
             embed.add_field(
                 name="💧 Water Streak Boost",
                 value=f"+{daily_bonus_percent:.1f}% - **+${extra_from_daily:.2f}**",
-                inline=False
+                inline=False,
             )
         # Show rank perma buff if applicable (only if not PINE I) - multiplicative on subtotal
         bloom_rank = get_bloom_rank(user_id)
         if bloom_rank != "PINE I" and extra_from_rank > 0:
+            rank_percent = (rank_perma_buff_multiplier - 1.0) * 100
             embed.add_field(
                 name="⭐ Rank Boost",
-                value=f"{rank_perma_buff_multiplier:.2f}x - **+${extra_from_rank:.2f}**",
-                inline=False
+                value=f"+{rank_percent:.1f}% - **+${extra_from_rank:.2f}**",
+                inline=False,
             )
         if extra_beta > 0:
+            beta_percent = (beta_mult - 1.0) * 100
             embed.add_field(
                 name="🧪 Beta Tester!",
-                value=f"{BETA_TESTER_MONEY_MULTIPLIER:.2f}x - **+${extra_beta:.2f}**",
-                inline=False
+                value=f"+{beta_percent:.1f}% - **+${extra_beta:.2f}**",
+                inline=False,
             )
         if extra_booster > 0:
+            booster_percent = (sb_mult - 1.0) * 100
             embed.add_field(
                 name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
-                value=f"{SERVER_BOOSTER_MONEY_MULTIPLIER:.2f}x - **+${extra_booster:.2f}**",
-                inline=False
+                value=f"+{booster_percent:.1f}% - **+${extra_booster:.2f}**",
+                inline=False,
             )
         premium_tier = get_user_premium_tier(user_id)
         if extra_premium > 0:
             mult = PREMIUM_MONEY_MULTIPLIERS.get(premium_tier, 1.0)
+            premium_percent = (mult - 1.0) * 100
             embed.add_field(
                 name=PREMIUM_DISPLAY.get(premium_tier, "Premium"),
-                value=f"{mult:.2f}x - **+${extra_premium:.2f}**",
-                inline=False
+                value=f"+{premium_percent:.1f}% - **+${extra_premium:.2f}**",
+                inline=False,
             )
+
         # Item Boosts (shop / dailyshop items affecting this sale)
-        item_boost_sources = []
-        if has_shop_item(user_id, "cryptobro_shadow"):
-            item_boost_sources.append("Cryptobro's Shadow")
-        if has_shop_item(user_id, "nether_star"):
+        item_boost_sources: list[str] = []
+        # Reuse multipliers instead of re-querying inventory
+        if nether_mult > 1.0:
             item_boost_sources.append("Nether Star")
-        if has_shop_item(user_id, "black_shard"):
+        if black_shard_mult > 1.0:
             item_boost_sources.append("Black Shard")
 
         if item_boost_sources:
@@ -17517,16 +17446,229 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             embed.add_field(
                 name="📦 Item Boost",
                 value="\n".join(value_parts),
-                inline=False
+                inline=False,
             )
-        
-        embed.add_field(name="Remaining Holdings", value=f"RTC: {updated_holdings['RTC']:.4f}\nTER: {updated_holdings['TER']:.4f}\nCNY: {updated_holdings['CNY']:.4f}", inline=False)
+
+        embed.add_field(
+            name="Remaining Holdings",
+            value=f"RTC: {updated_holdings['RTC']:.4f}\nTER: {updated_holdings['TER']:.4f}\nCNY: {updated_holdings['CNY']:.4f}",
+            inline=False,
+        )
         embed.add_field(name="New Balance", value=f"${new_balance:.2f}", inline=False)
-        
+
+        return {"embed": embed}
+
+    # --- Selling a specific coin ---
+    user_holding = holdings.get(coin, 0.0)
+
+    if user_holding <= 0:
+        return {
+            "error": f"❌ You don't have any {coin} to sell, {member_name}!",
+            "ephemeral": True,
+        }
+
+    # If amount not specified, sell all
+    if amount is None:
+        amount = user_holding
+    elif amount > user_holding:
+        return {
+            "error": f"❌ You only have {user_holding:.4f} {coin}, but tried to sell {amount:.4f} {coin}!",
+            "ephemeral": True,
+        }
+    elif amount <= 0:
+        return {
+            "error": "❌ Invalid amount! Please sell a positive amount.",
+            "ephemeral": True,
+        }
+
+    # Calculate base sale value
+    # Get base price for the coin
+    coin_info = next((c for c in CRYPTO_COINS if c["symbol"] == coin), None)
+    coin_base_price = coin_info["base_price"] if coin_info else 855.0
+    coin_price = prices.get(coin, coin_base_price)
+    base_sale_value = amount * coin_price
+    if has_shop_item(user_id, "cryptobro_shadow"):
+        base_sale_value *= 1.50
+
+    # Apply boosts to sale value (additive from base, then rank multiplies subtotal)
+    bloom_multiplier = get_bloom_multiplier(user_id)
+    water_multiplier = get_water_multiplier(user_id)
+    rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id)
+    achievement_multiplier = get_achievement_multiplier(user_id)
+    daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
+
+    # Calculate additive boosts from base
+    extra_from_bloom = base_sale_value * (bloom_multiplier - 1.0)
+    extra_from_water = base_sale_value * (water_multiplier - 1.0)
+    extra_from_achievement = base_sale_value * (achievement_multiplier - 1.0)
+    extra_from_daily = base_sale_value * (daily_bonus_multiplier - 1.0)
+
+    # Subtotal before rank
+    subtotal = base_sale_value + extra_from_bloom + extra_from_water + extra_from_achievement + extra_from_daily
+    # Rank is multiplicative on subtotal
+    extra_from_rank = subtotal * (rank_perma_buff_multiplier - 1.0)
+    # All money buffs below apply to the SAME base value (additive stacking)
+    base_for_buffs = float(subtotal + extra_from_rank)
+    beta_mult = get_beta_tester_money_multiplier(user_id)
+    sb_mult = get_server_booster_money_multiplier(user_id)
+    prem_mult = get_premium_tier_money_multiplier(user_id)
+    nether_mult = get_nether_star_money_multiplier(user_id)
+    black_shard_mult = get_black_shard_money_multiplier(user_id)
+    shadow_crystal_mult = get_shadow_crystal_money_multiplier(user_id)
+    edward_mult = get_edward_splash_money_multiplier(user_id)
+    eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
+    extra_beta = base_for_buffs * (beta_mult - 1.0) if beta_mult > 1.0 else 0.0
+    extra_booster = base_for_buffs * (sb_mult - 1.0) if sb_mult > 1.0 else 0.0
+    extra_premium = base_for_buffs * (prem_mult - 1.0) if prem_mult > 1.0 else 0.0
+    extra_ns = base_for_buffs * (nether_mult - 1.0) if nether_mult > 1.0 else 0.0
+    extra_bs = base_for_buffs * (black_shard_mult - 1.0) if black_shard_mult > 1.0 else 0.0
+    extra_sc = base_for_buffs * (shadow_crystal_mult - 1.0) if shadow_crystal_mult > 1.0 else 0.0
+    extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
+    extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
+    extra_msi = base_for_buffs * 0.20 if has_shop_item(user_id, "msi_afterburner") else 0.0
+    sale_value = base_for_buffs + extra_beta + extra_booster + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi
+
+    # Update holdings (subtract) in DB and locally
+    update_user_crypto_holdings(user_id, coin, -amount)
+    updated_holdings = {
+        "RTC": float(holdings.get("RTC", 0.0)),
+        "TER": float(holdings.get("TER", 0.0)),
+        "CNY": float(holdings.get("CNY", 0.0)),
+    }
+    updated_holdings[coin] = updated_holdings.get(coin, 0.0) - float(amount)
+
+    # Add money to balance (with boosts)
+    current_balance = get_user_balance(user_id)
+    new_balance = current_balance + sale_value
+    update_user_balance(user_id, new_balance)
+
+    # Create success embed
+    embed = discord.Embed(
+        title="💰 Sale Successful!",
+        description=f"You sold **{amount:.4f} {coin}** for **${sale_value:.2f}**!",
+        color=discord.Color.green(),
+    )
+
+    # Show boosts if applicable
+    bloom_count = get_user_bloom_count(user_id)
+    if bloom_count > 0 and extra_from_bloom > 0:
+        multiplier_percent = (bloom_multiplier - 1.0) * 100
+        embed.add_field(
+            name="<:TreeRing:1474244868288282817> Tree Ring Boost",
+            value=f"+{multiplier_percent:.1f}% - **+${extra_from_bloom:.2f}**",
+            inline=False,
+        )
+    # Show achievement boost if applicable
+    if extra_from_achievement > 0:
+        achievement_percent = (achievement_multiplier - 1.0) * 100
+        embed.add_field(
+            name="🏆 Achievement Boost",
+            value=f"+{achievement_percent:.1f}% - **+${extra_from_achievement:.2f}**",
+            inline=False,
+        )
+    if extra_from_daily > 0:
+        daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
+        embed.add_field(
+            name="💧 Water Streak Boost",
+            value=f"+{daily_bonus_percent:.1f}% - **+${extra_from_daily:.2f}**",
+            inline=False,
+        )
+    # Show rank perma buff if applicable (only if not PINE I) - multiplicative on subtotal
+    bloom_rank = get_bloom_rank(user_id)
+    if bloom_rank != "PINE I" and extra_from_rank > 0:
+        rank_percent = (rank_perma_buff_multiplier - 1.0) * 100
+        embed.add_field(
+            name="⭐ Rank Boost",
+            value=f"+{rank_percent:.1f}% - **+${extra_from_rank:.2f}**",
+            inline=False,
+        )
+    if extra_beta > 0:
+        beta_percent = (beta_mult - 1.0) * 100
+        embed.add_field(
+            name="🧪 Beta Tester!",
+            value=f"+{beta_percent:.1f}% - **+${extra_beta:.2f}**",
+            inline=False,
+        )
+    if extra_booster > 0:
+        booster_percent = (sb_mult - 1.0) * 100
+        embed.add_field(
+            name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
+            value=f"+{booster_percent:.1f}% - **+${extra_booster:.2f}**",
+            inline=False,
+        )
+    premium_tier = get_user_premium_tier(user_id)
+    if extra_premium > 0:
+        mult = PREMIUM_MONEY_MULTIPLIERS.get(premium_tier, 1.0)
+        premium_percent = (mult - 1.0) * 100
+        embed.add_field(
+            name=PREMIUM_DISPLAY.get(premium_tier, "Premium"),
+            value=f"+{premium_percent:.1f}% - **+${extra_premium:.2f}**",
+            inline=False,
+        )
+    # Item Boosts (shop / dailyshop items affecting this sale)
+    item_boost_sources: list[str] = []
+    if has_shop_item(user_id, "cryptobro_shadow"):
+        item_boost_sources.append("Cryptobro's Shadow")
+    # Reuse multipliers for inventory-backed items
+    if nether_mult > 1.0:
+        item_boost_sources.append("Nether Star")
+    if black_shard_mult > 1.0:
+        item_boost_sources.append("Black Shard")
+
+    if item_boost_sources:
+        total_item_extra = extra_ns + extra_bs
+        value_parts = [f"**+${total_item_extra:.2f}**"] if total_item_extra > 0 else []
+        value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
+        embed.add_field(
+            name="📦 Item Boost",
+            value="\n".join(value_parts),
+            inline=False,
+        )
+
+    embed.add_field(
+        name="Remaining Holdings",
+        value=f"RTC: {updated_holdings['RTC']:.4f}\nTER: {updated_holdings['TER']:.4f}\nCNY: {updated_holdings['CNY']:.4f}",
+        inline=False,
+    )
+    embed.add_field(name="New Balance", value=f"${new_balance:.2f}", inline=False)
+
+    return {"embed": embed}
+
+
+@bot.tree.command(name="sell", description="Sell your cryptocurrency holdings")
+@app_commands.choices(coin=[
+    app_commands.Choice(name="RootCoin (RTC)", value="RTC"),
+    app_commands.Choice(name="Terrarium (TER)", value="TER"),
+    app_commands.Choice(name="Canopy (CNY)", value="CNY"),
+    app_commands.Choice(name="All", value="all"),
+])
+async def sell(interaction: discord.Interaction, coin: str, amount: float = None):
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        user_id = interaction.user.id
+        result = await asyncio.to_thread(_sell_critical_path, interaction.user, user_id, coin, amount)
+
+        if result.get("error"):
+            await safe_interaction_response(
+                interaction,
+                interaction.followup.send,
+                result["error"],
+                ephemeral=bool(result.get("ephemeral", True)),
+            )
+            return
+
+        embed: discord.Embed = result["embed"]
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
     except Exception as e:
         print(f"Error in sell command: {e}")
-        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+        await safe_interaction_response(
+            interaction,
+            interaction.followup.send,
+            "❌ An error occurred. Please try again.",
+            ephemeral=True,
+        )
 
 
 @bot.tree.command(name="portfolio", description="View your cryptocurrency and stock portfolio")
