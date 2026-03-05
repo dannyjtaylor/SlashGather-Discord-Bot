@@ -3249,8 +3249,38 @@ PREMIUM_WATER_BASE_AMOUNTS = {
     3: 100000.0,
     4: 500000.0,
 }
-# Premium gardener IDs (virtual): 6=Seed, 7=Sprout, 8=Sapling, 9=Evergreen. Chances mirror slots 1-4.
-PREMIUM_GARDENER_CHANCES = {6: 0.05, 7: 0.08, 8: 0.10, 9: 0.20}
+# Premium gardener IDs (virtual): 6=Seed, 7=Sprout, 8=Sapling, 9=Evergreen.
+# Auto-gather chances (per minute): Seed=22.5%, Sprout=35%, Sapling=50%, Evergreen=75%.
+PREMIUM_GARDENER_CHANCES = {
+    6: 0.225,  # Seed
+    7: 0.35,   # Sprout
+    8: 0.50,   # Sapling
+    9: 0.75,   # Evergreen
+}
+# Auto-harvest chances (conditional on triggering an action): Seed=10%, Sprout=15%, Sapling=20%, Evergreen=35%.
+PREMIUM_GARDENER_HARVEST_CHANCES = {
+    6: 0.10,  # Seed
+    7: 0.15,  # Sprout
+    8: 0.20,  # Sapling
+    9: 0.35,  # Evergreen
+}
+
+# Premium gardener embed colors
+# Auto-gather: 4 shades of blue (lighter -> darker for cheaper -> more expensive)
+PREMIUM_GARDENER_GATHER_COLORS = {
+    6: discord.Color(0xA5D8FF),  # Seed - light blue
+    7: discord.Color(0x74C0FC),  # Sprout - medium-light blue
+    8: discord.Color(0x339AF0),  # Sapling - medium blue
+    9: discord.Color(0x1864AB),  # Evergreen - dark blue
+}
+
+# Auto-harvest: 4 shades of orange (lighter -> darker for cheaper -> more expensive)
+PREMIUM_GARDENER_HARVEST_COLORS = {
+    6: discord.Color(0xFFE8CC),  # Seed - light orange
+    7: discord.Color(0xFFC078),  # Sprout - medium-light orange
+    8: discord.Color(0xFF922B),  # Sapling - medium orange
+    9: discord.Color(0xE8590C),  # Evergreen - dark orange
+}
 
 
 def get_premium_tier_from_member(member: discord.Member | None) -> int:
@@ -7076,12 +7106,22 @@ async def on_member_join(member):
 
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    """Sync server booster status when a member boosts or unboosts the server."""
+    """Sync server booster and premium tier when a member boosts or their roles change."""
+    # Sync server booster flag when Nitro boosting starts/stops
     if before.premium_since != after.premium_since:
         try:
             set_user_server_booster(after.id, after.premium_since is not None)
         except Exception as e:
             print(f"[Server Booster] Error syncing booster status for {after.id}: {e}")
+
+    # Sync premium tier cache whenever roles change so premium gardeners unlock from roles alone
+    before_role_ids = {r.id for r in before.roles}
+    after_role_ids = {r.id for r in after.roles}
+    if before_role_ids != after_role_ids:
+        try:
+            await asyncio.to_thread(sync_premium_tier_from_member, after)
+        except Exception as e:
+            print(f"[Premium] Error syncing premium tier for {after.id}: {e}")
 
 
 @bot.event
@@ -12416,25 +12456,21 @@ class HireView(discord.ui.View):
             tier_name = PREMIUM_ROLE_NAMES[slot_id - 6]  # Seed, Sprout, Sapling, Evergreen
             tier_label = tier_name.upper()
             chance = PREMIUM_GARDENER_CHANCES.get(slot_id, 0.05) * 100
-            # Harvest auto-upgrade chance is based on owned gardener tools (same logic as background task)
-            gardeners = get_user_gardeners(self.user_id)
-            harvest_chance = sum(
-                GARDENER_TOOLS.get(g["id"], {}).get("chance", 0)
-                for g in gardeners
-                if g.get("has_tool") and g.get("id", 0) <= 5
-            )
+            # Premium gardeners use fixed auto-harvest chances by tier
+            harvest_chance = PREMIUM_GARDENER_HARVEST_CHANCES.get(slot_id, 0.0)
             harvest_chance_pct = max(0.0, min(100.0, harvest_chance * 100))
+            color = PREMIUM_GARDENER_GATHER_COLORS.get(slot_id, discord.Color.blue())
             embed = discord.Embed(
                 title=f"🪴 {tier_label} RANK GARDENER",
                 description=(
                     f"This gardener has a **{chance:.0f}%** chance to /gather every minute, "
                     f"and a **{harvest_chance_pct:.0f}%** chance to auto-harvest!"
                 ),
-                color=discord.Color.dark_green()
+                color=color
             )
             embed.add_field(name="Status", value="**HIRED** ✅", inline=False)
-            embed.add_field(name="Plants Gathered", value="**N/A (Premium)**", inline=True)
-            embed.add_field(name="Total Money Earned", value="**N/A (Premium)**", inline=True)
+            embed.add_field(name="Plants Gathered", value="**N/A**", inline=True)
+            embed.add_field(name="Total Money Earned", value="**N/A**", inline=True)
             embed.set_footer(text=f"Page {page + 1} of {self.total_pages}")
             return embed
         # Regular gardener 1-5
@@ -12501,10 +12537,10 @@ class HireView(discord.ui.View):
         # Secret Gardener page (last page)
         if slot_id is None:
             self.hire_button.disabled = True
-            self.hire_button.label = "Invite Reward Only"
+            self.hire_button.label = "INVITE REWARD ONLY"
             self.hire_button.style = discord.ButtonStyle.secondary
             self.buy_tool_button.disabled = True
-            self.buy_tool_button.label = "Invite Reward Only"
+            self.buy_tool_button.label = "INVITE REWARD ONLY"
             self.buy_tool_button.style = discord.ButtonStyle.secondary
             return
 
@@ -15827,7 +15863,12 @@ async def gardener_background_task():
                                 for g in gardeners
                                 if g.get("has_tool") and g.get("id", 0) <= 5
                             )
-                            upgraded_to_harvest = total_harvest_upgrade_chance > 0 and random.random() < total_harvest_upgrade_chance
+                            if is_premium_gardener:
+                                base_harvest_chance = PREMIUM_GARDENER_HARVEST_CHANCES.get(gardener_id, 0.0)
+                                effective_harvest_chance = min(1.0, base_harvest_chance + total_harvest_upgrade_chance)
+                                upgraded_to_harvest = effective_harvest_chance > 0 and random.random() < effective_harvest_chance
+                            else:
+                                upgraded_to_harvest = total_harvest_upgrade_chance > 0 and random.random() < total_harvest_upgrade_chance
                             
                             if upgraded_to_harvest:
                                 # Perform full harvest instead of single gather (orchard upgrades apply; no chain)
@@ -15848,10 +15889,11 @@ async def gardener_background_task():
                                         if lawn_channel and lawn_channel.permissions_for(guild.me).send_messages:
                                             try:
                                                 mention = member.mention
+                                                harvest_color = PREMIUM_GARDENER_HARVEST_COLORS.get(gardener_id, discord.Color.gold()) if is_premium_gardener else discord.Color.gold()
                                                 embed = discord.Embed(
                                                     title="🌾✨ GATHER UPGRADED TO HARVEST! ✨🌾",
                                                     description=f"{mention}, **the gardener's tool sparked!**",
-                                                    color=discord.Color.gold()
+                                                    color=harvest_color
                                                 )
                                                 
                                                 lines = []
@@ -15900,10 +15942,11 @@ async def gardener_background_task():
                                                 if lawn_channel.permissions_for(guild.me).send_messages:
                                                     rip_em = get_ripeness_imbue_emoji(gather_result.get("ripeness", ""))
                                                     desc_prefix = f"{rip_em} " if rip_em else ""
+                                                    gather_color = PREMIUM_GARDENER_GATHER_COLORS.get(gardener_id, discord.Color.green()) if is_premium_gardener else discord.Color.green()
                                                     embed = discord.Embed(
                                                         title=f"🌿 {user_name}'s Gardener gathered!",
                                                         description=f"{desc_prefix}Their gardener found a **{gather_result['name']}**!",
-                                                        color=discord.Color.green()
+                                                        color=gather_color
                                                     )
                                                     embed.add_field(name="Value", value=f"**${gather_result['base_value']:.2f}**", inline=True)
                                                     embed.add_field(name="Ripeness", value=f"{rip_em} {gather_result['ripeness']}".strip(), inline=True)
