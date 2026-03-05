@@ -9548,6 +9548,8 @@ async def cooldowns(interaction: discord.Interaction):
     try:
         if not await safe_defer(interaction, ephemeral=True):
             return
+        # Sync premium tier from Discord roles so reductions reflect current Seed/Sprout/Sapling/Evergreen rank
+        await asyncio.to_thread(sync_premium_tier_from_member, interaction.user)
         user_id = interaction.user.id
         data = await asyncio.to_thread(_cooldowns_data_sync, user_id)
         death_seconds = data["death"]
@@ -12412,13 +12414,27 @@ class HireView(discord.ui.View):
             if slot_id > 5 + tier:
                 return self._create_secret_gardener_embed()  # shouldn't happen
             tier_name = PREMIUM_ROLE_NAMES[slot_id - 6]  # Seed, Sprout, Sapling, Evergreen
+            tier_label = tier_name.upper()
             chance = PREMIUM_GARDENER_CHANCES.get(slot_id, 0.05) * 100
-            embed = discord.Embed(
-                title=f"🪴 {tier_name} Gardener",
-                description=f"Included with your **{tier_name}** premium tier! This gardener has a **{chance:.0f}%** chance to /gather every minute.",
-                color=discord.Color.green()
+            # Harvest auto-upgrade chance is based on owned gardener tools (same logic as background task)
+            gardeners = get_user_gardeners(self.user_id)
+            harvest_chance = sum(
+                GARDENER_TOOLS.get(g["id"], {}).get("chance", 0)
+                for g in gardeners
+                if g.get("has_tool") and g.get("id", 0) <= 5
             )
-            embed.add_field(name="Status", value="**ACTIVE** ✅ (Premium)", inline=False)
+            harvest_chance_pct = max(0.0, min(100.0, harvest_chance * 100))
+            embed = discord.Embed(
+                title=f"🪴 {tier_label} RANK GARDENER",
+                description=(
+                    f"This gardener has a **{chance:.0f}%** chance to /gather every minute, "
+                    f"and a **{harvest_chance_pct:.0f}%** chance to auto-harvest!"
+                ),
+                color=discord.Color.dark_green()
+            )
+            embed.add_field(name="Status", value="**HIRED** ✅", inline=False)
+            embed.add_field(name="Plants Gathered", value="**N/A (Premium)**", inline=True)
+            embed.add_field(name="Total Money Earned", value="**N/A (Premium)**", inline=True)
             embed.set_footer(text=f"Page {page + 1} of {self.total_pages}")
             return embed
         # Regular gardener 1-5
@@ -12488,18 +12504,19 @@ class HireView(discord.ui.View):
             self.hire_button.label = "Invite Reward Only"
             self.hire_button.style = discord.ButtonStyle.secondary
             self.buy_tool_button.disabled = True
-            self.buy_tool_button.label = "No Tool Needed"
+            self.buy_tool_button.label = "Invite Reward Only"
             self.buy_tool_button.style = discord.ButtonStyle.secondary
             return
 
         # Premium gardener page (slot 6-9): no hire, no tool
         if slot_id >= 6:
             tier_name = PREMIUM_ROLE_NAMES[slot_id - 6]
+            tier_label = tier_name.upper()
             self.hire_button.disabled = True
-            self.hire_button.label = f"Included with {tier_name}"
+            self.hire_button.label = f"REQUIRES {tier_label}"
             self.hire_button.style = discord.ButtonStyle.secondary
             self.buy_tool_button.disabled = True
-            self.buy_tool_button.label = "—"
+            self.buy_tool_button.label = f"REQUIRES {tier_label}"
             self.buy_tool_button.style = discord.ButtonStyle.secondary
             return
 
@@ -15804,13 +15821,13 @@ async def gardener_background_task():
                     gardener_chance = PREMIUM_GARDENER_CHANCES.get(gardener_id) if is_premium_gardener else GARDENER_CHANCES.get(gardener_id, 0.05)
                     if random.random() < gardener_chance:
                         try:
-                            # Stacked tool chance: any regular gardener (1-5) with a tool can trigger harvest upgrade; premium gardeners (6-9) never upgrade to harvest
+                            # Stacked tool chance: any regular gardener (1-5) with a tool can trigger a harvest upgrade; premium gardeners (6-9) also benefit from this
                             total_harvest_upgrade_chance = sum(
                                 GARDENER_TOOLS.get(g["id"], {}).get("chance", 0)
                                 for g in gardeners
                                 if g.get("has_tool") and g.get("id", 0) <= 5
                             )
-                            upgraded_to_harvest = not is_premium_gardener and total_harvest_upgrade_chance > 0 and random.random() < total_harvest_upgrade_chance
+                            upgraded_to_harvest = total_harvest_upgrade_chance > 0 and random.random() < total_harvest_upgrade_chance
                             
                             if upgraded_to_harvest:
                                 # Perform full harvest instead of single gather (orchard upgrades apply; no chain)
