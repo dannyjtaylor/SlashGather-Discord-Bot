@@ -4330,14 +4330,14 @@ HOURLY_EVENTS = [
         "name": "May Flowers!",
         "emoji": "🌸",
         "description": "Flowers are blooming everywhere!",
-        "effect": "Flower gather chance +60%, flower prices x3"
+        "effect": "Flower gather chance +60%, flower prices +200%"
     },
     {
         "id": "bumper_crop",
         "name": "Nature's Blessing!",
         "emoji": "🌾",
         "description": "The spirits favor you! All items are worth double!",
-        "effect": "All item values x2"
+        "effect": "All item values +100%"
     },
     {
         "id": "speed_harvest",
@@ -4358,14 +4358,14 @@ HOURLY_EVENTS = [
         "name": "Sweet Surge!",
         "emoji": "🍎",
         "description": "The fruits are flourishing! Fruits are now more common!",
-        "effect": "Fruit gather chance +50%, fruit prices x2"
+        "effect": "Fruit gather chance +50%, fruit prices +100%"
     },
     {
         "id": "vegetable_boom",
         "name": "Earth's Bounty!",
         "emoji": "🥕",
         "description": "Vegetables are thriving in the earth! Vegetables are more common!",
-        "effect": "Vegetable gather chance +50%, vegetable prices x2"
+        "effect": "Vegetable gather chance +50%, vegetable prices +100%"
     },
     {
         "id": "chain_reaction",
@@ -4395,8 +4395,8 @@ DAILY_EVENTS = [
         "id": "double_money",
         "name": "Gold Rush!",
         "emoji": "💰",
-        "description": "The California sun calls you! All money 1.5x for this day!",
-        "effect": "All earnings x1.5 for 24 hours"
+        "description": "The California sun calls you! All money +50% for this day!",
+        "effect": "All earnings +50% for 24 hours"
     },
     {
         "id": "speed_day",
@@ -8179,12 +8179,12 @@ class NetherStarClaimView(discord.ui.View):
         embed = interaction.message.embeds[0].copy() if interaction.message.embeds else discord.Embed(title="Wither Defeated", color=discord.Color.gold())
         count_display = f" (x{dayboost_count})" if dayboost_count > 1 else ""
         embed.add_field(name=f"{NETHER_STAR_EMOJI} Nether Star{count_display}", value=f"**Claimed by {interaction.user.mention}!**", inline=False)
-        embed.set_footer(text=f"1.15x all Money dayboost active for 24 hours!{count_display}")
+        embed.set_footer(text=f"+15% all Money dayboost active for 24 hours!{count_display}")
         await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
         if interaction.guild:
             asyncio.create_task(_post_rares_nether_star_claim(interaction.guild, interaction.user))
         await interaction.followup.send(
-            f"{NETHER_STAR_EMOJI} You claimed the **Nether Star**! You now have a **1.15x all Money dayboost for 24 hours**!{count_display}",
+            f"{NETHER_STAR_EMOJI} You claimed the **Nether Star**! You now have a **+15% all Money dayboost for 24 hours**!{count_display}",
             ephemeral=True)
 
 
@@ -8214,12 +8214,12 @@ class BlackShardClaimView(discord.ui.View):
         embed = interaction.message.embeds[0].copy() if interaction.message.embeds else discord.Embed(title="The Roaring Knight Defeated", color=discord.Color.gold())
         count_display = f" (x{dayboost_count})" if dayboost_count > 1 else ""
         embed.add_field(name=f"{BLACK_SHARD_EMOJI} Black Shard{count_display}", value=f"**Claimed by {interaction.user.mention}!**", inline=False)
-        embed.set_footer(text=f"1.2x all Money dayboost active for 24 hours!{count_display}")
+        embed.set_footer(text=f"+20% all Money dayboost active for 24 hours!{count_display}")
         await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
         if interaction.guild:
             asyncio.create_task(_post_rares_black_shard_claim(interaction.guild, interaction.user))
         await interaction.followup.send(
-            f"{BLACK_SHARD_EMOJI} You claimed the **Black Shard**! You now have a **1.2x all Money dayboost for 24 hours**!{count_display}",
+            f"{BLACK_SHARD_EMOJI} You claimed the **Black Shard**! You now have a **+20% all Money dayboost for 24 hours**!{count_display}",
             ephemeral=True)
 
 
@@ -8382,7 +8382,7 @@ class SansView(discord.ui.View):
         empty = 20 - filled
         return f"{'🟥' * filled}{'⬛' * empty}"
 
-    @discord.ui.button(label=f"{SOUL_EMOJI} FIGHT", style=discord.ButtonStyle.danger, custom_id="sans_fight", row=0)
+    @discord.ui.button(label="FIGHT", emoji=SOUL_EMOJI_PARTIAL, style=discord.ButtonStyle.danger, custom_id="sans_fight", row=0)
     async def fight(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await safe_defer(interaction, ephemeral=False):
             return
@@ -8412,18 +8412,20 @@ class SansView(discord.ui.View):
                     description=self.boss["defeat_msg"],
                     color=discord.Color.gold())
                 victory_embed.add_field(name="HP", value=f"**0** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
-                display_attackers = _pve_cap_damage_by_hp(self.attackers, self.max_hp)
+                # For Sans, show attempts instead of damage (since he dodges everything)
                 participants_lines = []
-                for uid, dmg in sorted(display_attackers.items(), key=lambda x: -x[1]):
+                for uid, attempts in sorted(self.attack_attempts.items(), key=lambda x: -x[1]):
                     member = interaction.guild.get_member(uid)
                     name = member.display_name if member else f"User {uid}"
-                    participants_lines.append(f"**{name}** — {dmg} damage")
+                    attempted_dmg = self.attackers.get(uid, 0)
+                    participants_lines.append(f"**{name}** — {attempts} attempt{'s' if attempts != 1 else ''} ({attempted_dmg} attempted damage)")
                 victory_embed.add_field(name="🏆 Contributors", value="\n".join(participants_lines) or "No participants", inline=False)
                 victory_embed.set_footer(text="Rewards are being distributed…")
                 await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
 
                 # Accumulate for deferred rewards
-                _pve_boss_defeated_pending.setdefault(self.guild_id, []).append((self.boss, dict(self.attackers), self.max_hp))
+                # For Sans, pass None as max_hp so rewards aren't capped (he dodges but we still reward attempts)
+                _pve_boss_defeated_pending.setdefault(self.guild_id, []).append((self.boss, dict(self.attackers), None))
                 boss_list = active_boss_events.get(self.guild_id, [])
                 if self.boss_state_ref in boss_list:
                     boss_list = [e for e in boss_list if e is not self.boss_state_ref]
@@ -8453,18 +8455,20 @@ class SansView(discord.ui.View):
                                     await ch.send(embed=broadcast_embed)
                             except Exception as e:
                                 print(f"Boss defeat broadcast failed in {ch.name}: {e}")
+                        # For Sans, pass None as max_hp so rewards aren't capped
                         asyncio.create_task(_pve_distribute_rewards(
                             interaction, boss, dict(self.attackers), self.channel_id, self.area_multiplier,
-                            achievements_ephemeral=False, max_hp=self.max_hp))
+                            achievements_ephemeral=False, max_hp=None))
                 return
 
-            # Attack "dodged" - show dodge message
+            # Attack "dodged" - show MISS message
+            # Rewards will be distributed on defeat based on all attempts (not capped)
             progress_embed = discord.Embed(
                 title=f"🚨 {self.boss['emoji']} {self.boss['name']} 🚨",
                 description=self.boss["description"],
                 color=self.boss["color"])
             progress_embed.add_field(name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
-            progress_embed.add_field(name="⚔️ Last Action", value=f"**{interaction.user.display_name}** attacked! *Sans dodged!*", inline=False)
+            progress_embed.add_field(name="⚔️ Last Action", value=f"**{interaction.user.display_name}** attacked! *MISS!*", inline=False)
             progress_embed.set_footer(text=f"All gathering channels are blocked! ({self.total_attempts}/{self.DEFEAT_THRESHOLD} attempts)")
             await safe_interaction_response(interaction, interaction.response.edit_message, embed=progress_embed, view=self)
 
@@ -10977,7 +10981,7 @@ async def bloom(interaction: discord.Interaction):
         what_bloom_does = (
             "This is a command that allows you to prestige and reset all your upgrades, money, and current plant count, "
             "but you keep lifetime progress, achievements, and Tree Rings! <:TreeRing:1474244868288282817> "
-            "Each prestige makes your Bloom Rank increase (1.2x permabuff per rank increase)."
+            "Each prestige makes your Bloom Rank increase (+20% permabuff per rank increase)."
         )
 
         can_bloom = has_planter_x and plants_needed == 0 and money_needed <= 0
@@ -11183,7 +11187,7 @@ DAILY_SHOP_ITEMS = {
         "name": "Nether Star",
         "description": "Let's make a Beacon!",
         "cost": 250,
-        "effect": "1.15x all Money",
+        "effect": "+15% all Money",
         "emoji": NETHER_STAR_EMOJI,
     },
     "zenith": {
@@ -11244,7 +11248,7 @@ DAILY_SHOP_ITEMS = {
         "name": "Palace Treasure",
         "description": "Looking cool, Joker!",
         "cost": 250,
-        "effect": "1.5x money gain, but your gathers and harvests are 5x more likely to be stealable!",
+        "effect": "+50% money gain, but your gathers and harvests are 5x more likely to be stealable!",
     },
     "bodyguard": {
         "name": "Bodyguard",
@@ -11286,7 +11290,7 @@ DAILY_SHOP_ITEMS = {
         "name": "Shadow Crystal",
         "description": "An invisible crystal that still casts a shadow, obtained from a jester, puppet, a knight, and an old man...",
         "cost": 50,
-        "effect": "1.05x Money",
+        "effect": "+5% Money",
     },
     "splash_potion_of_luck": {
         "name": "Splash Potion of Luck",
@@ -11322,7 +11326,7 @@ DAILY_SHOP_ITEMS = {
         "name": "Black Shard",
         "description": "A small chip of extremely hard glass. Oddly, it's nearly opaque.",
         "cost": 275,
-        "effect": "1.2x to Money",
+        "effect": "+20% to Money",
         "emoji": BLACK_SHARD_EMOJI,
     },
     "decoys": {
