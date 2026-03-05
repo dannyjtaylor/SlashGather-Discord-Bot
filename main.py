@@ -8384,93 +8384,100 @@ class SansView(discord.ui.View):
 
     @discord.ui.button(label="FIGHT", emoji=SOUL_EMOJI_PARTIAL, style=discord.ButtonStyle.danger, custom_id="sans_fight", row=0)
     async def fight(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await safe_defer(interaction, ephemeral=False):
-            return
-        async with self._lock:
-            if self.defeated:
+        try:
+            if not await safe_defer(interaction, ephemeral=False):
                 return
+            async with self._lock:
+                if self.defeated:
+                    return
 
-            damage = get_pve_damage_multiplier(interaction.user.id)
-            self.total_attempts += 1
-            self.attack_attempts[interaction.user.id] = self.attack_attempts.get(interaction.user.id, 0) + 1
-            # Track attempted damage for rewards (even though it "dodges")
-            self.attackers[interaction.user.id] = self.attackers.get(interaction.user.id, 0) + damage
+                damage = get_pve_damage_multiplier(interaction.user.id)
+                self.total_attempts += 1
+                self.attack_attempts[interaction.user.id] = self.attack_attempts.get(interaction.user.id, 0) + 1
+                # Track attempted damage for rewards (even though it "dodges")
+                self.attackers[interaction.user.id] = self.attackers.get(interaction.user.id, 0) + damage
 
-            # Check if defeated (after enough attempts)
-            if self.total_attempts >= self.DEFEAT_THRESHOLD:
-                self.defeated = True
-                button.disabled = True
-                button.label = "☠️ Defeated!"
-                button.style = discord.ButtonStyle.secondary
-                # Disable other buttons too
-                for child in self.children:
-                    if hasattr(child, 'disabled'):
-                        child.disabled = True
+                # Check if defeated (after enough attempts)
+                if self.total_attempts >= self.DEFEAT_THRESHOLD:
+                    self.defeated = True
+                    button.disabled = True
+                    button.label = "☠️ Defeated!"
+                    button.style = discord.ButtonStyle.secondary
+                    # Disable other buttons too
+                    for child in self.children:
+                        if hasattr(child, 'disabled'):
+                            child.disabled = True
 
-                victory_embed = discord.Embed(
-                    title=f"☠️ {self.boss['emoji']} {self.boss['name']} Defeated! ☠️",
-                    description=self.boss["defeat_msg"],
-                    color=discord.Color.gold())
-                victory_embed.add_field(name="HP", value=f"**0** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
-                # For Sans, show attempts instead of damage (since he dodges everything)
-                participants_lines = []
-                for uid, attempts in sorted(self.attack_attempts.items(), key=lambda x: -x[1]):
-                    member = interaction.guild.get_member(uid)
-                    name = member.display_name if member else f"User {uid}"
-                    attempted_dmg = self.attackers.get(uid, 0)
-                    participants_lines.append(f"**{name}** — {attempts} attempt{'s' if attempts != 1 else ''} ({attempted_dmg} attempted damage)")
-                victory_embed.add_field(name="🏆 Contributors", value="\n".join(participants_lines) or "No participants", inline=False)
-                victory_embed.set_footer(text="Rewards are being distributed…")
-                await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
+                    victory_embed = discord.Embed(
+                        title=f"☠️ {self.boss['emoji']} {self.boss['name']} Defeated! ☠️",
+                        description=self.boss["defeat_msg"],
+                        color=discord.Color.gold())
+                    victory_embed.add_field(name="HP", value=f"**0** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
+                    # For Sans, show attempts instead of damage (since he dodges everything)
+                    participants_lines = []
+                    for uid, attempts in sorted(self.attack_attempts.items(), key=lambda x: -x[1]):
+                        member = interaction.guild.get_member(uid)
+                        name = member.display_name if member else f"User {uid}"
+                        participants_lines.append(f"**{name}** — {attempts} attack{'s' if attempts != 1 else ''}")
+                    victory_embed.add_field(name="🏆 Contributors", value="\n".join(participants_lines) or "No participants", inline=False)
+                    victory_embed.set_footer(text="Rewards are being distributed…")
+                    await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
 
-                # Accumulate for deferred rewards
-                # For Sans, pass None as max_hp so rewards aren't capped (he dodges but we still reward attempts)
-                _pve_boss_defeated_pending.setdefault(self.guild_id, []).append((self.boss, dict(self.attackers), None))
-                boss_list = active_boss_events.get(self.guild_id, [])
-                if self.boss_state_ref in boss_list:
-                    boss_list = [e for e in boss_list if e is not self.boss_state_ref]
-                    if not boss_list:
-                        active_boss_events.pop(self.guild_id, None)
-                    else:
-                        active_boss_events[self.guild_id] = boss_list
+                    # Accumulate for deferred rewards
+                    # For Sans, pass None as max_hp so rewards aren't capped (he dodges but we still reward attempts)
+                    _pve_boss_defeated_pending.setdefault(self.guild_id, []).append((self.boss, dict(self.attackers), None))
+                    boss_list = active_boss_events.get(self.guild_id, [])
+                    if self.boss_state_ref in boss_list:
+                        boss_list = [e for e in boss_list if e is not self.boss_state_ref]
+                        if not boss_list:
+                            active_boss_events.pop(self.guild_id, None)
+                        else:
+                            active_boss_events[self.guild_id] = boss_list
 
-                plantera_bulb_eligible_guilds[self.guild_id] = time.time()
+                    plantera_bulb_eligible_guilds[self.guild_id] = time.time()
 
-                # Broadcast defeat to all channels
-                if self.guild_id not in active_boss_events:
-                    pending = _pve_boss_defeated_pending.pop(self.guild_id, [])
-                    guild = interaction.guild
-                    channels = _get_guild_gather_channels(guild)
-                    if len(pending) == 1:
-                        boss = pending[0][0]
-                        broadcast_desc = boss.get("server_defeat_msg", boss["defeat_msg"])
-                        broadcast_embed = discord.Embed(
-                            title=f"☠️ {boss['emoji']} {boss['name']} Defeated! ☠️",
-                            description=broadcast_desc,
-                            color=discord.Color.gold())
-                        broadcast_embed.set_footer(text="gathering channels are now unblocked")
-                        for ch in channels:
-                            try:
-                                if ch.permissions_for(guild.me).send_messages:
-                                    await ch.send(embed=broadcast_embed)
-                            except Exception as e:
-                                print(f"Boss defeat broadcast failed in {ch.name}: {e}")
-                        # For Sans, pass None as max_hp so rewards aren't capped
-                        asyncio.create_task(_pve_distribute_rewards(
-                            interaction, boss, dict(self.attackers), self.channel_id, self.area_multiplier,
-                            achievements_ephemeral=False, max_hp=None))
-                return
+                    # Broadcast defeat to all channels
+                    if self.guild_id not in active_boss_events:
+                        pending = _pve_boss_defeated_pending.pop(self.guild_id, [])
+                        guild = interaction.guild
+                        channels = _get_guild_gather_channels(guild)
+                        if len(pending) == 1:
+                            boss = pending[0][0]
+                            broadcast_desc = boss.get("server_defeat_msg", boss["defeat_msg"])
+                            broadcast_embed = discord.Embed(
+                                title=f"☠️ {boss['emoji']} {boss['name']} Defeated! ☠️",
+                                description=broadcast_desc,
+                                color=discord.Color.gold())
+                            broadcast_embed.set_footer(text="gathering channels are now unblocked")
+                            for ch in channels:
+                                try:
+                                    if ch.permissions_for(guild.me).send_messages:
+                                        await ch.send(embed=broadcast_embed)
+                                except Exception as e:
+                                    print(f"Boss defeat broadcast failed in {ch.name}: {e}")
+                            # For Sans, pass None as max_hp so rewards aren't capped
+                            asyncio.create_task(_pve_distribute_rewards(
+                                interaction, boss, dict(self.attackers), self.channel_id, self.area_multiplier,
+                                achievements_ephemeral=False, max_hp=None))
+                    return
 
-            # Attack "dodged" - show MISS message
-            # Rewards will be distributed on defeat based on all attempts (not capped)
-            progress_embed = discord.Embed(
-                title=f"🚨 {self.boss['emoji']} {self.boss['name']} 🚨",
-                description=self.boss["description"],
-                color=self.boss["color"])
-            progress_embed.add_field(name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
-            progress_embed.add_field(name="⚔️ Last Action", value=f"**{interaction.user.display_name}** attacked! *MISS!*", inline=False)
-            progress_embed.set_footer(text=f"All gathering channels are blocked! ({self.total_attempts}/{self.DEFEAT_THRESHOLD} attempts)")
-            await safe_interaction_response(interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+                # Attack "dodged" - show MISS message
+                # Rewards will be distributed on defeat based on all attempts (not capped)
+                progress_embed = discord.Embed(
+                    title=f"🚨 {self.boss['emoji']} {self.boss['name']} 🚨",
+                    description=self.boss["description"],
+                    color=self.boss["color"])
+                progress_embed.add_field(name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
+                progress_embed.add_field(name="⚔️ Last Action", value=f"**{interaction.user.display_name}** attacked! *MISS!*", inline=False)
+                progress_embed.set_footer(text=f"All gathering channels are blocked! ({self.total_attempts}/{self.DEFEAT_THRESHOLD} attempts)")
+                await safe_interaction_response(interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+        except Exception as e:
+            print(f"Error in Sans FIGHT button: {e}")
+            try:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ An error occurred. Please try again.", ephemeral=True)
+            except:
+                pass
 
     @discord.ui.button(label="ACT", style=discord.ButtonStyle.danger, custom_id="sans_act", row=0)
     async def act(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -8484,33 +8491,51 @@ class SansView(discord.ui.View):
 
     @discord.ui.button(label="MERCY", style=discord.ButtonStyle.danger, custom_id="sans_mercy", row=1)
     async def mercy(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await safe_defer(interaction, ephemeral=False):
-            return
-        async with self._lock:
-            if self.defeated:
+        try:
+            if not await safe_defer(interaction, ephemeral=False):
                 return
+            async with self._lock:
+                if self.defeated:
+                    return
 
-            user_id = interaction.user.id
-            # Set death timer: 30 minutes = 1800 seconds
-            death_end_time = time.time() + 1800
-            sans_death_timers[user_id] = death_end_time
+                user_id = interaction.user.id
+                # Set death timer: 30 minutes = 1800 seconds
+                death_end_time = time.time() + 1800
+                sans_death_timers[user_id] = death_end_time
 
-            # Create GAME OVER embed
-            game_over_embed = discord.Embed(
-                title="GAME OVER",
-                description=f"{interaction.user.mention} tried to SPARE Sans and got dunked on!",
-                color=discord.Color.red())
-            game_over_embed.set_footer(text="Stay determined...")
-            game_over_embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/1479165808147042374.webp?size=96")
+                # Create GAME OVER embed with SOUL emoji in title
+                game_over_embed = discord.Embed(
+                    title=f"{SOUL_EMOJI} GAME OVER",
+                    description=f"{interaction.user.mention} tried to SPARE Sans and got dunked on!",
+                    color=discord.Color.red())
+                game_over_embed.set_footer(text="Stay determined...")
 
-            await safe_interaction_response(interaction, interaction.response.send_message, embed=game_over_embed)
+                # Send the embed immediately using followup (since we already deferred)
+                try:
+                    await interaction.followup.send(embed=game_over_embed)
+                except Exception as e:
+                    print(f"Error sending GAME OVER embed: {e}")
+                    # Fallback: try to send as regular message
+                    try:
+                        channel = interaction.channel
+                        if channel:
+                            await channel.send(embed=game_over_embed)
+                    except Exception as e2:
+                        print(f"Error sending GAME OVER embed as fallback: {e2}")
 
-            # Disable all buttons after mercy
-            for child in self.children:
-                if hasattr(child, 'disabled'):
-                    child.disabled = True
+                # Disable all buttons after mercy
+                for child in self.children:
+                    if hasattr(child, 'disabled'):
+                        child.disabled = True
+                try:
+                    await interaction.message.edit(view=self)
+                except Exception as e:
+                    print(f"Error editing Sans message after MERCY: {e}")
+        except Exception as e:
+            print(f"Error in Sans MERCY button: {e}")
             try:
-                await interaction.message.edit(view=self)
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ An error occurred. Please try again.", ephemeral=True)
             except:
                 pass
 
@@ -9889,6 +9914,22 @@ def _cooldowns_data_sync(user_id: int) -> dict:
     mine_cd = MINE_COOLDOWN
     mine_cd = max(0, mine_cd - get_invite_cooldown_reductions(user_id).get("mine_reduction", 0))
     mine_cd = max(0, mine_cd - get_premium_cooldown_reductions(user_id).get("mine_reduction", 0))
+    
+    # Apply event cooldown reductions
+    active_events = get_active_events_cached()
+    hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
+    daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
+    
+    if hourly_event:
+        event_id = hourly_event.get("effects", {}).get("event_id", "")
+        if event_id == "speed_harvest":  # Adrenaline Boost
+            mine_cd = max(0, mine_cd - 450)  # 7.5 minutes = 450 seconds
+    
+    if daily_event:
+        event_id = daily_event.get("effects", {}).get("event_id", "")
+        if event_id == "speed_day":  # Overdrive
+            mine_cd = max(0, mine_cd - 300)  # 5 minutes = 300 seconds
+    
     if last_mine <= 0:
         data["mine"] = 0
     else:
@@ -17508,6 +17549,21 @@ async def mine(interaction: discord.Interaction):
         mine_cooldown = MINE_COOLDOWN
         mine_cooldown = max(0, mine_cooldown - data["invite_reductions"].get("mine_reduction", 0))
         mine_cooldown = max(0, mine_cooldown - data["premium_cd"].get("mine_reduction", 0))
+        
+        # Apply event cooldown reductions
+        active_events = get_active_events_cached()
+        hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
+        daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
+        
+        if hourly_event:
+            event_id = hourly_event.get("effects", {}).get("event_id", "")
+            if event_id == "speed_harvest":  # Adrenaline Boost
+                mine_cooldown = max(0, mine_cooldown - 450)  # 7.5 minutes = 450 seconds
+        
+        if daily_event:
+            event_id = daily_event.get("effects", {}).get("event_id", "")
+            if event_id == "speed_day":  # Overdrive
+                mine_cooldown = max(0, mine_cooldown - 300)  # 5 minutes = 300 seconds
 
         if last_mine_time > 0:
             cooldown_end = last_mine_time + mine_cooldown
