@@ -6897,7 +6897,7 @@ async def slots(interaction: discord.Interaction):
 #         user_balances[user_id] = 100.00
 #     return user_balances[user_id]
 
-# on ready
+# on readygit commi
 @bot.event 
 async def on_ready():
     print(f"Slash Gather, {bot.user.name}")
@@ -9391,11 +9391,13 @@ async def cooldowns(interaction: discord.Interaction):
         user_id = interaction.user.id
         data = await asyncio.to_thread(_cooldowns_data_sync, user_id)
         death_seconds = data["death"]
+        is_dead = death_seconds > 0
+        dead_suffix = " (Dead)" if is_dead else ""
         russian_status = "Alive" if death_seconds <= 0 else f"Dead ({_format_cooldown_seconds(death_seconds)})"
         lines = [
-            f"**/gather** - {_format_cooldown_seconds(data['gather'])}",
-            f"**/harvest** - {_format_cooldown_seconds(data['harvest'])}",
-            f"**/mine** - {_format_cooldown_seconds(data['mine'])}",
+            f"**/gather** - {_format_cooldown_seconds(data['gather'])}{dead_suffix}",
+            f"**/harvest** - {_format_cooldown_seconds(data['harvest'])}{dead_suffix}",
+            f"**/mine** - {_format_cooldown_seconds(data['mine'])}{dead_suffix}",
             f"**New /dailyshop** - {_format_cooldown_seconds(data['dailyshop'])}",
             f"**/water** - {_format_cooldown_seconds(data['water'])}",
             f"**/russian Status** - {russian_status}",
