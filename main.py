@@ -11400,7 +11400,7 @@ class AlmanacView(discord.ui.View):
         body = "\n\n".join(lines) if lines else "*No plants in this section.*"
         title = f"📚 {self.section}s"
         embed = discord.Embed(title=title, description=body[:4000], color=discord.Color.green())
-        embed.set_footer(text=f"Page {self.page + 1}/{self._max_page + 1} • Almanac: {self._filled}/{self._total_slots} ({pct:.1f}%)")
+        embed.set_footer(text=f"Page {self.page + 1}/{self._max_page + 1} • Completion: {self._filled}/{self._total_slots} ({pct:.1f}%)")
         return embed
 
     @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, custom_id="almanac_prev")
