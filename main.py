@@ -8504,7 +8504,7 @@ class SansView(discord.ui.View):
                 # Check if user already used MERCY
                 if user_id in self.mercy_users:
                     await safe_interaction_response(interaction, interaction.followup.send,
-                        "❌ You already tried to SPARE Sans and got dunked on! You're dead and cannot use this button again.", ephemeral=True)
+                        "❌ You already tried to SPARE Sans!", ephemeral=True)
                     return
 
                 # Mark this user as having used MERCY
@@ -8514,7 +8514,27 @@ class SansView(discord.ui.View):
                 death_end_time = time.time() + 1800
                 sans_death_timers[user_id] = death_end_time
 
-                # Send simple death message (not Sans-specific)
+                # Create GAME OVER embed with SOUL emoji in title (public)
+                game_over_embed = discord.Embed(
+                    title=f"{SOUL_EMOJI} GAME OVER",
+                    description=f"{interaction.user.mention} tried to SPARE Sans and got dunked on!",
+                    color=discord.Color.red())
+                game_over_embed.set_footer(text="Stay determined...")
+
+                # Send the embed publicly using followup (since we already deferred)
+                try:
+                    await interaction.followup.send(embed=game_over_embed)
+                except Exception as e:
+                    print(f"Error sending GAME OVER embed: {e}")
+                    # Fallback: try to send as regular message
+                    try:
+                        channel = interaction.channel
+                        if channel:
+                            await channel.send(embed=game_over_embed)
+                    except Exception as e2:
+                        print(f"Error sending GAME OVER embed as fallback: {e2}")
+
+                # Send death timer message as ephemeral
                 time_left = 1800
                 minutes = time_left // 60
                 seconds = time_left % 60
