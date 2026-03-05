@@ -1868,6 +1868,79 @@ def add_shop_item_to_user(user_id: int, item_id: str, amount: int = 1) -> None:
     )
 
 
+# Dayboost functions (24-hour temporary boosts from Nether Star/Black Shard)
+def add_dayboost(user_id: int, boost_type: str, duration_hours: float = 24.0) -> None:
+    """Add a dayboost (temporary boost) to a user. boost_type should be 'nether_star' or 'black_shard'."""
+    import time
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    expiration_time = time.time() + (duration_hours * 3600)
+    
+    doc = users.find_one({"_id": int(user_id)}, {"dayboosts": 1})
+    dayboosts = dict(doc.get("dayboosts", {})) if doc else {}
+    
+    # Get current count for this boost type (filter out expired ones first)
+    current_time = time.time()
+    active_boosts = []
+    if boost_type in dayboosts:
+        boost_list = dayboosts[boost_type]
+        if isinstance(boost_list, list):
+            for exp_time in boost_list:
+                try:
+                    if float(exp_time) > current_time:
+                        active_boosts.append(str(exp_time))
+                except (ValueError, TypeError):
+                    continue
+    
+    # Add the new boost
+    active_boosts.append(str(expiration_time))
+    dayboosts[boost_type] = active_boosts
+    
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"dayboosts": dayboosts}},
+        upsert=True,
+    )
+
+
+def get_dayboost_count(user_id: int, boost_type: str) -> int:
+    """Get the count of active dayboosts for a user. boost_type should be 'nether_star' or 'black_shard'."""
+    import time
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"dayboosts": 1})
+    if not doc:
+        return 0
+    
+    dayboosts = doc.get("dayboosts", {})
+    if boost_type not in dayboosts:
+        return 0
+    
+    boost_list = dayboosts[boost_type]
+    if not isinstance(boost_list, list):
+        return 0
+    
+    current_time = time.time()
+    active_count = 0
+    for exp_time_str in boost_list:
+        try:
+            exp_time = float(exp_time_str)
+            if exp_time > current_time:
+                active_count += 1
+        except (ValueError, TypeError):
+            continue
+    
+    return active_count
+
+
+def get_all_dayboosts(user_id: int) -> dict[str, int]:
+    """Get all active dayboost counts for a user. Returns dict with boost_type -> count."""
+    return {
+        "nether_star": get_dayboost_count(user_id, "nether_star"),
+        "black_shard": get_dayboost_count(user_id, "black_shard"),
+    }
+
+
 # Achievement functions
 def get_user_achievement_level(user_id: int, achievement_name: str) -> int:
     """Get user's achievement level for a specific achievement. Returns 0 if not set."""

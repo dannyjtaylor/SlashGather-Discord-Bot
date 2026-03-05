@@ -202,6 +202,9 @@ from database import (
     set_slot_token_free_spin_used_date_est,
     get_user_ids_with_shop_item,
     add_shop_item_to_user,
+    add_dayboost,
+    get_dayboost_count,
+    get_all_dayboosts,
     steal_revert_gather,
     steal_apply_gather,
     steal_revert_harvest,
@@ -1450,9 +1453,9 @@ def _is_solar_eclipse_or_blood_moon():
     return is_day, is_night
 
 def _pve_spawn_multiplier():
-    """Return (animal_mult, boss_mult) for spawn chances. During active Solar Eclipse or Blood Moon (from DB): 2.5x each."""
+    """Return (animal_mult, boss_mult) for spawn chances. During active Solar Eclipse or Blood Moon (from DB): 5.0x each."""
     if get_active_event_by_type("solar_eclipse") or get_active_event_by_type("blood_moon"):
-        return 2.5, 2.5
+        return 5.0, 5.0
     return 1.0, 1.0
 
 # Solar Eclipse and Blood Moon: 50% chance at respective start times (4:30 EST, 19:30 EST). Display in #events with start/end embeds.
@@ -1466,14 +1469,14 @@ SOLAR_ECLIPSE_COLOR = 0xFF8C00   # bright orange
 BLOOD_MOON_COLOR = 0xDC143C      # bright red (crimson, distinct from discord red)
 CELESTIAL_DAY_START_EST = (4, 30)   # 4:30 AM EST (Solar Eclipse start)
 CELESTIAL_NIGHT_START_EST = (19, 30)  # 7:30 PM EST (Blood Moon start)
-CELESTIAL_TRIGGER_CHANCE = 0.1   # 10% at start time, Terraria-style
+CELESTIAL_TRIGGER_CHANCE = 0.2   # 20% at start time, Terraria-style
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PvE Wild Animal Event System
 # ═══════════════════════════════════════════════════════════════════════════════
 
-PVE_TRIGGER_CHANCE_GATHER = 0.08   # 8% per /gather for animals (event multiplies); animals much more common than bosses
-PVE_TRIGGER_CHANCE_HARVEST = 0.04  # 4% per /harvest for animals (event multiplies)
+PVE_TRIGGER_CHANCE_GATHER = 0.02   # 2% per /gather for animals (event multiplies); animals much more common than bosses
+PVE_TRIGGER_CHANCE_HARVEST = 0.01  # 1% per /harvest for animals (event multiplies)
 
 # Steal: stealable chance per successful gather/harvest (no PvE when stealable; crits can be stolen)
 STEAL_CHANCE_GATHER = 0.04   # 4% per /gather (4x previous)
@@ -1791,6 +1794,39 @@ PVE_BOSSES = [
         "pre_spawn_text": "A Dark Fountain erupts in the distance...",
         "server_defeat_msg": "The Roaring Knight retreats! The Dark Fountain closes and conditions return to normal.",
     },
+    {
+        "id": "nergigante",
+        "name": "Nergigante",
+        "emoji": "🐉",
+        "hp_range": (400, 600),
+        "color": 0x2d1a1a,
+        "description": "Nergigante appears, smashing its horns into the surrounding trees!",
+        "defeat_msg": "Nergigante flys away into the wilderness!",
+        "pre_spawn_text": "A fight brews among Elder Dragons...",
+        "server_defeat_msg": "Nergigante is defeated!",
+    },
+    {
+        "id": "rathalos",
+        "name": "Rathalos",
+        "emoji": "🐉",
+        "hp_range": (700, 700),
+        "color": 0x8b0000,
+        "description": "Rathalos appeared! He's breathing fire on all the gathering grounds!",
+        "defeat_msg": "Rathalos retreats, flying away into the clouds!",
+        "pre_spawn_text": "Deafening flaps of wings come from overhead...",
+        "server_defeat_msg": "Rathalos has been defeated!",
+    },
+    {
+        "id": "sans",
+        "name": "Sans",
+        "emoji": "<:sans:1479162217525154007>",
+        "hp_range": (1, 1),
+        "color": 0xffa500,
+        "description": "The easist enemy. Can't keep dodging forever. Keep attacking.",
+        "defeat_msg": "Sans bleeds for a few moments... and then blows away into dust!",
+        "pre_spawn_text": "You feel like you're going to have a bad time...",
+        "server_defeat_msg": "Sans has been defeated!",
+    },
 ]
 # Twins: spawn both Retinazer and Spazmatism together; both must be defeated to unblock channels.
 PVE_BOSSES_TWINS_IDS = {"retinazer", "spazmatism"}
@@ -1828,6 +1864,9 @@ PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT = {
     "jungle_bat": "jungle_bat_basher",
     "queen_bee": "queen_bee_slayer",
     "the_roaring_knight": "the_roaring_knight_repelled",
+    "nergigante": "nergigante_slayer",
+    "rathalos": "rathalos_slayer",
+    "sans": "sans_slayer",
 }
 PVE_MASTER_REQUIRED_IDS = frozenset(PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT.keys())
 active_boss_events: dict[int, list] = {}  # guild_id -> list of {channel_id, boss, hp, max_hp}
@@ -2977,6 +3016,21 @@ HIDDEN_ACHIEVEMENTS = {
         "description": "Defeat The Roaring Knight",
         "boost": 0.05  # 5%
     },
+    "nergigante_slayer": {
+        "name": "Respect Your Elders",
+        "description": "Defeat Nergigante",
+        "boost": 0.05  # 5% (5+ Boost)
+    },
+    "rathalos_slayer": {
+        "name": "King of the Skies",
+        "description": "Defeat Rathalos",
+        "boost": 0.05  # 5% (5+ Boost)
+    },
+    "sans_slayer": {
+        "name": "Gaster Blasted",
+        "description": "Defeat Sans",
+        "boost": 0.05  # 5%
+    },
     "pve_master": {
         "name": "Master Mode",
         "description": "Defeat every type of animal and boss at least once",
@@ -3392,8 +3446,16 @@ BLACK_SHARD_MONEY_MULTIPLIER = 1.2
 
 
 def get_nether_star_money_multiplier(user_id: int) -> float:
-    """Return 1.15 if user has Nether Star (shop item), else 1.0."""
-    return NETHER_STAR_MONEY_MULTIPLIER if has_shop_item(user_id, "nether_star") else 1.0
+    """Return multiplier based on Nether Star (shop item) and dayboosts. Additive stacking."""
+    base_mult = NETHER_STAR_MONEY_MULTIPLIER if has_shop_item(user_id, "nether_star") else 1.0
+    dayboost_count = get_dayboost_count(user_id, "nether_star")
+    if dayboost_count > 0:
+        # Additive: each dayboost adds (multiplier - 1.0) to the base
+        # If no permanent, base is 1.0, so we add (1.15 - 1.0) * count = 0.15 * count
+        # If permanent exists, base is 1.15, so we add 0.15 * count more
+        boost_per_dayboost = NETHER_STAR_MONEY_MULTIPLIER - 1.0  # 0.15
+        return base_mult + (boost_per_dayboost * dayboost_count)
+    return base_mult
 
 
 SHADOW_CRYSTAL_MONEY_MULTIPLIER = 1.05
@@ -3405,8 +3467,16 @@ def get_shadow_crystal_money_multiplier(user_id: int) -> float:
 
 
 def get_black_shard_money_multiplier(user_id: int) -> float:
-    """Return 1.2 if user has Black Shard (shop item or from Roaring Knight), else 1.0."""
-    return BLACK_SHARD_MONEY_MULTIPLIER if has_shop_item(user_id, "black_shard") else 1.0
+    """Return multiplier based on Black Shard (shop item) and dayboosts. Additive stacking."""
+    base_mult = BLACK_SHARD_MONEY_MULTIPLIER if has_shop_item(user_id, "black_shard") else 1.0
+    dayboost_count = get_dayboost_count(user_id, "black_shard")
+    if dayboost_count > 0:
+        # Additive: each dayboost adds (multiplier - 1.0) to the base
+        # If no permanent, base is 1.0, so we add (1.2 - 1.0) * count = 0.2 * count
+        # If permanent exists, base is 1.2, so we add 0.2 * count more
+        boost_per_dayboost = BLACK_SHARD_MONEY_MULTIPLIER - 1.0  # 0.2
+        return base_mult + (boost_per_dayboost * dayboost_count)
+    return base_mult
 
 
 PALACE_TREASURE_MONEY_MULTIPLIER = 1.5
@@ -7057,7 +7127,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.11.4"
+            name="running /gather on V0.11.5"
         )
     )
     try:
@@ -8072,12 +8142,14 @@ END_CRYSTAL_EMOJI = "<:endcrystal:1479156246081835050>"
 END_CRYSTAL_EMOJI_PARTIAL = discord.PartialEmoji(name="endcrystal", id=1479156246081835050, animated=False)
 
 
-def _format_item_boost_source(name: str) -> str:
-    """Format an item boost source for embed display; adds Nether Star / Black Shard emoji next to name."""
+def _format_item_boost_source(name: str, count: int = 1) -> str:
+    """Format an item boost source for embed display; adds Nether Star / Black Shard emoji after name."""
     if name == "Nether Star":
-        return f"{NETHER_STAR_EMOJI} **NETHER STAR**"
+        count_display = f" (x{count})" if count > 1 else ""
+        return f"**NETHER STAR**{count_display} {NETHER_STAR_EMOJI}"
     if name == "Black Shard":
-        return f"{BLACK_SHARD_EMOJI} **BLACK SHARD**"
+        count_display = f" (x{count})" if count > 1 else ""
+        return f"**BLACK SHARD**{count_display} {BLACK_SHARD_EMOJI}"
     return f"**{name.upper()}**"
 
 
@@ -8098,23 +8170,21 @@ class NetherStarClaimView(discord.ui.View):
                 interaction, interaction.response.send_message,
                 "❌ Someone else already claimed the Nether Star!", ephemeral=True)
             return
-        if has_shop_item(user_id, "nether_star"):
-            await safe_interaction_response(
-                interaction, interaction.response.send_message,
-                "❌ You already have a Nether Star! You can't claim a second one.", ephemeral=True)
-            return
+        # Add dayboost (24-hour temporary boost) instead of permanent shop item
+        add_dayboost(user_id, "nether_star", 24.0)
+        dayboost_count = get_dayboost_count(user_id, "nether_star")
         self.claimed_ref[0] = user_id
-        add_shop_item_to_user(user_id, "nether_star", 1)
         button.disabled = True
         button.label = "Claimed!"
         embed = interaction.message.embeds[0].copy() if interaction.message.embeds else discord.Embed(title="Wither Defeated", color=discord.Color.gold())
-        embed.add_field(name=f"{NETHER_STAR_EMOJI} Nether Star", value=f"**Claimed by {interaction.user.mention}!**", inline=False)
-        embed.set_footer(text="1.15x all Money buff active!")
+        count_display = f" (x{dayboost_count})" if dayboost_count > 1 else ""
+        embed.add_field(name=f"{NETHER_STAR_EMOJI} Nether Star{count_display}", value=f"**Claimed by {interaction.user.mention}!**", inline=False)
+        embed.set_footer(text=f"1.15x all Money dayboost active for 24 hours!{count_display}")
         await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
         if interaction.guild:
             asyncio.create_task(_post_rares_nether_star_claim(interaction.guild, interaction.user))
         await interaction.followup.send(
-            f"{NETHER_STAR_EMOJI} You claimed the **Nether Star**! You now have **1.15x all Money**!",
+            f"{NETHER_STAR_EMOJI} You claimed the **Nether Star**! You now have a **1.15x all Money dayboost for 24 hours**!{count_display}",
             ephemeral=True)
 
 
@@ -8135,23 +8205,21 @@ class BlackShardClaimView(discord.ui.View):
                 interaction, interaction.response.send_message,
                 "❌ Someone else already claimed the Black Shard!", ephemeral=True)
             return
-        if has_shop_item(user_id, "black_shard"):
-            await safe_interaction_response(
-                interaction, interaction.response.send_message,
-                "❌ You already have a Black Shard! You can't claim a second one.", ephemeral=True)
-            return
+        # Add dayboost (24-hour temporary boost) instead of permanent shop item
+        add_dayboost(user_id, "black_shard", 24.0)
+        dayboost_count = get_dayboost_count(user_id, "black_shard")
         self.claimed_ref[0] = user_id
-        add_shop_item_to_user(user_id, "black_shard", 1)
         button.disabled = True
         button.label = "Claimed!"
         embed = interaction.message.embeds[0].copy() if interaction.message.embeds else discord.Embed(title="The Roaring Knight Defeated", color=discord.Color.gold())
-        embed.add_field(name=f"{BLACK_SHARD_EMOJI} Black Shard", value=f"**Claimed by {interaction.user.mention}!**", inline=False)
-        embed.set_footer(text="1.2x all Money buff active!")
+        count_display = f" (x{dayboost_count})" if dayboost_count > 1 else ""
+        embed.add_field(name=f"{BLACK_SHARD_EMOJI} Black Shard{count_display}", value=f"**Claimed by {interaction.user.mention}!**", inline=False)
+        embed.set_footer(text=f"1.2x all Money dayboost active for 24 hours!{count_display}")
         await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
         if interaction.guild:
             asyncio.create_task(_post_rares_black_shard_claim(interaction.guild, interaction.user))
         await interaction.followup.send(
-            f"{BLACK_SHARD_EMOJI} You claimed the **Black Shard**! You now have **1.2x all Money**!",
+            f"{BLACK_SHARD_EMOJI} You claimed the **Black Shard**! You now have a **1.2x all Money dayboost for 24 hours**!{count_display}",
             ephemeral=True)
 
 
@@ -8276,6 +8344,173 @@ class BossView(discord.ui.View):
             await safe_interaction_response(interaction, interaction.response.edit_message, embed=progress_embed, view=self)
 
 
+# Sans death timer: user_id -> death_end_time (timestamp when death cooldown ends)
+sans_death_timers: dict[int, float] = {}
+
+# SOUL emoji for Sans
+SOUL_EMOJI = "<:SOUL:1479165808147042374>"
+SOUL_EMOJI_PARTIAL = discord.PartialEmoji(name="SOUL", id=1479165808147042374, animated=False)
+
+# Sans emoji
+SANS_EMOJI = "<:sans:1479162217525154007>"
+SANS_EMOJI_PARTIAL = discord.PartialEmoji(name="sans", id=1479162217525154007, animated=False)
+
+
+class SansView(discord.ui.View):
+    """Special boss view for Sans with dodge mechanics and Undertale-style buttons."""
+
+    def __init__(self, boss: dict, hp: int, channel_id: int, guild_id: int, area_multiplier: float, boss_state_ref: dict):
+        super().__init__(timeout=None)
+        self.boss = boss
+        self.max_hp = hp
+        self.hp = hp  # Always 1, but we track it
+        self.channel_id = channel_id
+        self.guild_id = guild_id
+        self.area_multiplier = area_multiplier
+        self.boss_state_ref = boss_state_ref
+        self.attackers: dict[int, int] = {}  # Tracks attempted damage (for rewards)
+        self.attack_attempts: dict[int, int] = {}  # Tracks number of attempts per user
+        self.total_attempts = 0  # Total attack attempts across all users
+        self.defeated = False
+        self._lock = asyncio.Lock()
+        # Sans is defeated after 50 total attack attempts
+        self.DEFEAT_THRESHOLD = 50
+
+    def _hp_bar(self) -> str:
+        # Always show 1 HP, but visually show progress based on attempts
+        filled = min(20, max(1, round((self.total_attempts / self.DEFEAT_THRESHOLD) * 20)))
+        empty = 20 - filled
+        return f"{'🟥' * filled}{'⬛' * empty}"
+
+    @discord.ui.button(label=f"{SOUL_EMOJI} FIGHT", style=discord.ButtonStyle.danger, custom_id="sans_fight", row=0)
+    async def fight(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        async with self._lock:
+            if self.defeated:
+                return
+
+            damage = get_pve_damage_multiplier(interaction.user.id)
+            self.total_attempts += 1
+            self.attack_attempts[interaction.user.id] = self.attack_attempts.get(interaction.user.id, 0) + 1
+            # Track attempted damage for rewards (even though it "dodges")
+            self.attackers[interaction.user.id] = self.attackers.get(interaction.user.id, 0) + damage
+
+            # Check if defeated (after enough attempts)
+            if self.total_attempts >= self.DEFEAT_THRESHOLD:
+                self.defeated = True
+                button.disabled = True
+                button.label = "☠️ Defeated!"
+                button.style = discord.ButtonStyle.secondary
+                # Disable other buttons too
+                for child in self.children:
+                    if hasattr(child, 'disabled'):
+                        child.disabled = True
+
+                victory_embed = discord.Embed(
+                    title=f"☠️ {self.boss['emoji']} {self.boss['name']} Defeated! ☠️",
+                    description=self.boss["defeat_msg"],
+                    color=discord.Color.gold())
+                victory_embed.add_field(name="HP", value=f"**0** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
+                display_attackers = _pve_cap_damage_by_hp(self.attackers, self.max_hp)
+                participants_lines = []
+                for uid, dmg in sorted(display_attackers.items(), key=lambda x: -x[1]):
+                    member = interaction.guild.get_member(uid)
+                    name = member.display_name if member else f"User {uid}"
+                    participants_lines.append(f"**{name}** — {dmg} damage")
+                victory_embed.add_field(name="🏆 Contributors", value="\n".join(participants_lines) or "No participants", inline=False)
+                victory_embed.set_footer(text="Rewards are being distributed…")
+                await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
+
+                # Accumulate for deferred rewards
+                _pve_boss_defeated_pending.setdefault(self.guild_id, []).append((self.boss, dict(self.attackers), self.max_hp))
+                boss_list = active_boss_events.get(self.guild_id, [])
+                if self.boss_state_ref in boss_list:
+                    boss_list = [e for e in boss_list if e is not self.boss_state_ref]
+                    if not boss_list:
+                        active_boss_events.pop(self.guild_id, None)
+                    else:
+                        active_boss_events[self.guild_id] = boss_list
+
+                plantera_bulb_eligible_guilds[self.guild_id] = time.time()
+
+                # Broadcast defeat to all channels
+                if self.guild_id not in active_boss_events:
+                    pending = _pve_boss_defeated_pending.pop(self.guild_id, [])
+                    guild = interaction.guild
+                    channels = _get_guild_gather_channels(guild)
+                    if len(pending) == 1:
+                        boss = pending[0][0]
+                        broadcast_desc = boss.get("server_defeat_msg", boss["defeat_msg"])
+                        broadcast_embed = discord.Embed(
+                            title=f"☠️ {boss['emoji']} {boss['name']} Defeated! ☠️",
+                            description=broadcast_desc,
+                            color=discord.Color.gold())
+                        broadcast_embed.set_footer(text="gathering channels are now unblocked")
+                        for ch in channels:
+                            try:
+                                if ch.permissions_for(guild.me).send_messages:
+                                    await ch.send(embed=broadcast_embed)
+                            except Exception as e:
+                                print(f"Boss defeat broadcast failed in {ch.name}: {e}")
+                        asyncio.create_task(_pve_distribute_rewards(
+                            interaction, boss, dict(self.attackers), self.channel_id, self.area_multiplier,
+                            achievements_ephemeral=False, max_hp=self.max_hp))
+                return
+
+            # Attack "dodged" - show dodge message
+            progress_embed = discord.Embed(
+                title=f"🚨 {self.boss['emoji']} {self.boss['name']} 🚨",
+                description=self.boss["description"],
+                color=self.boss["color"])
+            progress_embed.add_field(name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
+            progress_embed.add_field(name="⚔️ Last Action", value=f"**{interaction.user.display_name}** attacked! *Sans dodged!*", inline=False)
+            progress_embed.set_footer(text=f"All gathering channels are blocked! ({self.total_attempts}/{self.DEFEAT_THRESHOLD} attempts)")
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+
+    @discord.ui.button(label="ACT", style=discord.ButtonStyle.danger, custom_id="sans_act", row=0)
+    async def act(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await safe_interaction_response(interaction, interaction.response.send_message,
+            "This isn't UNDERTALE! Just attack!", ephemeral=True)
+
+    @discord.ui.button(label="ITEM", style=discord.ButtonStyle.danger, custom_id="sans_item", row=1)
+    async def item(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await safe_interaction_response(interaction, interaction.response.send_message,
+            "This isn't UNDERTALE! Just attack!", ephemeral=True)
+
+    @discord.ui.button(label="MERCY", style=discord.ButtonStyle.danger, custom_id="sans_mercy", row=1)
+    async def mercy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        async with self._lock:
+            if self.defeated:
+                return
+
+            user_id = interaction.user.id
+            # Set death timer: 30 minutes = 1800 seconds
+            death_end_time = time.time() + 1800
+            sans_death_timers[user_id] = death_end_time
+
+            # Create GAME OVER embed
+            game_over_embed = discord.Embed(
+                title="GAME OVER",
+                description=f"{interaction.user.mention} tried to SPARE Sans and got dunked on!",
+                color=discord.Color.red())
+            game_over_embed.set_footer(text="Stay determined...")
+            game_over_embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/1479165808147042374.webp?size=96")
+
+            await safe_interaction_response(interaction, interaction.response.send_message, embed=game_over_embed)
+
+            # Disable all buttons after mercy
+            for child in self.children:
+                if hasattr(child, 'disabled'):
+                    child.disabled = True
+            try:
+                await interaction.message.edit(view=self)
+            except:
+                pass
+
+
 async def _send_boss_warning_embed(guild: discord.Guild, boss: dict, spawn_channel: discord.TextChannel):
     """Send 1-min warning embed to ALL gathering channels; only @here in the channel where the boss will spawn. No footer."""
     channels = _get_guild_gather_channels(guild)
@@ -8309,9 +8544,16 @@ async def trigger_boss_event(channel: discord.TextChannel, boss: dict, area_mult
         description=boss["description"],
         color=boss["color"])
     embed.add_field(name="HP", value=f"**{hp}** / **{hp}**\n{'🟥' * 20}", inline=False)
-    embed.add_field(name="⚔️ How to Fight", value="Press **Attack**!", inline=False)
+    
+    # Special handling for Sans
+    if boss["id"] == "sans":
+        embed.add_field(name="⚔️ How to Fight", value="Press **FIGHT**! (Sans will dodge, but keep attacking!)", inline=False)
+        view = SansView(boss=boss, hp=hp, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_multiplier, boss_state_ref=entry)
+    else:
+        embed.add_field(name="⚔️ How to Fight", value="Press **Attack**!", inline=False)
+        view = BossView(boss=boss, hp=hp, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_multiplier, boss_state_ref=entry)
+    
     embed.set_footer(text="All gathering channels are BLOCKED until this boss is defeated!")
-    view = BossView(boss=boss, hp=hp, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_multiplier, boss_state_ref=entry)
     await channel.send(embed=embed, view=view)
 
 
@@ -9121,6 +9363,22 @@ async def gather(interaction: discord.Interaction):
                 f"❌ You can only use this command in gathering channels: {channels_list}", ephemeral=True)
             return
 
+        # Check if user is on Sans death timer
+        if user_id in sans_death_timers:
+            death_end_time = sans_death_timers[user_id]
+            current_time = time.time()
+            if current_time < death_end_time:
+                time_left = int(death_end_time - current_time)
+                minutes = time_left // 60
+                seconds = time_left % 60
+                time_str = f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"💀 **GAME OVER** - You tried to SPARE Sans and got dunked on! You're dead for **{time_str}**.\n*Stay determined...*", ephemeral=True)
+                return
+            else:
+                # Timer expired, remove from dict
+                sans_death_timers.pop(user_id, None)
+
         # Block commands while a PvE wild animal event is active in this channel
         # Block if a boss is active in this guild (all gather channels blocked until boss defeated)
         guild_id = interaction.guild.id if interaction.guild else 0
@@ -9189,15 +9447,25 @@ async def gather(interaction: discord.Interaction):
         category = gather_result.get("category")
 
         if shop_inv.get("scarecrow", 0) >= 1:
-            item_boost_sources.append("Scarecrow")
+            item_boost_sources.append(("Scarecrow", 1))
         if category == "Flower" and shop_inv.get("bloomstone", 0) >= 1:
-            item_boost_sources.append("Bloomstone")
+            item_boost_sources.append(("Bloomstone", 1))
         if shop_inv.get("alchemists_pocketwatch", 0) >= 1:
-            item_boost_sources.append("Alchemist's Pocketwatch")
+            item_boost_sources.append(("Alchemist's Pocketwatch", 1))
         if gather_result.get("extra_money_from_nether_star", 0) > 0:
-            item_boost_sources.append("Nether Star")
+            # Check for permanent shop item and dayboosts
+            has_permanent = has_shop_item(user_id, "nether_star")
+            dayboost_count = get_dayboost_count(user_id, "nether_star")
+            total_count = (1 if has_permanent else 0) + dayboost_count
+            if total_count > 0:
+                item_boost_sources.append(("Nether Star", total_count))
         if gather_result.get("extra_money_from_black_shard", 0) > 0:
-            item_boost_sources.append("Black Shard")
+            # Check for permanent shop item and dayboosts
+            has_permanent = has_shop_item(user_id, "black_shard")
+            dayboost_count = get_dayboost_count(user_id, "black_shard")
+            total_count = (1 if has_permanent else 0) + dayboost_count
+            if total_count > 0:
+                item_boost_sources.append(("Black Shard", total_count))
 
         if is_crit:
             hoe_enc = gather_result.get('hoe_enchant')
@@ -9257,7 +9525,7 @@ async def gather(interaction: discord.Interaction):
                 extra_bs = gather_result.get("extra_money_from_black_shard", 0)
                 total_extra = extra_ns + extra_bs
                 value_parts = [f"**+{format_money(total_extra)}**"] if total_extra > 0 else []
-                value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
+                value_parts.append("\n".join(_format_item_boost_source(name, count) for name, count in item_boost_sources))
                 embed.add_field(
                     name="📦 Item Boost",
                     value="\n".join(value_parts),
@@ -9317,7 +9585,7 @@ async def gather(interaction: discord.Interaction):
                 extra_bs = gather_result.get("extra_money_from_black_shard", 0)
                 total_extra = extra_ns + extra_bs
                 value_parts = [f"**+{format_money(total_extra)}**"] if total_extra > 0 else []
-                value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
+                value_parts.append("\n".join(_format_item_boost_source(name, count) for name, count in item_boost_sources))
                 embed.add_field(
                     name="📦 Item Boost",
                     value="\n".join(value_parts),
@@ -9361,7 +9629,7 @@ async def gather(interaction: discord.Interaction):
         # Auto-log to #rares for Legendary/Netherite/Luminite/Celestial/Mikellion (GMO or not)
         rare_label, _ = _plant_rare_label(gather_result.get("ripeness", ""), gather_result.get("is_gmo", False))
         if rare_label:
-            area_tag = "[" + channel_name.upper() + "]"
+            area_tag = "[" + channel_name.upper().replace("-", " ") + "]"
             asyncio.create_task(_post_rares_plant(
                 interaction.guild, interaction.user, "GATHER",
                 gather_result["name"], gather_result.get("category", "Item"),
@@ -10207,6 +10475,22 @@ async def harvest(interaction: discord.Interaction):
                 f"❌ You can only use this command in gathering channels: {channels_list}", ephemeral=True)
             return
 
+        # Check if user is on Sans death timer
+        if user_id in sans_death_timers:
+            death_end_time = sans_death_timers[user_id]
+            current_time = time.time()
+            if current_time < death_end_time:
+                time_left = int(death_end_time - current_time)
+                minutes = time_left // 60
+                seconds = time_left % 60
+                time_str = f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"💀 **GAME OVER** - You tried to SPARE Sans and got dunked on! You're dead for **{time_str}**.\n*Stay determined...*", ephemeral=True)
+                return
+            else:
+                # Timer expired, remove from dict
+                sans_death_timers.pop(user_id, None)
+
         guild_id = interaction.guild.id if interaction.guild else 0
         if guild_id and guild_id in active_boss_events:
             boss_list = active_boss_events[guild_id]
@@ -10343,20 +10627,30 @@ async def harvest(interaction: discord.Interaction):
         item_boost_sources = []
         shop_inv = full_data.get("shop_inventory", {}) if full_data else {}
         if shop_inv.get("bloomstone", 0) >= 1:
-            item_boost_sources.append("Bloomstone")
+            item_boost_sources.append(("Bloomstone", 1))
         if shop_inv.get("fuzzy_dice", 0) >= 1:
-            item_boost_sources.append("Fuzzy Dice")
+            item_boost_sources.append(("Fuzzy Dice", 1))
         if result.get("extra_money_from_nether_star", 0) > 0:
-            item_boost_sources.append("Nether Star")
+            # Check for permanent shop item and dayboosts
+            has_permanent = has_shop_item(user_id, "nether_star")
+            dayboost_count = get_dayboost_count(user_id, "nether_star")
+            total_count = (1 if has_permanent else 0) + dayboost_count
+            if total_count > 0:
+                item_boost_sources.append(("Nether Star", total_count))
         if result.get("extra_money_from_black_shard", 0) > 0:
-            item_boost_sources.append("Black Shard")
+            # Check for permanent shop item and dayboosts
+            has_permanent = has_shop_item(user_id, "black_shard")
+            dayboost_count = get_dayboost_count(user_id, "black_shard")
+            total_count = (1 if has_permanent else 0) + dayboost_count
+            if total_count > 0:
+                item_boost_sources.append(("Black Shard", total_count))
 
         if item_boost_sources:
             extra_ns = result.get("extra_money_from_nether_star", 0)
             extra_bs = result.get("extra_money_from_black_shard", 0)
             total_extra = extra_ns + extra_bs
             value_parts = [f"**+{format_money(total_extra)}**"] if total_extra > 0 else []
-            value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
+            value_parts.append("\n".join(_format_item_boost_source(name, count) for name, count in item_boost_sources))
             embed.add_field(
                 name="📦 Item Boost",
                 value="\n".join(value_parts),
@@ -10400,7 +10694,7 @@ async def harvest(interaction: discord.Interaction):
                 f"🔗🔗 **CHAIN!** Your harvest cooldown has been reset! Harvest again! 🔗🔗")
 
         # Auto-log to #rares for any Legendary/Netherite/Luminite/Celestial/Mikellion (GMO or not)
-        area_tag = "[" + channel_name.upper() + "]"
+        area_tag = "[" + channel_name.upper().replace("-", " ") + "]"
         for item in gathered_items:
             rare_label, _ = _plant_rare_label(item.get("ripeness", ""), item.get("is_gmo", False))
             if rare_label:
@@ -13513,6 +13807,9 @@ async def spawn_boss(interaction: discord.Interaction, boss: str, channel: str):
         # Single boss
         boss_obj = next((b for b in PVE_BOSSES if b["id"] == boss), None)
         if boss_obj:
+            # Send server intro text to all gathering channels (like natural boss spawns)
+            await _send_boss_warning_embed(interaction.guild, boss_obj, target)
+            
             if boss_obj["id"] == ENDER_DRAGON_ID:
                 await trigger_ender_dragon_event(target, area_mult)
                 await safe_interaction_response(interaction, interaction.followup.send,
@@ -17432,17 +17729,25 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
             )
 
         # Item Boosts (shop / dailyshop items affecting this sale)
-        item_boost_sources: list[str] = []
-        # Reuse multipliers instead of re-querying inventory
+        item_boost_sources = []
+        # Get counts for Nether Star and Black Shard (permanent + dayboosts)
         if nether_mult > 1.0:
-            item_boost_sources.append("Nether Star")
+            has_permanent = has_shop_item(user_id, "nether_star")
+            dayboost_count = get_dayboost_count(user_id, "nether_star")
+            total_count = (1 if has_permanent else 0) + dayboost_count
+            if total_count > 0:
+                item_boost_sources.append(("Nether Star", total_count))
         if black_shard_mult > 1.0:
-            item_boost_sources.append("Black Shard")
+            has_permanent = has_shop_item(user_id, "black_shard")
+            dayboost_count = get_dayboost_count(user_id, "black_shard")
+            total_count = (1 if has_permanent else 0) + dayboost_count
+            if total_count > 0:
+                item_boost_sources.append(("Black Shard", total_count))
 
         if item_boost_sources:
             total_item_extra = extra_ns + extra_bs
             value_parts = [f"**+${total_item_extra:.2f}**"] if total_item_extra > 0 else []
-            value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
+            value_parts.append("\n".join(_format_item_boost_source(name, count) for name, count in item_boost_sources))
             embed.add_field(
                 name="📦 Item Boost",
                 value="\n".join(value_parts),
@@ -17606,19 +17911,27 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
             inline=False,
         )
     # Item Boosts (shop / dailyshop items affecting this sale)
-    item_boost_sources: list[str] = []
+    item_boost_sources = []
     if has_shop_item(user_id, "cryptobro_shadow"):
-        item_boost_sources.append("Cryptobro's Shadow")
-    # Reuse multipliers for inventory-backed items
+        item_boost_sources.append(("Cryptobro's Shadow", 1))
+    # Get counts for Nether Star and Black Shard (permanent + dayboosts)
     if nether_mult > 1.0:
-        item_boost_sources.append("Nether Star")
+        has_permanent = has_shop_item(user_id, "nether_star")
+        dayboost_count = get_dayboost_count(user_id, "nether_star")
+        total_count = (1 if has_permanent else 0) + dayboost_count
+        if total_count > 0:
+            item_boost_sources.append(("Nether Star", total_count))
     if black_shard_mult > 1.0:
-        item_boost_sources.append("Black Shard")
+        has_permanent = has_shop_item(user_id, "black_shard")
+        dayboost_count = get_dayboost_count(user_id, "black_shard")
+        total_count = (1 if has_permanent else 0) + dayboost_count
+        if total_count > 0:
+            item_boost_sources.append(("Black Shard", total_count))
 
     if item_boost_sources:
         total_item_extra = extra_ns + extra_bs
         value_parts = [f"**+${total_item_extra:.2f}**"] if total_item_extra > 0 else []
-        value_parts.append("\n".join(_format_item_boost_source(name) for name in item_boost_sources))
+        value_parts.append("\n".join(_format_item_boost_source(name, count) for name, count in item_boost_sources))
         embed.add_field(
             name="📦 Item Boost",
             value="\n".join(value_parts),
