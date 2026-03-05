@@ -1813,7 +1813,7 @@ def wipe_user_all(user_id: int) -> None:
             "consecutive_water_days": 0,
             "water_count": 0,
             "russian_games_played": 0,
-            # Reset attunements
+            # Reset imbuements
             "hoe_enchantment": None,
             "tractor_enchantment": None,
             # Reset invite rewards (claimed rewards reset on wipe)
@@ -1831,7 +1831,7 @@ def wipe_user_all(user_id: int) -> None:
             "last_roulette_elimination_time": 0.0,
             "last_coinflip_loss_time": 0.0,
             "last_water_time": 0.0,
-            # Reset attunements
+            # Reset imbuements
             "hoe_enchantment": None,
             "tractor_enchantment": None,
             # Reset unlocked areas
@@ -2326,9 +2326,9 @@ def increment_invite_joins_new_user(inviter_id: int, new_user_id: int, reward_am
     return True
 
 
-# Attunement functions
+# Imbuement functions
 def get_user_hoe_attunement(user_id: int) -> Optional[Dict]:
-    """Get user's hoe attunement. Returns dict with attunement data or None."""
+    """Get user's hoe imbuement. Returns dict with imbuement data or None."""
     users = _get_users_collection()
     _ensure_user_document(user_id)
     doc = users.find_one({"_id": int(user_id)}, {"hoe_enchantment": 1})
@@ -2338,7 +2338,7 @@ def get_user_hoe_attunement(user_id: int) -> Optional[Dict]:
 
 
 def set_user_hoe_attunement(user_id: int, attunement: Optional[Dict]) -> None:
-    """Set user's hoe attunement. Pass None to clear."""
+    """Set user's hoe imbuement. Pass None to clear."""
     users = _get_users_collection()
     users.update_one(
         {"_id": int(user_id)},
@@ -2348,7 +2348,7 @@ def set_user_hoe_attunement(user_id: int, attunement: Optional[Dict]) -> None:
 
 
 def get_user_tractor_attunement(user_id: int) -> Optional[Dict]:
-    """Get user's tractor attunement. Returns dict with attunement data or None."""
+    """Get user's tractor imbuement. Returns dict with imbuement data or None."""
     users = _get_users_collection()
     _ensure_user_document(user_id)
     doc = users.find_one({"_id": int(user_id)}, {"tractor_enchantment": 1})
@@ -2358,7 +2358,7 @@ def get_user_tractor_attunement(user_id: int) -> Optional[Dict]:
 
 
 def set_user_tractor_attunement(user_id: int, attunement: Optional[Dict]) -> None:
-    """Set user's tractor attunement. Pass None to clear."""
+    """Set user's tractor imbuement. Pass None to clear."""
     users = _get_users_collection()
     users.update_one(
         {"_id": int(user_id)},
@@ -2391,9 +2391,9 @@ def increment_invite_joins_count_only(inviter_id: int, new_user_id: int) -> bool
     return True
 
 
-# Attunement functions (second block kept for compatibility)
+# Imbuement functions (second block kept for compatibility)
 def get_user_hoe_attunement(user_id: int) -> Optional[Dict]:
-    """Get user's hoe attunement. Returns dict with attunement data or None."""
+    """Get user's hoe imbuement. Returns dict with imbuement data or None."""
     users = _get_users_collection()
     _ensure_user_document(user_id)
     doc = users.find_one({"_id": int(user_id)}, {"hoe_enchantment": 1})
@@ -2403,7 +2403,7 @@ def get_user_hoe_attunement(user_id: int) -> Optional[Dict]:
 
 
 def set_user_hoe_attunement(user_id: int, attunement: Optional[Dict]) -> None:
-    """Set user's hoe attunement. Pass None to clear."""
+    """Set user's hoe imbuement. Pass None to clear."""
     users = _get_users_collection()
     users.update_one(
         {"_id": int(user_id)},
@@ -2413,7 +2413,7 @@ def set_user_hoe_attunement(user_id: int, attunement: Optional[Dict]) -> None:
 
 
 def get_user_tractor_attunement(user_id: int) -> Optional[Dict]:
-    """Get user's tractor attunement. Returns dict with attunement data or None."""
+    """Get user's tractor imbuement. Returns dict with imbuement data or None."""
     users = _get_users_collection()
     _ensure_user_document(user_id)
     doc = users.find_one({"_id": int(user_id)}, {"tractor_enchantment": 1})
@@ -2423,7 +2423,7 @@ def get_user_tractor_attunement(user_id: int) -> Optional[Dict]:
 
 
 def set_user_tractor_attunement(user_id: int, attunement: Optional[Dict]) -> None:
-    """Set user's tractor attunement. Pass None to clear."""
+    """Set user's tractor imbuement. Pass None to clear."""
     users = _get_users_collection()
     users.update_one(
         {"_id": int(user_id)},

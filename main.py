@@ -745,7 +745,7 @@ def _to_roman(num):
 
 
 def _make_hoe_enchant(name, rarity, description, resonance=0, prosperity=0, renewal=0, abundance=0):
-    """Create a standard hoe attunement from level values.
+    """Create a standard hoe imbuement from level values.
     Hoe formulas: chain=resonance*5%, money=prosperity*20%, cooldown=renewal*1s, crit=abundance*2.5%"""
     return {
         "name": name, "rarity": rarity, "description": description,
@@ -759,7 +759,7 @@ def _make_hoe_enchant(name, rarity, description, resonance=0, prosperity=0, rene
 
 
 def _make_custom_hoe_enchant(name, rarity, description, chain_chance=0, money_bonus=0, cooldown_reduction=0, critical_chance=0, display_levels=None):
-    """Create a custom hoe attunement with explicit effect values (for Netherite+ rarities)."""
+    """Create a custom hoe imbuement with explicit effect values (for Netherite+ rarities)."""
     return {
         "name": name, "rarity": rarity, "description": description,
         "chain_chance": chain_chance,
@@ -772,7 +772,7 @@ def _make_custom_hoe_enchant(name, rarity, description, chain_chance=0, money_bo
 
 
 def _make_tractor_enchant(name, rarity, description, resonance=0, prosperity=0, renewal=0, natures_favor=0):
-    """Create a standard tractor attunement from level values.
+    """Create a standard tractor imbuement from level values.
     Tractor formulas: chain=resonance*2.5%, money=prosperity*10%, cooldown=renewal*30s, plants=natures_favor*1"""
     return {
         "name": name, "rarity": rarity, "description": description,
@@ -786,7 +786,7 @@ def _make_tractor_enchant(name, rarity, description, resonance=0, prosperity=0, 
 
 
 def _make_custom_tractor_enchant(name, rarity, description, chain_chance=0, money_bonus=0, cooldown_reduction=0, additional_plants=0, display_levels=None):
-    """Create a custom tractor attunement with explicit effect values (for Netherite+ rarities)."""
+    """Create a custom tractor imbuement with explicit effect values (for Netherite+ rarities)."""
     return {
         "name": name, "rarity": rarity, "description": description,
         "chain_chance": chain_chance,
@@ -1001,10 +1001,10 @@ TRACTOR_ENCHANTMENTS = {
 
 
 def roll_attunement(tool_type: str, user_id: int = None, exclude_enchant: dict = None) -> dict:
-    """Roll a random attunement for the given tool type ('hoe' or 'tractor').
+    """Roll a random imbuement for the given tool type ('hoe' or 'tractor').
     If user_id is provided and has Commoner's Respite, COMMON rarity is excluded.
-    If exclude_enchant is provided (e.g. current attunement), will not return the same enchant by name.
-    Returns a copy of the attunement dict."""
+    If exclude_enchant is provided (e.g. current imbuement), will not return the same enchant by name.
+    Returns a copy of the imbuement dict."""
     enchant_pool = HOE_ENCHANTMENTS if tool_type == "hoe" else TRACTOR_ENCHANTMENTS
     exclude_name = (exclude_enchant or {}).get("name")
 
@@ -1035,7 +1035,7 @@ def roll_attunement(tool_type: str, user_id: int = None, exclude_enchant: dict =
 
 
 def format_enchant_effects(enchant: dict, tool_type: str) -> str:
-    """Format attunement effects for display in an embed.
+    """Format imbuement effects for display in an embed.
     Shows only the bold all-caps enchant type and roman numeral level, no percentages, no emojis."""
     parts = []
     levels = enchant.get("levels", {})
@@ -1064,7 +1064,7 @@ def format_enchant_effects(enchant: dict, tool_type: str) -> str:
 
 
 def format_enchant_block(enchant: dict, tool_type: str) -> str:
-    """Format a full attunement block (name, rarity, description, effects) for embed display."""
+    """Format a full imbuement block (name, rarity, description, effects) for embed display."""
     name = enchant.get("name", "Unknown")
     rarity = enchant.get("rarity", "COMMON")
     rarity_display = RARITY_EMOJI.get(rarity, f"[{rarity}]")
@@ -1154,7 +1154,7 @@ def can_harvest(user_id, full_data=None):
         if event_id == "speed_day":
             cooldown_reduction += 60
     
-    # Apply tractor attunement cooldown reduction (Renewal)
+    # Apply tractor imbuement cooldown reduction (Renewal)
     if full_data is not None:
         tractor_enchant = full_data.get("tractor_enchantment")
     else:
@@ -3450,7 +3450,7 @@ def can_gather(user_id, user_data=None, active_events=None, full_data=None):
         user_data: Optional pre-fetched user data dict (from get_user_gather_data)
         active_events: Optional pre-fetched active events list
         full_data: Optional pre-fetched full data dict (from get_user_gather_full_data).
-                   When provided, avoids extra DB calls for attunement / invite reductions.
+                   When provided, avoids extra DB calls for imbuement / invite reductions.
     """
     # Check Russian Roulette elimination cooldown first
     if full_data is not None:
@@ -3501,7 +3501,7 @@ def can_gather(user_id, user_data=None, active_events=None, full_data=None):
         if event_id == "speed_day":
             cooldown_reduction += 5
     
-    # Apply hoe attunement cooldown reduction (Renewal)
+    # Apply hoe imbuement cooldown reduction (Renewal)
     if full_data is not None:
         hoe_enchant = full_data.get("hoe_enchantment")
     else:
@@ -3758,7 +3758,7 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     extra_money_from_achievement = base_final_value * (achievement_multiplier - 1.0)
     extra_money_from_daily = base_final_value * (daily_bonus_multiplier - 1.0)
 
-    # Apply hoe attunement money bonus (Prosperity) - additive from base
+    # Apply hoe imbuement money bonus (Prosperity) - additive from base
     if full_data is not None:
         hoe_enchant = full_data.get("hoe_enchantment")
     else:
@@ -9146,7 +9146,7 @@ async def gather(interaction: discord.Interaction):
                 embed.add_field(name="💧 Water Streak Boost",
                     value=f"+{daily_bonus_percent:.1f}% - **+${gather_result['extra_money_from_daily']:.2f}**", inline=False)
 
-            embed.add_field(name="\u2728 Attunement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
+            embed.add_field(name="\u2728 Imbuement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
             embed.add_field(name="\U0001f4a5 Critical Multiplier",
                 value=f"${pre_crit_value:.2f} \u2192 **${gather_result['value']:.2f}**", inline=False)
             if gather_result.get('extra_money_from_beta_tester', 0) > 0:
@@ -9232,7 +9232,7 @@ async def gather(interaction: discord.Interaction):
                 hoe_name = hoe_enc.get("name", "Unknown")
                 hoe_rarity = hoe_enc.get("rarity", "COMMON")
                 hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]")
-                embed.add_field(name="\u2728 Attunement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
+                embed.add_field(name="\u2728 Imbuement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
 
             month_name = gather_result.get("month_name", "—")
             embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
@@ -9552,7 +9552,7 @@ def _cooldowns_data_sync(user_id: int) -> dict:
     hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
     daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
 
-    # Gather: shoes + events + hoe enchant + invite + premium
+    # Gather: shoes + events + hoe imbuement + invite + premium
     user_upgrades = get_user_basket_upgrades(user_id)
     shoes_tier = user_upgrades.get("shoes", 0)
     gather_red = (SHOES_UPGRADES[shoes_tier - 1]["reduction"] if shoes_tier > 0 else 0)
@@ -9567,7 +9567,7 @@ def _cooldowns_data_sync(user_id: int) -> dict:
     gather_red += premium_cd.get("gather_reduction", 0)
     data["gather_reduction_total"] = gather_red
 
-    # Harvest: upgrade tier + events + tractor enchant + invite + premium
+    # Harvest: upgrade tier + events + tractor imbuement + invite + premium
     harvest_upgrades = get_user_harvest_upgrades(user_id)
     cooldown_tier = harvest_upgrades.get("cooldown", 0)
     harvest_red = (HARVEST_COOLDOWN_UPGRADES[cooldown_tier - 1]["reduction"] if cooldown_tier > 0 else 0)
@@ -9648,7 +9648,7 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         user_upgrades = full_data.get("basket_upgrades", {})
         harvest_upgrades = full_data.get("harvest_upgrades", {})
         tractor_enchant = full_data.get("tractor_enchantment")
-        # Ensure tractor attunement is a dict (fallback if serialization/document quirk drops it)
+        # Ensure tractor imbuement is a dict (fallback if serialization/document quirk drops it)
         if tractor_enchant is None or not isinstance(tractor_enchant, dict):
             tractor_enchant = get_user_tractor_attunement(user_id)
         bloom_multiplier = 1.0 + (full_data.get("tree_rings", 0) * 0.005)
@@ -10263,7 +10263,7 @@ async def harvest(interaction: discord.Interaction):
             tractor_name = tractor_enc.get("name", "Unknown")
             tractor_rarity = tractor_enc.get("rarity", "COMMON")
             tractor_rarity_display = RARITY_EMOJI.get(tractor_rarity, f"[{tractor_rarity}]")
-            embed.add_field(name="\u2728 Attunement",
+            embed.add_field(name="\u2728 Imbuement",
                 value=f"**{tractor_name}** {tractor_rarity_display}", inline=False)
 
         month_name = result.get("month_name", "")
@@ -11547,15 +11547,15 @@ async def userstats(interaction: discord.Interaction):
         if hoe_attunement:
             hoe_name = hoe_attunement.get("name", "Unknown")
             hoe_rarity = hoe_attunement.get("rarity", "COMMON")
-            embed.add_field(name="✨ Gather Attunement", value=f"**{hoe_name}** {RARITY_EMOJI.get(hoe_rarity, f'[{hoe_rarity}]')}", inline=True)
+            embed.add_field(name="✨ Gather Imbuement", value=f"**{hoe_name}** {RARITY_EMOJI.get(hoe_rarity, f'[{hoe_rarity}]')}", inline=True)
         else:
-            embed.add_field(name="✨ Gather Attunement", value="**None**", inline=True)
+            embed.add_field(name="✨ Gather Imbuement", value="**None**", inline=True)
         if tractor_attunement:
             tractor_name = tractor_attunement.get("name", "Unknown")
             tractor_rarity = tractor_attunement.get("rarity", "COMMON")
-            embed.add_field(name="✨ Harvest Attunement", value=f"**{tractor_name}** {RARITY_EMOJI.get(tractor_rarity, f'[{tractor_rarity}]')}", inline=True)
+            embed.add_field(name="✨ Harvest Imbuement", value=f"**{tractor_name}** {RARITY_EMOJI.get(tractor_rarity, f'[{tractor_rarity}]')}", inline=True)
         else:
-            embed.add_field(name="✨ Harvest Attunement", value="**None**", inline=True)
+            embed.add_field(name="✨ Harvest Imbuement", value="**None**", inline=True)
         if items_needed == 0:
             embed.add_field(name="🏆 Rank Status", value=f"**{next_rank}** - You've reached **PLANTER X**!", inline=False)
         else:
@@ -12170,11 +12170,11 @@ async def orchard(interaction: discord.Interaction):
 
 
 # ============================================================
-# IMBUE (Attunement) System
+# IMBUE (Imbuement) System
 # ============================================================
 
 class ImbueView(discord.ui.View):
-    """View with Replace / Keep Current Attunement / Recast buttons for the /imbue command."""
+    """View with Replace / Keep Current Imbuement / Recast buttons for the /imbue command."""
 
     def __init__(self, user_id: int, tool_type: str, rolled_enchant: dict, current_enchant: dict | None,
                  channel: discord.abc.Messageable, user_name: str, timeout=60):
@@ -12186,7 +12186,7 @@ class ImbueView(discord.ui.View):
         self.channel = channel  # For public announcement
         self.user_name = user_name
         self.cost = IMBUE_HOE_COST if tool_type == "hoe" else IMBUE_TRACTOR_COST
-        # First-ever roll: user had no attunement — cannot "keep" nothing; hide only "Keep Current"
+        # First-ever roll: user had no imbuement — cannot "keep" nothing; hide only "Keep Current"
         if self.current_enchant is None:
             for child in list(self.children):
                 if getattr(child, "label", None) == "Keep Current":
@@ -12194,15 +12194,15 @@ class ImbueView(discord.ui.View):
                     break
 
     def _build_embed(self) -> discord.Embed:
-        """Build the ephemeral attunement choice embed."""
+        """Build the ephemeral imbuement choice embed."""
         type_label = "GATHER" if self.tool_type == "hoe" else "HARVEST"
         rarity_color = RARITY_COLORS.get(self.rolled_enchant["rarity"], 0x808080)
         embed = discord.Embed(
-            title=f"{type_label} ATTUNEMENT \u2728",
+            title=f"{type_label} IMBUEMENT \u2728",
             color=discord.Color(rarity_color),
         )
 
-        # New Attunement Rolled (mask SECRET imbue stats with mysterious GIF block until claimed)
+        # New Imbuement Rolled (mask SECRET imbue stats with mysterious GIF block until claimed)
         if self.rolled_enchant.get("rarity") == "SECRET":
             tool_word = "HOE" if self.tool_type == "hoe" else "TRACTOR"
             g1, g2 = IMBUE_SEC_GIF_1, IMBUE_SEC_GIF_2
@@ -12221,28 +12221,28 @@ class ImbueView(discord.ui.View):
             )
         else:
             rolled_block = format_enchant_block(self.rolled_enchant, self.tool_type)
-        embed.add_field(name="New Attunement Rolled", value=rolled_block, inline=False)
+        embed.add_field(name="New Imbuement Rolled", value=rolled_block, inline=False)
 
-        # Current Attunement
+        # Current Imbuement
         if self.current_enchant:
             current_block = format_enchant_block(self.current_enchant, self.tool_type)
         else:
             current_block = "**NONE**"
-        embed.add_field(name="Current Attunement", value=current_block, inline=False)
+        embed.add_field(name="Current Imbuement", value=current_block, inline=False)
 
         # Footer with balance and cost
         balance = get_user_balance(self.user_id)
-        embed.set_footer(text=f"Balance: ${balance:,.2f}     |     Cost/Attunement: ${self.cost:,.0f}")
+        embed.set_footer(text=f"Balance: ${balance:,.2f}     |     Cost/Imbuement: ${self.cost:,.0f}")
         return embed
 
     async def _send_public_announcement(self, enchant: dict):
-        """Send the public announcement embed when a user gets an attunement."""
+        """Send the public announcement embed when a user gets an imbuement."""
         type_label = "GATHER" if self.tool_type == "hoe" else "HARVEST"
         tool_label = "hoe" if self.tool_type == "hoe" else "tractor"
         rarity_color = RARITY_COLORS.get(enchant["rarity"], 0x808080)
 
         embed = discord.Embed(
-            title=f"{type_label} ATTUNEMENT \u2728 \U0001f33a",
+            title=f"{type_label} IMBUEMENT \u2728 \U0001f33a",
             description=(
                 f"\u2728 **{self.user_name}** has enchanted their {tool_label} with:\n\n"
                 f"{format_enchant_block(enchant, self.tool_type)}"
@@ -12258,10 +12258,10 @@ class ImbueView(discord.ui.View):
     async def replace_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await safe_interaction_response(interaction, interaction.response.send_message,
-                "\u274c This isn't your attunement menu!", ephemeral=True)
+                "\u274c This isn't your imbuement menu!", ephemeral=True)
             return
 
-        # Save the new attunement
+        # Save the new imbuement
         if self.tool_type == "hoe":
             set_user_hoe_attunement(self.user_id, self.rolled_enchant)
         else:
@@ -12273,7 +12273,7 @@ class ImbueView(discord.ui.View):
 
         # Update the ephemeral message
         confirm_embed = discord.Embed(
-            title="\u2705 Attunement Replaced!",
+            title="\u2705 Imbuement Replaced!",
             description=f"Your {self.tool_type} has been enchanted with **{self.rolled_enchant['name']}**!",
             color=discord.Color.green(),
         )
@@ -12309,7 +12309,7 @@ class ImbueView(discord.ui.View):
     async def keep_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await safe_interaction_response(interaction, interaction.response.send_message,
-                "\u274c This isn't your attunement menu!", ephemeral=True)
+                "\u274c This isn't your imbuement menu!", ephemeral=True)
             return
 
         # Disable all buttons
@@ -12317,8 +12317,8 @@ class ImbueView(discord.ui.View):
             child.disabled = True
 
         keep_embed = discord.Embed(
-            title="\U0001f6e1\ufe0f Attunement Kept",
-            description="You kept your current attunement.",
+            title="\U0001f6e1\ufe0f Imbuement Kept",
+            description="You kept your current imbuement.",
             color=discord.Color.light_grey(),
         )
         await safe_interaction_response(interaction, interaction.response.edit_message, embed=keep_embed, view=self)
@@ -12329,7 +12329,7 @@ class ImbueView(discord.ui.View):
     async def recast_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await safe_interaction_response(interaction, interaction.response.send_message,
-                "\u274c This isn't your attunement menu!", ephemeral=True)
+                "\u274c This isn't your imbuement menu!", ephemeral=True)
             return
 
         # Atomic deduction: check + deduct in one DB call (no race condition)
@@ -12341,7 +12341,7 @@ class ImbueView(discord.ui.View):
             return
 
         try:
-            # Roll new attunement (exclude current so you can't roll the same one)
+            # Roll new imbuement (exclude current so you can't roll the same one)
             self.rolled_enchant = roll_attunement(self.tool_type, self.user_id, self.current_enchant)
 
             # Update embed
@@ -12365,8 +12365,8 @@ class ImbueView(discord.ui.View):
 @bot.tree.command(name="imbue", description="Enchant your hoe or tractor with magical powers!")
 @app_commands.describe(tool="Choose which tool to enchant")
 @app_commands.choices(tool=[
-    app_commands.Choice(name="Hoe (Gather attunement - $750,000)", value="hoe"),
-    app_commands.Choice(name="Tractor (Harvest attunement - $4,000,000)", value="tractor"),
+    app_commands.Choice(name="Hoe (Gather imbuement - $750,000)", value="hoe"),
+    app_commands.Choice(name="Tractor (Harvest imbuement - $4,000,000)", value="tractor"),
 ])
 async def imbue(interaction: discord.Interaction, tool: app_commands.Choice[str]):
     try:
@@ -12396,13 +12396,13 @@ async def imbue(interaction: discord.Interaction, tool: app_commands.Choice[str]
                 return
 
             try:
-                # Get current attunement
+                # Get current imbuement
                 if tool_type == "hoe":
                     current_enchant = get_user_hoe_attunement(user_id)
                 else:
                     current_enchant = get_user_tractor_attunement(user_id)
 
-                # Roll a new attunement (exclude current so you can't roll the same one)
+                # Roll a new imbuement (exclude current so you can't roll the same one)
                 rolled_enchant = roll_attunement(tool_type, user_id, current_enchant)
 
                 # Create the view and embed
