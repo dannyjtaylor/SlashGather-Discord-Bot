@@ -1482,8 +1482,8 @@ CELESTIAL_TRIGGER_CHANCE = 0.2   # 20% at start time, Terraria-style
 # PvE Wild Animal Event System
 # ═══════════════════════════════════════════════════════════════════════════════
 
-PVE_TRIGGER_CHANCE_GATHER = 0.02   # 2% per /gather for animals (event multiplies); animals much more common than bosses
-PVE_TRIGGER_CHANCE_HARVEST = 0.01  # 1% per /harvest for animals (event multiplies)
+PVE_TRIGGER_CHANCE_GATHER = 0.01   # 1% per /gather for animals (event multiplies); animals much more common than bosses
+PVE_TRIGGER_CHANCE_HARVEST = 0.005  # 0.5% per /harvest for animals (event multiplies)
 
 # Steal: stealable chance per successful gather/harvest (no PvE when stealable; crits can be stolen)
 STEAL_CHANCE_GATHER = 0.04   # 4% per /gather (4x previous)
@@ -1571,7 +1571,7 @@ PVE_WILD_ANIMALS = [
 BULLET_ANT_SWARM_INTRO = "A Bullet Ant Swarm has poured out of the undergrowth!"
 BULLET_ANT_SWARM_DEFEAT = "After squashing the Bullet Ants, the swarm retreats back into their anthill!"
 BULLET_ANT_SWARM_COUNT_RANGE = (4, 9)
-PVE_SWARM_TRIGGER_CHANCE = 0.125  # 1/8 chance to spawn swarm instead of single animal
+PVE_SWARM_TRIGGER_CHANCE = 0.08   # 8% chance to spawn swarm instead of single animal (when an animal spawn triggers)
 PVE_WILD_ANIMALS_SINGLE = [a for a in PVE_WILD_ANIMALS if not a.get("is_swarm_ant")]
 BULLET_ANT_ANIMAL = next(a for a in PVE_WILD_ANIMALS if a.get("is_swarm_ant"))
 
@@ -1686,8 +1686,17 @@ BEE_ANIMAL = next(a for a in PVE_WILD_ANIMALS_UNDERGROUND_JUNGLE if a.get("is_sw
 # Tracks active PvE events per channel: channel_id -> PvE event data
 active_pve_events: dict[int, dict] = {}
 
+
+def _guild_has_active_pve(guild: discord.Guild) -> bool:
+    """True if any gathering channel in this guild currently has an active enemy (wild animal or swarm). Used to block boss spawn when an enemy is up."""
+    for ch in guild.text_channels:
+        if ch.name in VALID_GATHERING_CHANNELS and ch.id in active_pve_events:
+            return True
+    return False
+
+
 # Bosses: block all gather channels in guild, @here on warning, rarer spawn. 1-min warning embed before spawn.
-PVE_BOSS_TRIGGER_CHANCE = 0.006  # 0.6% per gather/harvest (when no boss active); day/night multiplies; rarer than animals
+PVE_BOSS_TRIGGER_CHANCE = 0.001  # 0.1% per gather/harvest (when no boss and no enemy active); event multiplies; rarer than animals
 PVE_BOSSES = [
     {
         "id": "skunkape",
@@ -9813,10 +9822,11 @@ async def gather(interaction: discord.Interaction):
             view = PlanteraBulbView(interaction.channel.id, guild_id, area_mult)
             asyncio.create_task(interaction.channel.send(embed=bulb_embed, view=view))
             pve_spawned = True
-        # 2. Boss spawn (rarer): 1-min warning then boss in this channel (only if no boss active and no boss already scheduled)
+        # 2. Boss spawn (rarer): 1-min warning then boss in this channel (only if no boss active, no enemy in any gather channel, no boss already scheduled)
         if (not pve_spawned and channel_name in VALID_GATHERING_CHANNELS and guild_id and guild_id not in active_boss_events
                 and guild_id not in pending_boss_spawn_guild_ids
                 and interaction.channel.id not in active_pve_events
+                and not _guild_has_active_pve(interaction.guild)
                 and not result.get("stealable")):
             _, boss_mult = _pve_spawn_multiplier()
             effective_boss_chance = min(1.0, PVE_BOSS_TRIGGER_CHANCE * boss_mult)
@@ -11031,10 +11041,11 @@ async def harvest(interaction: discord.Interaction):
             view = PlanteraBulbView(interaction.channel.id, guild_id, area_mult)
             asyncio.create_task(interaction.channel.send(embed=bulb_embed, view=view))
             pve_spawned = True
-        # 2. Boss spawn (rarer) — only if no boss active and no boss already scheduled
+        # 2. Boss spawn (rarer) — only if no boss active, no enemy in any gather channel, no boss already scheduled
         if (not pve_spawned and channel_name in VALID_GATHERING_CHANNELS and guild_id and guild_id not in active_boss_events
                 and guild_id not in pending_boss_spawn_guild_ids
                 and interaction.channel.id not in active_pve_events
+                and not _guild_has_active_pve(interaction.guild)
                 and not crit.get("stealable")):
             _, boss_mult = _pve_spawn_multiplier()
             effective_boss_chance = min(1.0, PVE_BOSS_TRIGGER_CHANCE * boss_mult)
@@ -17467,6 +17478,10 @@ async def hourly_event_check():
                         "effects": {"event_id": event_info["id"]}
                     }
                     
+                    # Clear event from DB BEFORE sending embeds so event_cleanup_task/celestial loop can't also send (prevents duplicate end embeds)
+                    clear_event(event_id)
+                    clear_expired_events()
+                    
                     # Send end embed to #events channel in all guilds
                     for guild in bot.guilds:
                         try:
@@ -17475,9 +17490,6 @@ async def hourly_event_check():
                         except Exception as e:
                             print(f"Error sending end embed to {guild.name}: {e}")
                     
-                    # Clear event from DB immediately so event_cleanup_task doesn't also send end embeds (prevents duplicates)
-                    clear_event(event_id)
-                    clear_expired_events()
                     print(f"Sent end message for hourly event: {event_info['name']} (5 seconds remaining)")
                     
                     # Wait for remaining 5 seconds until event actually ends
@@ -17580,6 +17592,10 @@ async def daily_event_check():
                         "effects": {"event_id": event_info["id"]}
                     }
                     
+                    # Clear event from DB BEFORE sending embeds so event_cleanup_task/celestial loop can't also send (prevents duplicate end embeds)
+                    clear_event(event_id)
+                    clear_expired_events()
+                    
                     # Send end embed to #events channel in all guilds
                     for guild in bot.guilds:
                         try:
@@ -17588,9 +17604,6 @@ async def daily_event_check():
                         except Exception as e:
                             print(f"Error sending end embed to {guild.name}: {e}")
                     
-                    # Clear event from DB immediately so event_cleanup_task doesn't also send end embeds (prevents duplicates)
-                    clear_event(event_id)
-                    clear_expired_events()
                     print(f"Sent end message for daily event: {event_info['name']} (5 seconds remaining)")
                     
                     # Wait for remaining 5 seconds until event actually ends
@@ -17625,13 +17638,14 @@ async def event_cleanup_task():
 
 
 async def _end_active_event_for_all_guilds(event: dict):
-    """Send event end embed to #events in all guilds and clear the event from DB."""
+    """Send event end embed to #events in all guilds and clear the event from DB. Clears from DB first so no other task can send a duplicate end embed."""
+    event_id = event.get("event_id", "")
+    clear_event(event_id)
     for guild in bot.guilds:
         try:
             await send_event_end_embed(guild, event)
         except Exception as e:
             print(f"Error sending event end embed to {guild.name}: {e}")
-    clear_event(event.get("event_id", ""))
 
 
 async def _send_end_embeds_for_expired_events():
