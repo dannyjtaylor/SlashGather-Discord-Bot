@@ -1216,6 +1216,20 @@ def recalculate_user_tree_rings(user_id: int) -> int:
     return expected_rings
 
 
+def recalculate_guild_tree_rings(user_ids: list[int]) -> int:
+    """Recalculate Tree Rings for all given users (based on their plants). Returns number of users updated."""
+    if not user_ids:
+        return 0
+    count = 0
+    for uid in user_ids:
+        try:
+            recalculate_user_tree_rings(int(uid))
+            count += 1
+        except Exception:
+            pass
+    return count
+
+
 def get_bloom_multiplier(user_id: int) -> float:
     """Calculate money multiplier based on Tree Rings. Formula: 1.0 + (tree_rings * 0.005)"""
     tree_rings = get_user_tree_rings(user_id)

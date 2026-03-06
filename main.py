@@ -116,6 +116,7 @@ from database import (
     get_user_tree_rings,
     increment_tree_rings,
     recalculate_user_tree_rings,
+    recalculate_guild_tree_rings,
     get_bloom_multiplier,
     get_bloom_rank,
     get_user_bloom_count,
@@ -12328,19 +12329,35 @@ async def userstats(interaction: discord.Interaction):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
-@bot.tree.command(name="treering", description="Recalculate your Tree Rings to match your plants gathered (fix after wipe or desync)")
+@bot.tree.command(name="treering", description="[ADMIN] Recalculate Tree Rings for everyone in this server (fix after wipe or desync)")
+@app_commands.default_permissions(administrator=True)
 async def treering(interaction: discord.Interaction):
-    """Reset Tree Rings to the value you should have based on total plants (gather_stats.total_items and your tree ring interval)."""
+    """[ADMIN] Reset Tree Rings for all users in this server to match their plants gathered."""
     try:
         if not await safe_defer(interaction, ephemeral=True):
             return
-        user_id = interaction.user.id
-        new_rings = await asyncio.to_thread(recalculate_user_tree_rings, user_id)
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+        if not hasattr(interaction.channel, "name") or interaction.channel.name != "hidden":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ This command can only be used in the #hidden channel.", ephemeral=True)
+            return
+        guild = interaction.guild
+        if not guild:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: Could not get guild information.", ephemeral=True)
+            return
+        members = [m for m in guild.members if not m.bot]
+        user_ids = [m.id for m in members]
+        updated_count = await asyncio.to_thread(recalculate_guild_tree_rings, user_ids)
         await safe_interaction_response(
             interaction, interaction.followup.send,
-            f"<:TreeRing:1474244868288282817> Your Tree Rings have been recalculated from your plants gathered. You now have **{new_rings}** Tree Ring{'s' if new_rings != 1 else ''} (+{(new_rings * 0.5):.1f}% money boost).",
+            f"<:TreeRing:1474244868288282817> Tree Rings have been recalculated for **{updated_count}** user(s) in this server. Each user's Tree Rings now match their plants gathered.",
             ephemeral=True,
         )
+        print(f"Admin {interaction.user.name} used /treering — recalculated for {updated_count} users")
     except Exception as e:
         print(f"Error in treering command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
