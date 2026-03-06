@@ -9084,11 +9084,11 @@ class PlanteraBulbView(discord.ui.View):
             view=None)
 
 
-def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplier: float):
+def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplier: float, enemy_id: str | None = None):
     """Roll N gather items using pure math, then write everything to DB in ONE operation.
 
     Returns (display_results, total_value).
-    Only 1 DB read + 1 DB write regardless of num_items.
+    Only 1 DB read + 1–2 DB writes. If enemy_id is set, also records PvE defeat in the same thread.
     """
     full_data = get_user_gather_full_data(user_id)
     active_events = get_active_events_cached()
@@ -9247,6 +9247,9 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
         almanac_pairs=almanac_pairs,
     )
 
+    if enemy_id:
+        add_pve_defeat(user_id, enemy_id)
+
     return display_results, total_balance
 
 
@@ -9271,12 +9274,37 @@ def _pve_cap_damage_by_hp(attackers: dict[int, int], max_hp: int) -> dict[int, i
     return result
 
 
+async def _pve_reward_followup(member: discord.Member, guild: discord.Guild, user_id: int, enemy_id: str | None) -> None:
+    """Background: assign PLANTER role and send achievement DMs so the main reward path stays fast."""
+    try:
+        await assign_gatherer_role(member, guild)
+    except Exception as e:
+        print(f"Error assigning gatherer role after PvE for user {user_id}: {e}")
+    try:
+        if enemy_id:
+            ach_key = PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT.get(enemy_id)
+            if ach_key and unlock_hidden_achievement(user_id, ach_key):
+                await send_hidden_achievement_notification_dm(user_id, ach_key)
+        total_defeats = get_user_total_pve_defeats(user_id)
+        new_slayer_level = get_achievement_level_for_stat("slayer", total_defeats)
+        cur_slayer = get_user_achievement_level(user_id, "slayer")
+        if new_slayer_level > cur_slayer:
+            set_user_achievement_level(user_id, "slayer", new_slayer_level)
+            await send_achievement_notification_dm(user_id, "slayer", new_slayer_level)
+        if PVE_MASTER_REQUIRED_IDS.issubset(set(get_user_pve_defeated(user_id))):
+            if unlock_hidden_achievement(user_id, "pve_master"):
+                await send_hidden_achievement_notification_dm(user_id, "pve_master")
+    except Exception as e:
+        print(f"PvE reward followup failed for user {user_id}: {e}")
+
+
 async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict,
                                    attackers: dict[int, int], channel_id: int,
                                    area_multiplier: float, *, achievements_ephemeral: bool = False,
                                    max_hp: int | None = None):
     """Award plants to every participant. Record defeats, update PLANTER role, unlock achievements.
-    Reward damage is capped by the entity's max_hp so overkill (e.g. 12 damage on 1 HP left) doesn't over-reward."""
+    Reward damage is capped by the entity's max_hp so overkill (e.g. 12 damage on 1 HP left) doesn't over-reward.
+    Items + defeat are applied in one thread; reward DM is sent first; role + achievement DMs run in background."""
     channel = interaction.guild.get_channel(channel_id)
     enemy_id = animal.get("id")
     guild = interaction.guild
@@ -9294,39 +9322,12 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
             if not member:
                 return
 
+            # Single thread: roll items, batch write, and record PvE defeat
             results, total_value = await asyncio.to_thread(
-                _pve_roll_items_and_batch_write, user_id, total_damage, area_multiplier)
-
-            # Record PvE defeat and update PLANTER role (plants from PvE count toward rank)
-            if enemy_id:
-                add_pve_defeat(user_id, enemy_id)
-            try:
-                await assign_gatherer_role(member, guild)
-            except Exception as e:
-                print(f"Error assigning gatherer role after PvE for user {user_id}: {e}")
-
-            # Unlock per-enemy hidden achievement if first time (always DM so only user sees it)
-            if enemy_id:
-                ach_key = PVE_ENEMY_TO_HIDDEN_ACHIEVEMENT.get(enemy_id)
-                if ach_key and unlock_hidden_achievement(user_id, ach_key):
-                    await send_hidden_achievement_notification_dm(user_id, ach_key)
-
-            # Slayer achievement category (total defeats) — always DM so only user sees it
-            total_defeats = get_user_total_pve_defeats(user_id)
-            new_slayer_level = get_achievement_level_for_stat("slayer", total_defeats)
-            cur_slayer = get_user_achievement_level(user_id, "slayer")
-            if new_slayer_level > cur_slayer:
-                set_user_achievement_level(user_id, "slayer", new_slayer_level)
-                await send_achievement_notification_dm(user_id, "slayer", new_slayer_level)
-
-            # PvE Master: defeat every type at least once — always DM so only user sees it
-            if PVE_MASTER_REQUIRED_IDS.issubset(set(get_user_pve_defeated(user_id))):
-                if unlock_hidden_achievement(user_id, "pve_master"):
-                    await send_hidden_achievement_notification_dm(user_id, "pve_master")
+                _pve_roll_items_and_batch_write, user_id, total_damage, area_multiplier, enemy_id)
 
             plant_emojis = [get_item_display_emoji(r["name"]) for r in results]
             emoji_display = " ".join(plant_emojis)
-            # For Sans, show attacks instead of damage
             is_sans = enemy_id == "sans"
             if is_sans:
                 header = (
@@ -9348,11 +9349,13 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
                 name="💰 Total Earned", value=f"**{format_money(total_value)}**", inline=True)
             reward_embed.set_footer(text="Thanks for defending the gathering grounds!")
 
-            # Send reward embed via DM (ephemeral-style) to avoid cluttering the channel
+            # Send reward DM first so user sees rewards quickly
             try:
                 await member.send(embed=reward_embed)
             except Exception:
                 pass
+            # Role + achievement DMs in background so they don't delay the reward
+            asyncio.create_task(_pve_reward_followup(member, guild, user_id, enemy_id))
         except Exception as e:
             print(f"PvE reward failed for user {user_id}: {e}")
         finally:
@@ -12253,7 +12256,8 @@ async def userstats(interaction: discord.Interaction):
         if bloom_rank != "PINE I":
             embed.add_field(name="⭐ Rank Boost", value=f"**{rank_perma_buff_multiplier:.2f}x**", inline=True)
         day_text = "day" if water_streak == 1 else "days"
-        embed.add_field(name="💧 Water Streak", value=f"**{water_streak}** {day_text} ({daily_bonus_multiplier:.2f}x)", inline=True)
+        water_streak_pct = (daily_bonus_multiplier - 1.0) * 100
+        embed.add_field(name="💧 Water Streak", value=f"**{water_streak}** {day_text} (+{water_streak_pct:.1f}%)", inline=True)
         if hoe_attunement:
             hoe_name = hoe_attunement.get("name", "Unknown")
             hoe_rarity = hoe_attunement.get("rarity", "COMMON")
@@ -14262,7 +14266,8 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
         if bloom_rank != "PINE I":
             embed_stats.add_field(name="⭐ Rank Boost", value=f"**{rank_perma_buff_multiplier:.2f}x**", inline=True)
         day_text = "day" if water_streak == 1 else "days"
-        embed_stats.add_field(name="💧 Water Streak", value=f"**{water_streak}** {day_text} ({daily_bonus_multiplier:.2f}x)", inline=True)
+        water_streak_pct = (daily_bonus_multiplier - 1.0) * 100
+        embed_stats.add_field(name="💧 Water Streak", value=f"**{water_streak}** {day_text} (+{water_streak_pct:.1f}%)", inline=True)
         if hoe_attunement:
             hoe_name = hoe_attunement.get("name", "Unknown")
             hoe_rarity = hoe_attunement.get("rarity", "COMMON")
