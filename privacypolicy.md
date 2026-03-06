@@ -2,7 +2,7 @@
 
 **Last updated:** March 5, 2025
 
-This Privacy Policy describes how the **SlashGather** Discord bot (“the Bot”) collects, uses, and protects information when you use it on Discord.
+This Privacy Policy describes how the **SlashGather** Discord bot ("the Bot") collects, uses, and protects information when you use it on Discord.
 
 ---
 
@@ -16,7 +16,7 @@ When you interact with the Bot, we may collect and store:
   - Game-related timestamps (e.g. last gather time, cooldowns).
   - Preferences you set (e.g. notification channels), if applicable.
 
-We do **not** collect your email, real name, or other personal information beyond what Discord provides (e.g. user ID) and what is necessary to run the Bot’s features.
+We do **not** collect your email, real name, or other personal information beyond what Discord provides (e.g. user ID) and what is necessary to run the Bot's features.
 
 ---
 
@@ -24,7 +24,7 @@ We do **not** collect your email, real name, or other personal information beyon
 
 We use the collected information to:
 
-- Provide and operate the Bot’s features (economy, items, cooldowns, etc.).
+- Provide and operate the Bot's features (economy, items, cooldowns, etc.).
 - Store your progress and settings so they persist across sessions and servers where the Bot is used.
 - Improve the Bot and fix issues (e.g. debugging, analytics in a way that does not identify you personally, if any).
 
@@ -53,7 +53,7 @@ Depending on where you live, you may have the right to:
 
 - **Access** the data we hold about you.
 - **Correct** inaccurate data.
-- **Delete** your data (“right to be forgotten”).
+- **Delete** your data ("right to be forgotten").
 - **Object** or **restrict** certain processing.
 
 To exercise these rights, please contact the Bot operator using the details in **Contact** below.
@@ -68,7 +68,7 @@ The Bot is not directed at children under 13 (or the applicable age in your coun
 
 ## 7. Changes to This Policy
 
-We may update this Privacy Policy from time to time. The “Last updated” date at the top will be revised when we do. Continued use of the Bot after changes constitutes acceptance of the updated policy. For major changes, we may announce them in the Discord server where the Bot is used.
+We may update this Privacy Policy from time to time. The "Last updated" date at the top will be revised when we do. Continued use of the Bot after changes constitutes acceptance of the updated policy. For major changes, we may announce them in the Discord server where the Bot is used.
 
 ---
 

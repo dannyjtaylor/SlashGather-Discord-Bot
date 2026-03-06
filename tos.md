@@ -2,7 +2,7 @@
 
 **Last updated:** March 5, 2025
 
-These Terms of Service (“Terms”) govern your use of the **SlashGather** Discord bot (“the Bot”). By inviting, using, or interacting with the Bot, you agree to these Terms.
+These Terms of Service ("Terms") govern your use of the **SlashGather** Discord bot ("the Bot"). By inviting, using, or interacting with the Bot, you agree to these Terms.
 
 ---
 
@@ -17,7 +17,7 @@ These Terms of Service (“Terms”) govern your use of the **SlashGather** Disc
 ## 2. Description of Service
 
 - SlashGather is a Discord bot that provides in-server features such as economy, gathering, items, and related gameplay.
-- The Bot is provided “as is.” We may change, limit, or discontinue features or the entire service at any time, with or without notice.
+- The Bot is provided "as is." We may change, limit, or discontinue features or the entire service at any time, with or without notice.
 
 ---
 
@@ -25,13 +25,13 @@ These Terms of Service (“Terms”) govern your use of the **SlashGather** Disc
 
 You agree **not** to:
 
-- Use the Bot in violation of Discord’s [Terms of Service](https://discord.com/terms) or [Guidelines](https://discord.com/guidelines).
+- Use the Bot in violation of Discord's [Terms of Service](https://discord.com/terms) or [Guidelines](https://discord.com/guidelines).
 - Use the Bot for any illegal purpose or to harm, harass, or abuse others.
 - Attempt to reverse-engineer, exploit, cheat, or automate abuse of the Bot (e.g. unauthorized bots or scripts that violate intended gameplay).
 - Attempt to gain unauthorized access to the Bot, its data, or its infrastructure.
 - Use the Bot in a way that could damage, overburden, or impair the service for others.
 
-We may suspend or terminate your access to the Bot (or your server’s access) if we believe you have violated these Terms or for any other reason at our discretion.
+We may suspend or terminate your access to the Bot (or your server's access) if we believe you have violated these Terms or for any other reason at our discretion.
 
 ---
 
@@ -44,16 +44,16 @@ We may suspend or terminate your access to the Bot (or your server’s access) i
 
 ## 5. Intellectual Property
 
-- The Bot, its name “SlashGather,” and its code, design, and content are owned by the Bot operator or licensors. You do not acquire any ownership rights by using the Bot.
+- The Bot, its name "SlashGather," and its code, design, and content are owned by the Bot operator or licensors. You do not acquire any ownership rights by using the Bot.
 - You may not copy, modify, distribute, or create derivative works of the Bot or its branding without permission.
 
 ---
 
 ## 6. Disclaimers
 
-- **The Bot is provided “as is” and “as available.”** We disclaim all warranties, express or implied, including merchantability and fitness for a particular purpose.
+- **The Bot is provided "as is" and "as available."** We disclaim all warranties, express or implied, including merchantability and fitness for a particular purpose.
 - We do not guarantee that the Bot will be uninterrupted, error-free, or secure.
-- In-game balances, items, and progress are part of the Bot’s service only and have no real-world value or guarantee of persistence.
+- In-game balances, items, and progress are part of the Bot's service only and have no real-world value or guarantee of persistence.
 
 ---
 
@@ -72,7 +72,7 @@ You agree to indemnify and hold harmless the Bot operator and its affiliates fro
 
 ## 9. Changes to the Terms
 
-- We may update these Terms at any time. The “Last updated” date at the top will be revised when we do.
+- We may update these Terms at any time. The "Last updated" date at the top will be revised when we do.
 - Continued use of the Bot after changes constitutes acceptance of the new Terms. For material changes, we may announce them in the Discord server or via the Bot.
 - If you do not agree to updated Terms, you must stop using the Bot.
 
