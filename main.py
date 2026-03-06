@@ -15491,7 +15491,7 @@ async def giveaway(
         embed = discord.Embed(title=title, color=discord.Color.gold())
         embed.add_field(name="PRIZE", value=prize_display, inline=False)
         embed.add_field(name="ENDS AT", value=f"<t:{int(end_at_ts)}:F>", inline=False)
-        embed.set_footer(text="React with :PROGRESS_Y: below to enter!")
+        embed.set_footer(text="REACT BELOW TO ENTER")
         message = await giveaways_ch.send(embed=embed)
         await message.add_reaction(PROGRESS_Y_PARTIAL)
         _active_giveaways[message.id] = {
