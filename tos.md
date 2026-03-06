@@ -4,11 +4,14 @@
 
 These Terms of Service ("Terms") govern your use of the **SlashGather** Discord bot ("the Bot"). By inviting, using, or interacting with the Bot, you agree to these Terms.
 
+**Discord's terms apply.** The Bot operates on Discord and complies with [Discord's Developer Terms of Service](https://support-dev.discord.com/hc/en-us/articles/8562894815383-Discord-Developer-Terms-of-Service) and [Discord's Developer Policy](https://support-dev.discord.com/hc/en-us/articles/8563934450327-Discord-Developer-Policy). Your use of Discord is also governed by [Discord's Terms of Service](https://discord.com/terms) and [Community Guidelines](https://discord.com/guidelines). **In the event of any conflict between these Terms and Discord's terms or policies, Discord's terms control.**
+
 ---
 
 ## 1. Acceptance
 
 - By using the Bot, you confirm that you have read, understood, and agree to be bound by these Terms and by our [Privacy Policy](privacypolicy.md).
+- You must be at least 13 years old (or the minimum age in your country) to use the Bot, in line with Discord's requirements.
 - If you do not agree, do not use the Bot.
 - If you are using the Bot on behalf of a server, you represent that you have authority to bind that server to these Terms (e.g. as an administrator or owner).
 
@@ -25,13 +28,17 @@ These Terms of Service ("Terms") govern your use of the **SlashGather** Discord 
 
 You agree **not** to:
 
-- Use the Bot in violation of Discord's [Terms of Service](https://discord.com/terms) or [Guidelines](https://discord.com/guidelines).
+- Use the Bot in violation of Discord's [Terms of Service](https://discord.com/terms), [Community Guidelines](https://discord.com/guidelines), or [Developer Policy](https://support-dev.discord.com/hc/en-us/articles/8563934450327-Discord-Developer-Policy).
 - Use the Bot for any illegal purpose or to harm, harass, or abuse others.
+- Use the Bot to target anyone under 13 or below the minimum age in their jurisdiction.
 - Attempt to reverse-engineer, exploit, cheat, or automate abuse of the Bot (e.g. unauthorized bots or scripts that violate intended gameplay).
 - Attempt to gain unauthorized access to the Bot, its data, or its infrastructure.
 - Use the Bot in a way that could damage, overburden, or impair the service for others.
+- Impersonate the Bot, other applications, or Discord.
 
 We may suspend or terminate your access to the Bot (or your server's access) if we believe you have violated these Terms or for any other reason at our discretion.
+
+**Reporting issues.** If you see violations of these Terms, our [Privacy Policy](privacypolicy.md), or Discord's policies in connection with the Bot, you may report them to the Bot operator (see **Contact** below). You may also report applications to [Discord](https://support.discord.com/).
 
 ---
 
@@ -82,7 +89,7 @@ You agree to indemnify and hold harmless the Bot operator and its affiliates fro
 
 - **Governing law:** These Terms are governed by the laws of the jurisdiction of the Bot operator, without regard to conflict-of-law principles.
 - **Severability:** If any part of these Terms is held invalid or unenforceable, the rest remains in effect.
-- **Entire agreement:** These Terms and the Privacy Policy constitute the entire agreement between you and the Bot operator regarding the Bot.
+- **Entire agreement:** These Terms and the Privacy Policy constitute the entire agreement between you and the Bot operator regarding the Bot. They do not supersede Discord's Developer Terms of Service or Developer Policy; where those apply, Discord's terms control.
 
 ---
 
@@ -94,4 +101,4 @@ For questions about these Terms or the Bot:
 
 ---
 
-*By using the SlashGather Discord bot, you agree to these Terms of Service.*
+*By using the SlashGather Discord bot, you agree to these Terms of Service and that the Bot operator may comply with Discord's Developer Terms of Service and Developer Policy.*

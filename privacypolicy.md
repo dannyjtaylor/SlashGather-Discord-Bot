@@ -4,6 +4,8 @@
 
 This Privacy Policy describes how the **SlashGather** Discord bot ("the Bot") collects, uses, and protects information when you use it on Discord.
 
+The Bot and its operator comply with [Discord's Developer Terms of Service](https://support-dev.discord.com/hc/en-us/articles/8562894815383-Discord-Developer-Terms-of-Service) and [Discord's Developer Policy](https://support-dev.discord.com/hc/en-us/articles/8563934450327-Discord-Developer-Policy). Where applicable, we also comply with privacy laws such as the GDPR, UK GDPR, CCPA/CPRA, LGPD, and similar regulations. **In the event of any conflict between this policy and Discord's Terms or policies, Discord's terms control.**
+
 ---
 
 ## 1. Information We Collect
@@ -16,7 +18,7 @@ When you interact with the Bot, we may collect and store:
   - Game-related timestamps (e.g. last gather time, cooldowns).
   - Preferences you set (e.g. notification channels), if applicable.
 
-We do **not** collect your email, real name, or other personal information beyond what Discord provides (e.g. user ID) and what is necessary to run the Bot's features.
+We do **not** collect your email, real name, or other personal information beyond what Discord provides (e.g. user ID) and what is necessary to run the Bot's features. We do **not** collect or store Discord login credentials, passwords, or account tokens.
 
 ---
 
@@ -26,9 +28,10 @@ We use the collected information to:
 
 - Provide and operate the Bot's features (economy, items, cooldowns, etc.).
 - Store your progress and settings so they persist across sessions and servers where the Bot is used.
+- Send you in-app notifications (e.g. achievement unlocks) via Discord when relevant to the Bot's functionality—including occasionally via direct message (DM) when an ephemeral reply is not possible (e.g. after certain minigames). These messages are only about the Bot's functionality and are not marketing or advertising.
 - Improve the Bot and fix issues (e.g. debugging, analytics in a way that does not identify you personally, if any).
 
-We do **not** sell your data. We do **not** use it for advertising or share it with third parties for marketing.
+We do **not** sell, license, or commercialize your data. We do **not** use it for advertising, share it with data brokers or ad networks, or use it to profile or discriminate against you.
 
 ---
 
@@ -40,10 +43,11 @@ We do **not** sell your data. We do **not** use it for advertising or share it w
 
 ---
 
-## 4. Data Retention
+## 4. Data Retention and Your Choices
 
-- In-game and account-linked data is kept for as long as you use the Bot and the service is running.
-- If you want your data removed, you may contact the Bot operator (see **Contact** below). We will remove or anonymize your data within a reasonable time, subject to technical and legal constraints.
+- In-game and account-linked data is kept only as long as needed for the Bot's stated functionality and the service is running.
+- You have an **easily accessible** way to request that your data be **modified or deleted**: contact the Bot operator (see **Contact** below). We will process such requests promptly and remove or anonymize your data within a reasonable time, subject to technical and legal constraints.
+- If you do not want to receive DMs from the Bot (e.g. achievement notifications), you can block the Bot or contact us to request deletion of your data and we will not use your data to send further DMs.
 
 ---
 
@@ -72,12 +76,14 @@ We may update this Privacy Policy from time to time. The "Last updated" date at 
 
 ---
 
-## 8. Contact
+## 8. Contact and Data Requests
 
-For privacy-related questions, data requests, or to report issues:
+For privacy-related questions, **data access/correction/deletion requests**, or to report issues:
 
 - Contact the Bot operator in the Discord server where you use SlashGather, or via the support/invite link provided for the Bot.
 
+We will respond to valid requests in line with applicable law. You can also report violations of Discord's policies (including the Developer Policy) to Discord via their [support channels](https://support.discord.com/).
+
 ---
 
-*By using the SlashGather Discord bot, you agree to this Privacy Policy.*
+*By using the SlashGather Discord bot, you agree to this Privacy Policy. This policy does not supersede Discord's Developer Terms of Service or Developer Policy where those apply.*

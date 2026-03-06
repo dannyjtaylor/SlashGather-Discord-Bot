@@ -440,7 +440,7 @@ def set_user_server_booster(user_id: int, value: bool) -> None:
     )
 
 
-# Premium tier: 0 = none, 1 = Seed ($3), 2 = Sprout ($8), 3 = Sapling ($15), 4 = Evergreen ($20). Synced from Discord roles.
+# Premium tier: 0 = none, 1 = Seed ($2), 2 = Sprout ($5), 3 = Sapling ($10), 4 = Evergreen ($15). Synced from Discord roles.
 PREMIUM_TREE_RING_REDUCTION = {0: 0, 1: 5, 2: 8, 3: 15, 4: 25}  # plants less per tree ring
 
 

@@ -3312,7 +3312,7 @@ def get_server_booster_money_multiplier(user_id: int) -> float:
     return SERVER_BOOSTER_MONEY_MULTIPLIER if get_user_server_booster(user_id) else 1.0
 
 
-# Premium tiers (Discord roles): Seed $3, Sprout $8, Sapling $15, Evergreen $20. Exclusive: higher tier = better benefits, no stacking.
+# Premium tiers (Discord roles): Seed $2, Sprout $5, Sapling $10, Evergreen $15. Exclusive: higher tier = better benefits, no stacking.
 PREMIUM_ROLE_NAMES = ["Seed", "Sprout", "Sapling", "Evergreen"]
 # Permanent money boost (\"Permaboost\") for each premium rank
 # Seed=1.1x, Sprout=1.5x, Sapling=2.0x, Evergreen=3.0x
@@ -3329,13 +3329,13 @@ PREMIUM_COOLDOWN_REDUCTIONS = {
     3: {"gather_reduction": 5, "harvest_reduction": 240, "mine_reduction": 480},
     4: {"gather_reduction": 7, "harvest_reduction": 420, "mine_reduction": 900},
 }
-# Display names must match Discord role names exactly (e.g. "🪴SAPLING ($15)" with no space after emoji)
+# Display names must match Discord role names exactly (e.g. "🪴SAPLING ($10)" with no space after emoji)
 PREMIUM_DISPLAY = {
     0: "",
-    1: "🌰 SEED ($3)",
-    2: "🌱 SPROUT ($8)",
-    3: "🪴SAPLING ($15)",
-    4: "🌲 EVERGREEN ($20)",
+    1: "🌰 SEED ($2)",
+    2: "🌱 SPROUT ($5)",
+    3: "🪴SAPLING ($10)",
+    4: "🌲 EVERGREEN ($15)",
 }
 # Base daily /water amount per streak day for each premium rank
 # 0 (none): 5,000; Seed: 15,000; Sprout: 50,000; Sapling: 100,000; Evergreen: 500,000
@@ -3379,13 +3379,71 @@ PREMIUM_GARDENER_HARVEST_COLORS = {
     9: discord.Color(0xE8590C),  # Evergreen - dark orange
 }
 
+# Emoji for each premium gardener in embeds (Seed=chestnut, Sprout=sprout, Sapling=potted plant, Evergreen=evergreen).
+# Use Unicode below, or replace with custom Discord emoji <:name:id> from your server.
+PREMIUM_GARDENER_EMOJI = {
+    6: "🌰",   # Seed - chestnut
+    7: "🌱",   # Sprout - sprout
+    8: "🪴",   # Sapling - potted plant
+    9: "🌲",   # Evergreen - evergreen
+}
+
+# Map Discord SKU IDs (from Developer Portal → Monetization → SKUs) to premium tier 1–4.
+PREMIUM_SKU_TO_TIER: dict[str, int] = {
+    "1479298502399098962": 1,   # SEED RANK ($2) 🌰
+    "1479312006095048724": 2,   # SPROUT RANK ($5) 🌱
+    "1479313565864165603": 3,   # SAPLING RANK ($10) 🪴
+    "1479315594183446691": 4,   # EVERGREEN RANK ($15) 🌲
+}
+
+# Role names that match the SKU product names (create these exact roles in your server).
+PREMIUM_ROLE_NAMES_SKU: dict[int, str] = {
+    1: "SEED RANK ($2) 🌰",
+    2: "SPROUT RANK ($5) 🌱",
+    3: "SAPLING RANK ($10) 🪴",
+    4: "EVERGREEN RANK ($15) 🌲",
+}
+
+
+async def assign_premium_role_for_entitlement(
+    guild: discord.Guild, user_id: int, sku_id: str
+) -> bool:
+    """
+    If sku_id is in PREMIUM_SKU_TO_TIER, assign the corresponding premium role to the user in the guild.
+    Returns True if a role was assigned, False otherwise.
+    """
+    tier = PREMIUM_SKU_TO_TIER.get(str(sku_id))
+    if tier is None or tier < 1 or tier > 4:
+        return False
+    member = guild.get_member(user_id)
+    if member is None:
+        return False
+    # Try SKU role name first (e.g. "SEED RANK ($2) 🌰"), then PREMIUM_DISPLAY, then simple name
+    role_name = PREMIUM_ROLE_NAMES_SKU.get(tier) or PREMIUM_DISPLAY.get(tier, "").strip() or PREMIUM_ROLE_NAMES[tier - 1]
+    role = discord.utils.get(guild.roles, name=role_name)
+    if role is None:
+        role = discord.utils.get(guild.roles, name=PREMIUM_DISPLAY.get(tier, "").strip())
+    if role is None:
+        role = discord.utils.get(guild.roles, name=PREMIUM_ROLE_NAMES[tier - 1])
+    if role is None:
+        return False
+    if role in member.roles:
+        return False
+    try:
+        await member.add_roles(role, reason="Premium purchase (SKU)")
+        set_user_premium_tier(user_id, tier)
+        return True
+    except Exception as e:
+        print(f"[Premium] Failed to assign role {role_name} to {user_id}: {e}")
+        return False
+
 
 def get_premium_tier_from_member(member: discord.Member | None) -> int:
     """
     Return premium tier 0-4 by looking only at the member's Discord roles.
 
     Supports both legacy simple role names (Seed/Sprout/Sapling/Evergreen) and
-    the display-style names used in PREMIUM_DISPLAY (e.g. \"🌰 SEED ($3)\").
+    the display-style names used in PREMIUM_DISPLAY (e.g. \"🌰 SEED ($2)\").
     Highest matching tier wins. No DB reads.
     """
     if member is None:
@@ -3398,13 +3456,18 @@ def get_premium_tier_from_member(member: discord.Member | None) -> int:
     legacy_names = ["Seed", "Sprout", "Sapling", "Evergreen"]
 
     tier = 0
+    # Check against SKU role names first (e.g. "SEED RANK ($2) 🌰")
+    for i in range(1, 5):
+        sku_name = PREMIUM_ROLE_NAMES_SKU.get(i)
+        if sku_name and sku_name in member_role_names:
+            tier = max(tier, i)
     # Check against PREMIUM_DISPLAY names (if configured)
     for i in range(1, 5):
         display_name = PREMIUM_DISPLAY.get(i, "")
         if display_name and display_name in member_role_names:
             tier = max(tier, i)
 
-    # Fallback: role name contains tier name (e.g. "🪴SAPLING ($15)" contains "Sapling"), case-insensitive
+    # Fallback: role name contains tier name (e.g. "🪴SAPLING ($10)" contains "Sapling"), case-insensitive
     for i, legacy in enumerate(legacy_names, start=1):
         if any(legacy.lower() in name.lower() for name in member_role_names):
             tier = max(tier, i)
@@ -7093,10 +7156,20 @@ class SlotsView(discord.ui.View):
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
+VALID_SLOTS_CHANNELS = ("slots-1", "slots-2", "slots-3", "slots-4", "slots-5")
+VALID_MAYFLOWER_CHANNELS = ("mayflower-1", "mayflower-2", "mayflower-3", "mayflower-4", "mayflower-5")
+VALID_GATHEMON_CHANNELS = ("gathemon-1", "gathemon-2", "gathemon-3", "gathemon-4", "gathemon-5")
+
+
 @bot.tree.command(name="slots", description="Play slots! 5x5 grid — bet 0.1% (middle row) or 1% (all lines).")
 async def slots(interaction: discord.Interaction):
     try:
         if not await safe_defer(interaction, ephemeral=False):
+            return
+        channel_name = (interaction.channel.name or "").lower().replace(" ", "-")
+        if channel_name not in VALID_SLOTS_CHANNELS:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ Slots can only be played in **#slots-1**, **#slots-2**, **#slots-3**, **#slots-4**, or **#slots-5**!", ephemeral=True)
             return
         user_id = interaction.user.id
         is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
@@ -7280,6 +7353,35 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             await asyncio.to_thread(sync_premium_tier_from_member, after)
         except Exception as e:
             print(f"[Premium] Error syncing premium tier for {after.id}: {e}")
+
+
+@bot.event
+async def on_entitlement_create(entitlement):
+    """
+    When a user purchases a premium SKU, Discord may send this gateway event.
+    If your discord.py version does not dispatch it, use /syncpremium after purchasing.
+    """
+    if not PREMIUM_SKU_TO_TIER:
+        return
+    data = entitlement if isinstance(entitlement, dict) else getattr(entitlement, "__dict__", {})
+    if not data:
+        return
+    sku_id = data.get("sku_id")
+    user_id = data.get("user_id")
+    guild_id = data.get("guild_id")
+    if not sku_id or not user_id or not guild_id:
+        return
+    user_id = int(user_id)
+    guild_id = int(guild_id)
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    try:
+        assigned = await assign_premium_role_for_entitlement(guild, user_id, str(sku_id))
+        if assigned:
+            print(f"[Premium] Assigned role for SKU {sku_id} to user {user_id} in guild {guild_id}")
+    except Exception as e:
+        print(f"[Premium] Error handling entitlement_create: {e}")
 
 
 @bot.event
@@ -10063,6 +10165,129 @@ async def cooldowns(interaction: discord.Interaction):
     except Exception as e:
         print(f"Error in cooldowns command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+def _is_admin(member: discord.Member | None) -> bool:
+    """Return True if the member has Administrator permission in the guild."""
+    if member is None:
+        return False
+    return member.guild_permissions.administrator
+
+
+@bot.tree.command(
+    name="syncpremium",
+    description="[Admin] Sync a user's premium role from their Discord purchase (fallback if role wasn't assigned automatically)",
+)
+@app_commands.describe(
+    user="The member to sync (leave empty to sync yourself). Must have purchased a premium SKU for this server.",
+)
+@app_commands.default_permissions(administrator=True)
+async def syncpremium(interaction: discord.Interaction, user: discord.Member | None = None):
+    """
+    Admin-only. Fetches the target user's entitlements from Discord's API and assigns
+    the matching premium role if they purchased a SKU for this server. Use when the
+    automatic entitlement event didn't assign the role (e.g. bot was restarted or event not supported).
+    """
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if not _is_admin(interaction.user):
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ Only server administrators can use this command.",
+                ephemeral=True,
+            )
+            return
+        if not PREMIUM_SKU_TO_TIER:
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ Premium SKUs are not configured.",
+                ephemeral=True,
+            )
+            return
+        guild = interaction.guild
+        if guild is None:
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ This command must be used in a server.",
+                ephemeral=True,
+            )
+            return
+        target_member = user if user is not None else interaction.user
+        target_member = guild.get_member(target_member.id)
+        if target_member is None:
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ That user is not in this server.",
+                ephemeral=True,
+            )
+            return
+        user_id = target_member.id
+        bot_token = token
+        if not bot_token:
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ Bot token not available.",
+                ephemeral=True,
+            )
+            return
+        url = (
+            "https://discord.com/api/v10/applications/@me/entitlements"
+            f"?guild_id={guild.id}&user_id={user_id}"
+        )
+        headers = {"Authorization": f"Bot {bot_token}"}
+        assigned_any = False
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    print(f"[syncpremium] Entitlements API returned {resp.status}: {body[:200]}")
+                    await safe_interaction_response(
+                        interaction, interaction.followup.send,
+                        "❌ Could not fetch entitlements from Discord. Try again later or check bot logs.",
+                        ephemeral=True,
+                    )
+                    return
+                data = await resp.json()
+        if not isinstance(data, list):
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ Unexpected response from Discord.",
+                ephemeral=True,
+            )
+            return
+        for ent in data:
+            if ent.get("deleted") or ent.get("consumed"):
+                continue
+            sku_id = ent.get("sku_id")
+            if sku_id is None:
+                continue
+            assigned = await assign_premium_role_for_entitlement(guild, user_id, str(sku_id))
+            if assigned:
+                assigned_any = True
+        await asyncio.to_thread(sync_premium_tier_from_member, target_member)
+        if assigned_any:
+            who = "your" if target_member.id == interaction.user.id else f"**{target_member.display_name}**'s"
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                f"✅ {who.capitalize()} premium role has been assigned based on their purchase.",
+                ephemeral=True,
+            )
+        else:
+            who = "You don't" if target_member.id == interaction.user.id else f"**{target_member.display_name}** doesn't"
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                f"{who} have any active premium purchases for this server, or already have the role. If they just bought, wait a moment and try again.",
+                ephemeral=True,
+            )
+    except Exception as e:
+        print(f"Error in syncpremium command: {e}")
+        traceback.print_exc()
+        await safe_interaction_response(
+            interaction, interaction.followup.send,
+            "❌ An error occurred. Please try again.",
+            ephemeral=True,
+        )
 
 
 def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
@@ -12922,8 +13147,9 @@ class HireView(discord.ui.View):
             harvest_chance = PREMIUM_GARDENER_HARVEST_CHANCES.get(slot_id, 0.0)
             harvest_chance_pct = max(0.0, min(100.0, harvest_chance * 100))
             color = PREMIUM_GARDENER_GATHER_COLORS.get(slot_id, discord.Color.blue())
+            tier_emoji = PREMIUM_GARDENER_EMOJI.get(slot_id, "🪴")
             embed = discord.Embed(
-                title=f"🪴 {tier_label} RANK GARDENER",
+                title=f"{tier_emoji} {tier_label} RANK GARDENER",
                 description=(
                     f"This gardener has a **{chance:.0f}%** chance to /gather every minute, "
                     f"and a **{harvest_chance_pct:.0f}%** chance to auto-harvest!"
@@ -16408,8 +16634,9 @@ async def gardener_background_task():
                                                     rip_em = get_ripeness_imbue_emoji(gather_result.get("ripeness", ""))
                                                     desc_prefix = f"{rip_em} " if rip_em else ""
                                                     gather_color = PREMIUM_GARDENER_GATHER_COLORS.get(gardener_id, discord.Color.green()) if is_premium_gardener else discord.Color.green()
+                                                    gardener_emoji = PREMIUM_GARDENER_EMOJI.get(gardener_id, "🌿") if is_premium_gardener else "🌿"
                                                     embed = discord.Embed(
-                                                        title=f"🌿 {user_name}'s Gardener gathered!",
+                                                        title=f"{gardener_emoji} {user_name}'s Gardener gathered!",
                                                         description=f"{desc_prefix}Their gardener found a **{gather_result['name']}**!",
                                                         color=gather_color
                                                     )
@@ -18569,11 +18796,12 @@ async def gathemon(interaction: discord.Interaction, user: discord.Member, plant
     try:
         if not await safe_defer(interaction, ephemeral=False):
             return
-        channel_name = (interaction.channel.name or "").lower()
-        if channel_name not in ("gathemon-1", "gathemon-2"):
+        channel_name = (interaction.channel.name or "").lower().replace(" ", "-")
+        if channel_name not in VALID_GATHEMON_CHANNELS:
             await safe_interaction_response(interaction, interaction.followup.send,
-                "❌ GathéMon can only be played in **#gathemon-1** or **#gathemon-2**!", ephemeral=False)
+                "❌ GathéMon can only be played in **#gathemon-1** through **#gathemon-5**!", ephemeral=False)
             return
+        channel_id = interaction.channel.id
         challenger_id = interaction.user.id
         opponent_id = user.id
         if opponent_id == challenger_id:
@@ -18585,9 +18813,11 @@ async def gathemon(interaction: discord.Interaction, user: discord.Member, plant
         if plants < 1 or plants > 10:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ Plants must be between 1 and 10!", ephemeral=False)
             return
-        if active_gathemon_challenges or active_gathemon_battles:
+        channel_has_challenge = any(c.get("channel_id") == channel_id for c in active_gathemon_challenges.values())
+        channel_has_battle = any(b.channel_id == channel_id for b in active_gathemon_battles.values())
+        if channel_has_challenge or channel_has_battle:
             await safe_interaction_response(interaction, interaction.followup.send,
-                "❌ A GathéMon game is already in progress. Wait for it to finish!", ephemeral=False)
+                "❌ A GathéMon game is already in progress in this channel. Wait for it to finish!", ephemeral=False)
             return
         if challenger_id in user_active_gathemon or opponent_id in user_active_gathemon:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ You or your opponent is already in a GathéMon battle!", ephemeral=False)
@@ -18600,6 +18830,7 @@ async def gathemon(interaction: discord.Interaction, user: discord.Member, plant
             "challenger_id": challenger_id,
             "opponent_id": opponent_id,
             "bet": plants,
+            "channel_id": channel_id,
         }
         view = GathemonLobbyView(challenge_id, challenger_id, opponent_id, plants, timeout=300)
         embed = discord.Embed(
@@ -18630,10 +18861,10 @@ async def gathership(interaction: discord.Interaction, user: discord.Member, bet
         opponent_id = user.id
         opponent_name = user.name
         channel_id = interaction.channel.id
-        channel_name = (interaction.channel.name or "").lower()
-        if channel_name not in ("mayflower-1", "mayflower-2"):
+        channel_name = (interaction.channel.name or "").lower().replace(" ", "-")
+        if channel_name not in VALID_MAYFLOWER_CHANNELS:
             await safe_interaction_response(interaction, interaction.followup.send,
-                "❌ Mayflower can only be played in **#mayflower-1** or **#mayflower-2**!", ephemeral=True)
+                "❌ Mayflower can only be played in **#mayflower-1** through **#mayflower-5**!", ephemeral=True)
             return
 
         if opponent_id == host_id:
