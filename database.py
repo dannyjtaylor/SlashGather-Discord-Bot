@@ -1740,6 +1740,9 @@ _WIPE_PLANTS_SET = {
     "last_roulette_elimination_time": 0.0,
     "last_coinflip_loss_time": 0.0,
     "last_water_time": 0.0,
+    "consecutive_water_days": 0,
+    "water_count": 0,
+    "achievements.water_streak": 0,
 }
 
 
@@ -2576,6 +2579,7 @@ def get_user_hoe_attunement(user_id: int) -> Optional[Dict]:
 def set_user_hoe_attunement(user_id: int, attunement: Optional[Dict]) -> None:
     """Set user's hoe imbuement. Pass None to clear."""
     users = _get_users_collection()
+    _ensure_user_document(user_id)
     users.update_one(
         {"_id": int(user_id)},
         {"$set": {"hoe_enchantment": attunement}},
@@ -2596,6 +2600,7 @@ def get_user_tractor_attunement(user_id: int) -> Optional[Dict]:
 def set_user_tractor_attunement(user_id: int, attunement: Optional[Dict]) -> None:
     """Set user's tractor imbuement. Pass None to clear."""
     users = _get_users_collection()
+    _ensure_user_document(user_id)
     users.update_one(
         {"_id": int(user_id)},
         {"$set": {"tractor_enchantment": attunement}},
@@ -2641,6 +2646,7 @@ def get_user_hoe_attunement(user_id: int) -> Optional[Dict]:
 def set_user_hoe_attunement(user_id: int, attunement: Optional[Dict]) -> None:
     """Set user's hoe imbuement. Pass None to clear."""
     users = _get_users_collection()
+    _ensure_user_document(user_id)
     users.update_one(
         {"_id": int(user_id)},
         {"$set": {"hoe_enchantment": attunement}},
@@ -2661,6 +2667,7 @@ def get_user_tractor_attunement(user_id: int) -> Optional[Dict]:
 def set_user_tractor_attunement(user_id: int, attunement: Optional[Dict]) -> None:
     """Set user's tractor imbuement. Pass None to clear."""
     users = _get_users_collection()
+    _ensure_user_document(user_id)
     users.update_one(
         {"_id": int(user_id)},
         {"$set": {"tractor_enchantment": attunement}},

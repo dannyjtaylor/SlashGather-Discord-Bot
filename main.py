@@ -719,6 +719,7 @@ RARITY_EMOJI = {
 # Progress bar emojis for /gear, /orchard, /achievements (white = not filled, green = filled)
 PROGRESS_N = "<:PROGRESS_N:1477736801480474634>"  # white square
 PROGRESS_Y = "<:PROGRESS_Y:1477736340941701416>"  # green square
+PROGRESS_Y_PARTIAL = discord.PartialEmoji(name="PROGRESS_Y", id=1477736340941701416, animated=False)  # for giveaway entry reaction
 
 # Ripeness name -> imbue tier for plant display (COMMON/UNCOMMON/RARE + rares LEGENDARY/NETHERITE/LUMINITE/CELESTIAL/SECRET)
 RIPENESS_IMBUE_TIER = {
@@ -3929,13 +3930,7 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
     base_final_value = final_value  # Base value after orchard/gear upgrades
 
-    # Calculate each boost as a percentage of the base value (additive, not compounding)
-    extra_money_from_bloom = base_final_value * (bloom_multiplier - 1.0)
-    extra_money_from_water = base_final_value * (water_multiplier - 1.0)
-    extra_money_from_achievement = base_final_value * (achievement_multiplier - 1.0)
-    # Note: extra_money_from_daily is now calculated later on base_for_buffs to match other buffs
-
-    # Apply hoe imbuement money bonus (Prosperity) - additive from base
+    # Hoe imbuement: Prosperity (money bonus) and critical chance
     if full_data is not None:
         hoe_enchant = full_data.get("hoe_enchantment")
     else:
@@ -3954,32 +3949,24 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         if crit_chance > 0 and apply_cooldown:  # apply_cooldown=True means player, not gardener
             is_critical_gather = random.random() < crit_chance
 
-    # Subtotal = base + all additive boosts (before rank) - daily bonus moved to later stage
-    subtotal = base_final_value + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + enchant_money_bonus
+    # Single base for all % buffs: (base + enchant) * rank * critical * scarecrow * bloomstone
+    # This ensures displayed amounts match percentages (e.g. 55% always shows more $ than 50%).
+    base_before_rank = base_final_value + enchant_money_bonus
+    after_rank = base_before_rank * rank_perma_buff_multiplier
+    after_critical = after_rank * (2.0 if is_critical_gather else 1.0)
+    scarecrow_mult = 1.10 if (full_data is not None and full_data.get("shop_inventory", {}).get("scarecrow", 0) >= 1) or (full_data is None and has_shop_item(user_id, "scarecrow")) else 1.0
+    after_scarecrow = after_critical * scarecrow_mult
+    bloomstone_mult = 3.0 if (item.get("category") == "Flower" and ((full_data is not None and full_data.get("shop_inventory", {}).get("bloomstone", 0) >= 1) or (full_data is None and has_shop_item(user_id, "bloomstone")))) else 1.0
+    after_bloomstone = after_scarecrow * bloomstone_mult
+    base_for_buffs = float(after_bloomstone)
 
-    # Rank boost is multiplicative on the entire subtotal (1.2x per rank-up)
-    extra_money_from_rank = subtotal * (rank_perma_buff_multiplier - 1.0)
-    final_value = subtotal + extra_money_from_rank
+    # Rank boost display: dollar amount that rank added (for embed only)
+    extra_money_from_rank = base_for_buffs * (rank_perma_buff_multiplier - 1.0) / rank_perma_buff_multiplier if rank_perma_buff_multiplier > 1.0 else 0.0
 
-    # Apply critical gather (2x all money) after all boosts
-    if is_critical_gather:
-        final_value *= 2  # 2x all money on critical
-
-    # Daily shop: Scarecrow (+10% gather money)
-    if full_data is not None and full_data.get("shop_inventory", {}).get("scarecrow", 0) >= 1:
-        final_value *= 1.10
-    elif full_data is None and has_shop_item(user_id, "scarecrow"):
-        final_value *= 1.10
-
-    # Daily shop: Bloomstone (flowers 3x)
-    if item.get("category") == "Flower":
-        if full_data is not None and full_data.get("shop_inventory", {}).get("bloomstone", 0) >= 1:
-            final_value *= 3.0
-        elif full_data is None and has_shop_item(user_id, "bloomstone"):
-            final_value *= 3.0
-
-    # All money buffs below apply to the SAME base value (additive stacking). No buff's result becomes the "new base".
-    base_for_buffs = float(final_value)
+    # All additive % buffs use the SAME base (base_for_buffs) so higher % always = higher $
+    extra_money_from_bloom = base_for_buffs * (bloom_multiplier - 1.0)
+    extra_money_from_water = base_for_buffs * (water_multiplier - 1.0)
+    extra_money_from_achievement = base_for_buffs * (achievement_multiplier - 1.0)
     beta_tester_mult = get_beta_tester_money_multiplier(user_id)
     server_booster_mult = get_server_booster_money_multiplier(user_id)
     premium_mult = get_premium_tier_money_multiplier(user_id)
@@ -3989,7 +3976,6 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     palace_mult = get_palace_treasure_money_multiplier(user_id)
     edward_mult = get_edward_splash_money_multiplier(user_id)
     eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
-    # Water Streak Boost now calculated on same base as other buffs for consistent display
     extra_money_from_daily = base_for_buffs * (daily_bonus_multiplier - 1.0) if daily_bonus_multiplier > 1.0 else 0.0
     extra_money_from_beta_tester = base_for_buffs * (beta_tester_mult - 1.0) if beta_tester_mult > 1.0 else 0.0
     extra_money_from_server_booster = base_for_buffs * (server_booster_mult - 1.0) if server_booster_mult > 1.0 else 0.0
@@ -4007,7 +3993,7 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         alchemist_extra = base_for_buffs * 0.05
     elif full_data is None and has_shop_item(user_id, "alchemists_pocketwatch"):
         alchemist_extra = base_for_buffs * 0.05
-    final_value = base_for_buffs + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra
+    final_value = base_for_buffs + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra
 
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
@@ -4338,7 +4324,8 @@ def _almanac_section_filled(almanac_entries: dict, category: str) -> bool:
 
 
 async def check_almanac_achievements_async(user_id: int, channel_or_interaction, user_mention: str):
-    """After gather/harvest (or gardener): update almanac achievement level and section hidden achievements; notify if new."""
+    """After gather/harvest (or gardener): update almanac achievement level and section hidden achievements; notify if new.
+    Achievements are DM'd to the user (can't send ephemeral after response already sent)."""
     try:
         almanac_entries = get_user_almanac_entries(user_id)
         total_slots = _almanac_total_slots_excluding_mikellion()
@@ -4348,21 +4335,11 @@ async def check_almanac_achievements_async(user_id: int, channel_or_interaction,
         current_level = get_user_achievement_level(user_id, "almanac")
         if new_level > current_level:
             set_user_achievement_level(user_id, "almanac", new_level)
-            if channel_or_interaction and hasattr(channel_or_interaction, "channel"):
-                ch = channel_or_interaction.channel
-            else:
-                ch = channel_or_interaction
-            if ch:
-                await send_achievement_notification_async(ch, user_mention, "almanac", new_level)
+            await send_achievement_notification_dm(user_id, "almanac", new_level)
         for (hidden_key, cat) in [("flower_plower", "Flower"), ("parfaits", "Fruit"), ("eat_greens", "Vegetable")]:
             if _almanac_section_filled(almanac_entries, cat) and not has_hidden_achievement(user_id, hidden_key):
                 unlock_hidden_achievement(user_id, hidden_key)
-                if channel_or_interaction and hasattr(channel_or_interaction, "channel"):
-                    ch = channel_or_interaction.channel
-                else:
-                    ch = channel_or_interaction
-                if ch:
-                    await send_hidden_achievement_notification_async(ch, user_mention, hidden_key)
+                await send_hidden_achievement_notification_dm(user_id, hidden_key)
     except Exception as e:
         print(f"Error in check_almanac_achievements_async: {e}")
 
@@ -7212,7 +7189,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.0.0"
+            name="running /gather on V1.0.1"
         )
     )
     try:
@@ -14590,7 +14567,7 @@ async def wipe(interaction: discord.Interaction, type: str):
                 description=f"Reset collected plants for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank.",
                 color=discord.Color.orange()
             )
-            embed.add_field(name="What was reset", value="• Collected items\n• Gather stats\n• Ripeness stats\n• Tree Rings\n• Rank (set to PLANTER I)\n• Planter achievement\n• All cooldowns", inline=False)
+            embed.add_field(name="What was reset", value="• Collected items\n• Gather stats\n• Ripeness stats\n• Tree Rings\n• Rank (set to PLANTER I)\n• Planter achievement\n• /water streak and water count\n• All cooldowns", inline=False)
             embed.add_field(name="What was kept", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs", inline=False)
         elif type == "crypto":
             wiped_count = await asyncio.to_thread(wipe_guild_crypto, user_ids)
@@ -15306,7 +15283,7 @@ async def bot_pay(interaction: discord.Interaction, user: discord.Member, amount
         current = get_user_balance(user_id)
         new_balance = normalize_money(current + amount)
         update_user_balance(user_id, new_balance)
-        log_msg = f"🎵 [ADMIN]: Gave ${amount:,.2f} to {user.mention}"
+        log_msg = f"{PROGRESS_Y} **/GATHER** paid ${amount:,.2f} to {user.mention}!"
         await safe_interaction_response(interaction, interaction.followup.send, log_msg, ephemeral=False)
         print(f"Admin {interaction.user.name} used /bot_pay to give {user.name} ${amount:,.2f}")
     except Exception as e:
@@ -15357,17 +15334,17 @@ async def _giveaway_end_task(
         message = await channel.fetch_message(message_id)
     except Exception:
         return
-    # Find NETHER_STAR reaction (same id as NETHER_STAR_EMOJI_PARTIAL)
-    nether_reaction = None
+    # Find :PROGRESS_Y: reaction (giveaway entry)
+    entry_reaction = None
     for r in message.reactions:
-        if getattr(r.emoji, "id", None) == NETHER_STAR_EMOJI_PARTIAL.id or (isinstance(r.emoji, str) and "netherstar" in str(r.emoji).lower()):
-            nether_reaction = r
+        if getattr(r.emoji, "id", None) == PROGRESS_Y_PARTIAL.id or (isinstance(r.emoji, str) and "progress_y" in str(r.emoji).lower()):
+            entry_reaction = r
             break
-    if not nether_reaction:
-        await channel.send("🫐 Giveaway ended with no valid entries (NETHER_STAR reaction not found).")
+    if not entry_reaction:
+        await channel.send("🫐 Giveaway ended with no valid entries (:PROGRESS_Y: reaction not found).")
         return
     entrants = []
-    async for u in nether_reaction.users():
+    async for u in entry_reaction.users():
         if not u.bot:
             entrants.append(u)
     if not entrants:
@@ -15488,18 +15465,19 @@ async def giveaway(
                     "❌ **Error**: Imbue name not found for that tool and rarity.", ephemeral=True)
                 return
             attunement = dict(matched[0])
-            prize_display = f"{attunement['name']} ({rarity_upper} {tool_type})"
+            rank_emoji = RARITY_EMOJI.get(rarity_upper, f"[{rarity_upper}]")
+            prize_display = f"{rank_emoji} **{attunement['name']}**"
             prize_data = {"type": "imbue", "tool_type": tool_type, "attunement": attunement}
         else:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: Invalid prize type.", ephemeral=True)
             return
-        title = f"🫐 **/GATHER GIVEAWAY** {NETHER_STAR_EMOJI}"
+        title = f"🫐 **/GATHER GIVEAWAY** {PROGRESS_Y}"
         embed = discord.Embed(title=title, color=discord.Color.gold())
-        embed.add_field(name="Prize", value=prize_display, inline=False)
+        embed.add_field(name="PRIZE", value=prize_display, inline=False)
         embed.add_field(name="ENDS AT", value=f"<t:{int(end_at_ts)}:F>", inline=False)
-        embed.set_footer(text="React with the Nether Star below to enter!")
+        embed.set_footer(text="React with :PROGRESS_Y: below to enter!")
         message = await giveaways_ch.send(embed=embed)
-        await message.add_reaction(NETHER_STAR_EMOJI_PARTIAL)
+        await message.add_reaction(PROGRESS_Y_PARTIAL)
         _active_giveaways[message.id] = {
             "channel_id": giveaways_ch.id,
             "guild_id": guild.id,
@@ -15512,7 +15490,7 @@ async def giveaway(
             message.id, giveaways_ch.id, guild.id, end_at_ts, prize_display, prize_data, num_winners
         ))
         await safe_interaction_response(interaction, interaction.followup.send,
-            f"✅ Giveaway started in #giveaways! Ends in **{int(duration_minutes)}** minutes. React with {NETHER_STAR_EMOJI} to enter.", ephemeral=True)
+            f"✅ Giveaway started in #giveaways! Ends in **{int(duration_minutes)}** minutes. React with {PROGRESS_Y} to enter.", ephemeral=True)
         print(f"Admin {interaction.user.name} started /giveaway in #giveaways: {prize_display}, {num_winners} winner(s)")
     except Exception as e:
         print(f"Error in giveaway command: {e}")
