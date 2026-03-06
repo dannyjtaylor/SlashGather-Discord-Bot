@@ -1,5 +1,3 @@
-# Do not commit real credentials. Use placeholders and set real values in .env at deploy time.
-# Example: DATABASE_URL=postgresql://user:password@host:5432/dbname
 
 apt-get update
 apt-get install -y python3 python3-pip git

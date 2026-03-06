@@ -7202,7 +7202,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V0.11.7"
+            name="running /gather on V1.0.0"
         )
     )
     try:
@@ -7315,10 +7315,10 @@ async def on_member_join(member):
         try:
             if inviter:
                 await welcome_channel.send(
-                    f"\U0001f333 Welcome {member.mention} to /gather, thank you {inviter.mention} for inviting them! \U0001f338"
+                    f"\U0001f333 Welcome {member.mention} to **/GATHER**, thank you to {inviter.mention} for inviting them! \U0001f338"
                 )
             else:
-                await welcome_channel.send(f"\U0001f333 Welcome {member.mention} to /gather! \U0001f338")
+                await welcome_channel.send(f"\U0001f333 Welcome {member.mention} to **/GATHER**! \U0001f338")
         except discord.Forbidden:
             print(f"[Invites] No permission to send in #welcome in {guild.name}")
         except Exception as e:
