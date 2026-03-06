@@ -115,6 +115,7 @@ from database import (
     perform_batch_gather_update,
     get_user_tree_rings,
     increment_tree_rings,
+    recalculate_user_tree_rings,
     get_bloom_multiplier,
     get_bloom_rank,
     get_user_bloom_count,
@@ -137,6 +138,10 @@ from database import (
     wipe_user_plants,
     wipe_user_crypto,
     wipe_user_all,
+    wipe_guild_money,
+    wipe_guild_plants,
+    wipe_guild_crypto,
+    wipe_guild_all,
     _get_users_collection,
     get_user_achievement_level,
     set_user_achievement_level,
@@ -6953,6 +6958,10 @@ class SlotsView(discord.ui.View):
         balance = get_user_balance(self.user_id)
         balance = normalize_money(balance)
         desc_parts = [f"Balance: **{format_money(balance)}**"]
+        # Show when Slot Token grants a free spin today (daily shop item)
+        date_est = _get_date_est()
+        if has_shop_item(self.user_id, "slot_token") and get_slot_token_free_spin_used_date_est(self.user_id) != date_est:
+            desc_parts.append("🎫 **You have a free spin today!** (Slot Token)")
         if self.bet_type:
             pct = 0.001 if self.bet_type == "0.1%" else 0.01
             bet_amt = normalize_money(balance * pct)
@@ -7207,9 +7216,23 @@ async def on_ready():
     )
     try:
         synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} commands")
+        print(f"Synced {len(synced)} commands globally")
+        cmd_names = [c.name for c in synced]
+        if "give" in cmd_names and "bot_pay" in cmd_names and "giveaway" in cmd_names:
+            print("Commands verified: /give, /bot_pay, /giveaway are registered.")
+        # In development, also sync to each guild so the dev server sees new/renamed commands immediately (global sync can take up to 1 hour to propagate)
+        env = os.getenv("ENVIRONMENT", "").lower()
+        if env == "development" and bot.guilds:
+            for guild in bot.guilds:
+                try:
+                    await bot.tree.sync(guild=guild)
+                    print(f"Synced commands to guild: {guild.name} ({guild.id})")
+                except Exception as eg:
+                    print(f"Guild sync failed for {guild.name}: {eg}")
     except Exception as e:
         print(f"Error syncing commands: {e}")
+        import traceback
+        traceback.print_exc()
 
     # If bot restarted during an event, send end embeds for any expired events so #events channel stays consistent
     try:
@@ -10176,7 +10199,7 @@ def _is_admin(member: discord.Member | None) -> bool:
 
 @bot.tree.command(
     name="syncpremium",
-    description="[Admin] Sync a user's premium role from their Discord purchase (fallback if role wasn't assigned automatically)",
+    description="[Admin] Sync premium role from Discord purchase (fallback if not auto-assigned).",
 )
 @app_commands.describe(
     user="The member to sync (leave empty to sync yourself). Must have purchased a premium SKU for this server.",
@@ -12247,7 +12270,8 @@ async def userstats(interaction: discord.Interaction):
         if bloom_count > 0:
             embed.add_field(name="🌿 Plants Gathered (This Bloom)", value=f"**{cycle_plants}** plants", inline=True)
         embed.add_field(name="🌲 Bloom Rank", value=f"**{bloom_rank}**", inline=True)
-        embed.add_field(name="<:TreeRing:1474244868288282817> Tree Rings", value=f"**{tree_rings}** ({bloom_multiplier:.2f}x)", inline=True)
+        tree_ring_boost_pct = (bloom_multiplier - 1.0) * 100
+        embed.add_field(name="<:TreeRing:1474244868288282817> Tree Rings", value=f"**{tree_rings}** (+{tree_ring_boost_pct:.1f}% boost)", inline=True)
         if bloom_rank != "PINE I":
             embed.add_field(name="⭐ Rank Boost", value=f"**{rank_perma_buff_multiplier:.2f}x**", inline=True)
         day_text = "day" if water_streak == 1 else "days"
@@ -12301,6 +12325,24 @@ async def userstats(interaction: discord.Interaction):
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
     except Exception as e:
         print(f"Error in userstats command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+@bot.tree.command(name="treering", description="Recalculate your Tree Rings to match your plants gathered (fix after wipe or desync)")
+async def treering(interaction: discord.Interaction):
+    """Reset Tree Rings to the value you should have based on total plants (gather_stats.total_items and your tree ring interval)."""
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        user_id = interaction.user.id
+        new_rings = await asyncio.to_thread(recalculate_user_tree_rings, user_id)
+        await safe_interaction_response(
+            interaction, interaction.followup.send,
+            f"<:TreeRing:1474244868288282817> Your Tree Rings have been recalculated from your plants gathered. You now have **{new_rings}** Tree Ring{'s' if new_rings != 1 else ''} (+{(new_rings * 0.5):.1f}% money boost).",
+            ephemeral=True,
+        )
+    except Exception as e:
+        print(f"Error in treering command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
@@ -14221,7 +14263,8 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
         embed_stats.add_field(name="🌱 Plants Gathered (Total)", value=f"**{total_items}** plants", inline=True)
         embed_stats.add_field(name="🌿 Plants Gathered (This Bloom)", value=f"**{cycle_plants}** plants", inline=True)
         embed_stats.add_field(name="🌲 Bloom Rank", value=f"**{bloom_rank}**", inline=True)
-        embed_stats.add_field(name="<:TreeRing:1474244868288282817> Tree Rings", value=f"**{tree_rings}** ({bloom_multiplier:.2f}x)", inline=True)
+        tree_ring_boost_pct = (bloom_multiplier - 1.0) * 100
+        embed_stats.add_field(name="<:TreeRing:1474244868288282817> Tree Rings", value=f"**{tree_rings}** (+{tree_ring_boost_pct:.1f}% boost)", inline=True)
         if bloom_rank != "PINE I":
             embed_stats.add_field(name="⭐ Rank Boost", value=f"**{rank_perma_buff_multiplier:.2f}x**", inline=True)
         day_text = "day" if water_streak == 1 else "days"
@@ -14300,18 +14343,31 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
             )
         embed_ach.add_field(name="━━━ Total Boost ━━━", value=f"**{total_boost_percent:.1f}%**", inline=False)
 
-        # ── 5. Hidden achievements ──
+        # ── 5. Hidden achievements (max 25 fields per embed; batch into groups of 6) ──
         embed_hidden = discord.Embed(
             title=f"🔒 {display_name}'s Hidden Achievements",
             description=f"Discovered: **{hidden_achievements_count}/{TOTAL_HIDDEN_ACHIEVEMENTS}**",
             color=discord.Color.dark_gray()
         )
-        for key, data in HIDDEN_ACHIEVEMENTS.items():
-            name = data["name"]
-            if hidden_map.get(key, False):
-                embed_hidden.add_field(name=name, value=data["description"], inline=False)
-            else:
-                embed_hidden.add_field(name=name, value=f"{ALMANAC_HIDDEN_EMOJI}{ALMANAC_HIDDEN_EMOJI}{ALMANAC_HIDDEN_EMOJI}", inline=False)
+        _hidden_list = list(HIDDEN_ACHIEVEMENTS.items())
+        _chunk_size = 6
+        for idx in range(0, len(_hidden_list), _chunk_size):
+            chunk = _hidden_list[idx : idx + _chunk_size]
+            lines = []
+            for key, data in chunk:
+                name = data["name"]
+                if hidden_map.get(key, False):
+                    lines.append(f"**{name}**: {data['description']}")
+                else:
+                    lines.append(f"{name}: {ALMANAC_HIDDEN_EMOJI}{ALMANAC_HIDDEN_EMOJI}{ALMANAC_HIDDEN_EMOJI}")
+            field_value = "\n".join(lines)
+            if len(field_value) > 1024:
+                field_value = field_value[:1021] + "…"
+            embed_hidden.add_field(
+                name=f"Achievements {idx + 1}–{idx + len(chunk)}",
+                value=field_value,
+                inline=False,
+            )
 
         # ── 6. Wild Animals spawn reference (for admin) ──
         animal_mult, _ = _pve_spawn_multiplier()
@@ -14486,22 +14542,18 @@ async def wipe(interaction: discord.Interaction, type: str):
                 ephemeral=True)
             return
         
-        # Get all members in the guild
+        # Get all non-bot members in the guild (single pass)
         guild = interaction.guild
         if not guild:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: Could not get guild information.", ephemeral=True)
             return
-    
-        members = guild.members
+
+        members = [m for m in guild.members if not m.bot]
+        user_ids = [m.id for m in members]
         wiped_count = 0
-        
+
         if type == "money":
-            # Reset money to default, keep upgrades
-            for member in members:
-                if not member.bot:  # Skip bots
-                    wipe_user_money(member.id)
-                    wiped_count += 1
-            
+            wiped_count = await asyncio.to_thread(wipe_guild_money, user_ids)
             embed = discord.Embed(
                 title="✅ Money Wiped",
                 description=f"Reset money to default for **{wiped_count}** users in this server.\n\n**Stock market has been reset** - all shares returned, making all stocks available at max capacity.",
@@ -14510,31 +14562,21 @@ async def wipe(interaction: discord.Interaction, type: str):
             embed.add_field(name="What was reset", value="• Money (balance)\n• Stock holdings (shares)\n• Crypto holdings (portfolio)", inline=False)
             embed.add_field(name="What was kept", value="• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Plants", inline=False)
         elif type == "plants":
-            # Reset plants and update ranks
-            for member in members:
-                if not member.bot:  # Skip bots
-                    wipe_user_plants(member.id)
-                    # Update their rank to PLANTER I
-                    try:
-                        await assign_gatherer_role(member, guild)
-                    except Exception as e:
-                        print(f"Error updating role for user {member.id}: {e}")
-                    wiped_count += 1
-            
+            wiped_count = await asyncio.to_thread(wipe_guild_plants, user_ids)
+            # Assign PLANTER I in parallel (chunks to reduce rate-limit risk)
+            _ROLE_CHUNK = 25
+            for i in range(0, len(members), _ROLE_CHUNK):
+                chunk = members[i : i + _ROLE_CHUNK]
+                await asyncio.gather(*[assign_gatherer_role(m, guild, force_planter_role="PLANTER I") for m in chunk], return_exceptions=True)
             embed = discord.Embed(
                 title="✅ Plants Wiped",
                 description=f"Reset collected plants for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank.",
                 color=discord.Color.orange()
             )
-            embed.add_field(name="What was reset", value="• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)\n• Planter achievement\n• All cooldowns", inline=False)
+            embed.add_field(name="What was reset", value="• Collected items\n• Gather stats\n• Ripeness stats\n• Tree Rings\n• Rank (set to PLANTER I)\n• Planter achievement\n• All cooldowns", inline=False)
             embed.add_field(name="What was kept", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs", inline=False)
         elif type == "crypto":
-            # Reset crypto holdings only
-            for member in members:
-                if not member.bot:  # Skip bots
-                    wipe_user_crypto(member.id)
-                    wiped_count += 1
-            
+            wiped_count = await asyncio.to_thread(wipe_guild_crypto, user_ids)
             embed = discord.Embed(
                 title="✅ Crypto Wiped",
                 description=f"Reset crypto holdings to 0 for **{wiped_count}** users in this server.",
@@ -14543,29 +14585,23 @@ async def wipe(interaction: discord.Interaction, type: str):
             embed.add_field(name="What was reset", value="• Crypto holdings (portfolio)", inline=False)
             embed.add_field(name="What was kept", value="• Money (balance)\n• Stock holdings (shares)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Plants", inline=False)
         else:  # type == "all"
-            # Reset money, all upgrades, and plants
-            for member in members:
-                if not member.bot:  # Skip bots
-                    wipe_user_all(member.id)
-                    # Update their rank to PLANTER I
-                    try:
-                        await assign_gatherer_role(member, guild)
-                    except Exception as e:
-                        print(f"Error updating gatherer role for user {member.id}: {e}")
-                    # Update their Bloom rank to PINE I
-                    try:
-                        await assign_bloom_rank_role(member, guild)
-                    except Exception as e:
-                        print(f"Error updating bloom rank role for user {member.id}: {e}")
-                    wiped_count += 1
-            
+            wiped_count = await asyncio.to_thread(wipe_guild_all, user_ids)
+            # Assign PLANTER I and PINE I in parallel (chunks)
+            _ROLE_CHUNK = 25
+            for i in range(0, len(members), _ROLE_CHUNK):
+                chunk = members[i : i + _ROLE_CHUNK]
+                gather_tasks = []
+                for m in chunk:
+                    gather_tasks.append(assign_gatherer_role(m, guild, force_planter_role="PLANTER I"))
+                    gather_tasks.append(assign_bloom_rank_role(m, guild))
+                await asyncio.gather(*gather_tasks, return_exceptions=True)
             embed = discord.Embed(
                 title="✅ All Data Wiped",
                 description=f"Reset everything for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank and **PINE I** Bloom rank.\n\n**Market has been reset** - all shares returned, making all stocks available at max capacity.",
                 color=discord.Color.red()
             )
-            embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Stock holdings (shares)\n• Crypto holdings (portfolio)\n• Collected items\n• Gather stats\n• Ripeness stats\n• Rank (set to PLANTER I)\n• Bloom rank (set to PINE I)\n• All achievements and achievement stats\n• All cooldowns\n• Daily shop inventory and purchase count", inline=False)
-        
+            embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Stock holdings (shares)\n• Crypto holdings (portfolio)\n• Collected items\n• Gather stats\n• Ripeness stats\n• Tree Rings\n• Rank (set to PLANTER I)\n• Bloom rank (set to PINE I)\n• All achievements and achievement stats\n• All cooldowns\n• Daily shop inventory and purchase count", inline=False)
+
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
         print(f"Admin {interaction.user.name} wiped {type} data for {wiped_count} users")
     except Exception as e:
@@ -14961,8 +14997,8 @@ async def shutdown(interaction: discord.Interaction):
             pass
 
 
-# ── Giveaway admin command ──────────────────────────────────────────────
-async def _giveaway_imbue_name_autocomplete(
+# ── Give admin command (direct give to one user; admin-only #hidden) ─────
+async def _give_imbue_name_autocomplete(
     interaction: discord.Interaction,
     current: str,
 ) -> list[app_commands.Choice[str]]:
@@ -14985,7 +15021,7 @@ async def _giveaway_imbue_name_autocomplete(
     return [app_commands.Choice(name=n, value=n) for n in matches[:25]]
 
 
-async def _giveaway_shop_item_autocomplete(
+async def _give_shop_item_autocomplete(
     interaction: discord.Interaction,
     current: str,
 ) -> list[app_commands.Choice[str]]:
@@ -15000,7 +15036,7 @@ async def _giveaway_shop_item_autocomplete(
     return choices[:25]
 
 
-@bot.tree.command(name="giveaway", description="[ADMIN] Give a user money, imbues, water streak, tree rings, or daily shop items")
+@bot.tree.command(name="give", description="[ADMIN] Give a user money, imbues, water streak, tree rings, or daily shop items")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     user="The user to give the reward to",
@@ -15033,8 +15069,8 @@ async def _giveaway_shop_item_autocomplete(
     app_commands.Choice(name="Celestial", value="CELESTIAL"),
     app_commands.Choice(name="Secret", value="SECRET"),
 ])
-@app_commands.autocomplete(imbue_name=_giveaway_imbue_name_autocomplete, shop_item=_giveaway_shop_item_autocomplete)
-async def giveaway(
+@app_commands.autocomplete(imbue_name=_give_imbue_name_autocomplete, shop_item=_give_shop_item_autocomplete)
+async def give(
     interaction: discord.Interaction,
     user: discord.Member,
     type: str,
@@ -15082,7 +15118,7 @@ async def giveaway(
             embed.add_field(name="Previous Balance", value=f"${current_balance:,.2f}", inline=True)
             embed.add_field(name="New Balance", value=f"${new_balance:,.2f}", inline=True)
             embed.set_footer(text=f"Given by {interaction.user.name}")
-            print(f"Admin {interaction.user.name} used /giveaway money to give {user.name} ${amount:,.2f}")
+            print(f"Admin {interaction.user.name} used /give money to give {user.name} ${amount:,.2f}")
 
         # ── IMBUE ──
         elif type_lower == "imbue":
@@ -15143,7 +15179,7 @@ async def giveaway(
             embed.add_field(name="Previous Imbue", value=old_display, inline=False)
             embed.add_field(name="Description", value=f"*\"{attunement.get('description', '')}\"*", inline=False)
             embed.set_footer(text=f"Given by {interaction.user.name}")
-            print(f"Admin {interaction.user.name} used /giveaway imbue to give {user.name} {attunement['name']} ({rarity_upper} {tool_type})")
+            print(f"Admin {interaction.user.name} used /give imbue to give {user.name} {attunement['name']} ({rarity_upper} {tool_type})")
 
         # ── WATER STREAK ──
         elif type_lower == "water_streak":
@@ -15164,7 +15200,7 @@ async def giveaway(
             embed.add_field(name="Previous Streak", value=f"{old_streak:,} days", inline=True)
             embed.add_field(name="New Streak", value=f"{days:,} days", inline=True)
             embed.set_footer(text=f"Set by {interaction.user.name}")
-            print(f"Admin {interaction.user.name} used /giveaway water_streak to set {user.name}'s streak to {days}")
+            print(f"Admin {interaction.user.name} used /give water_streak to set {user.name}'s streak to {days}")
 
         # ── TREE RINGS ──
         elif type_lower == "tree_rings":
@@ -15186,7 +15222,7 @@ async def giveaway(
             embed.add_field(name="Previous Rings", value=f"{old_rings:,}", inline=True)
             embed.add_field(name="New Total", value=f"{new_rings:,}", inline=True)
             embed.set_footer(text=f"Given by {interaction.user.name}")
-            print(f"Admin {interaction.user.name} used /giveaway tree_rings to give {user.name} {rings} rings")
+            print(f"Admin {interaction.user.name} used /give tree_rings to give {user.name} {rings} rings")
 
         # ── SHOP ITEM (Daily Shop) ──
         elif type_lower == "shop_item":
@@ -15204,7 +15240,7 @@ async def giveaway(
             )
             embed.add_field(name="Effect", value=f"***{info['effect']}***", inline=False)
             embed.set_footer(text=f"Given by {interaction.user.name}")
-            print(f"Admin {interaction.user.name} used /giveaway shop_item to give {user.name} {info['name']}")
+            print(f"Admin {interaction.user.name} used /give shop_item to give {user.name} {info['name']}")
 
         else:
             await safe_interaction_response(interaction, interaction.followup.send,
@@ -15214,7 +15250,257 @@ async def giveaway(
 
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
     except Exception as e:
+        print(f"Error in give command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+# ── /bot_pay: Admin give money to a user (logged in channel) ──────────────
+GIVEAWAY_CLAIM_USER_ID = 843578539424350248  # Danny – contact for claiming prize
+
+
+@bot.tree.command(name="bot_pay", description="[ADMIN] Give money to a user from the bot (#hidden or #giveaways)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    user="The user to pay",
+    amount="Amount of money to give",
+)
+async def bot_pay(interaction: discord.Interaction, user: discord.Member, amount: float):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+        ch_name = getattr(interaction.channel, "name", None) if hasattr(interaction.channel, "name") else None
+        if ch_name not in ("hidden", "giveaways"):
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ This command can only be used in **#hidden** or **#giveaways**, {interaction.user.name}!", ephemeral=True)
+            return
+        if amount <= 0:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: Amount must be positive.", ephemeral=True)
+            return
+        if user.bot:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: You cannot pay bots.", ephemeral=True)
+            return
+        user_id = user.id
+        current = get_user_balance(user_id)
+        new_balance = normalize_money(current + amount)
+        update_user_balance(user_id, new_balance)
+        log_msg = f"🎵 [ADMIN]: Gave ${amount:,.2f} to {user.mention}"
+        await safe_interaction_response(interaction, interaction.followup.send, log_msg, ephemeral=False)
+        print(f"Admin {interaction.user.name} used /bot_pay to give {user.name} ${amount:,.2f}")
+    except Exception as e:
+        print(f"Error in bot_pay command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+# ── /giveaway: Reaction-based giveaway in #giveaways (admin-only) ─────────
+# Edge cases: admin-only + #giveaways only; duration 1–10080 min; num_winners 1–50; only NETHER_STAR counts;
+# bot adds reaction first; if message deleted/channel gone at end we skip; no entrants → "no valid entries";
+# fewer entrants than num_winners → we pick all entrants; bot restart loses in-memory giveaways (no auto-resolve).
+_active_giveaways: dict[int, dict] = {}  # message_id -> {channel_id, guild_id, end_at_ts, prize_display, prize_data, num_winners}
+
+
+def _apply_giveaway_prize(user_id: int, prize_data: dict) -> None:
+    """Apply a giveaway prize to a user (money, shop_item, or imbue). Runs in thread if needed."""
+    ptype = prize_data.get("type")
+    if ptype == "money":
+        amt = float(prize_data["amount"])
+        cur = get_user_balance(user_id)
+        update_user_balance(user_id, normalize_money(cur + amt))
+    elif ptype == "shop_item":
+        add_shop_item_to_user(user_id, prize_data["item_id"], 1)
+    elif ptype == "imbue":
+        att = prize_data["attunement"]
+        if prize_data.get("tool_type") == "hoe":
+            set_user_hoe_attunement(user_id, att)
+        else:
+            set_user_tractor_attunement(user_id, att)
+
+
+async def _giveaway_end_task(
+    message_id: int,
+    channel_id: int,
+    guild_id: int,
+    end_at_ts: float,
+    prize_display: str,
+    prize_data: dict,
+    num_winners: int,
+):
+    """Wait until giveaway ends, then resolve winners and post congrats."""
+    await asyncio.sleep(max(0, end_at_ts - time.time()))
+    _active_giveaways.pop(message_id, None)
+    channel = bot.get_channel(channel_id)
+    if not channel or not isinstance(channel, discord.TextChannel):
+        return
+    try:
+        message = await channel.fetch_message(message_id)
+    except Exception:
+        return
+    # Find NETHER_STAR reaction (same id as NETHER_STAR_EMOJI_PARTIAL)
+    nether_reaction = None
+    for r in message.reactions:
+        if getattr(r.emoji, "id", None) == NETHER_STAR_EMOJI_PARTIAL.id or (isinstance(r.emoji, str) and "netherstar" in str(r.emoji).lower()):
+            nether_reaction = r
+            break
+    if not nether_reaction:
+        await channel.send("🫐 Giveaway ended with no valid entries (NETHER_STAR reaction not found).")
+        return
+    entrants = []
+    async for u in nether_reaction.users():
+        if not u.bot:
+            entrants.append(u)
+    if not entrants:
+        await channel.send("🫐 Giveaway ended with no valid entries.")
+        return
+    winners = random.sample(entrants, min(num_winners, len(entrants)))
+    danny_mention = f"<@{GIVEAWAY_CLAIM_USER_ID}>"
+    for w in winners:
+        try:
+            await asyncio.to_thread(_apply_giveaway_prize, w.id, prize_data)
+        except Exception as e:
+            print(f"[Giveaway] Error applying prize to {w.id}: {e}")
+        await channel.send(
+            f"🎁 Congratulations {w.mention}! You won: **{prize_display}**\n"
+            f"Contact {danny_mention} to claim your prize!"
+        )
+
+
+@bot.tree.command(name="giveaway", description="[ADMIN] Start a reaction-based giveaway in #giveaways (money, item, or imbue)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    prize_type="Type of prize",
+    duration_minutes="How long the giveaway runs (minutes)",
+    num_winners="Number of winners to pick (default 1)",
+    amount="Money amount (for money prize)",
+    shop_item="Daily shop item (for item prize)",
+    tool_type="Hoe or Tractor (for imbue prize)",
+    rarity="Imbue rarity (for imbue prize)",
+    imbue_name="Imbue name (for imbue prize)",
+)
+@app_commands.choices(prize_type=[
+    app_commands.Choice(name="Money", value="money"),
+    app_commands.Choice(name="Item (Daily Shop)", value="shop_item"),
+    app_commands.Choice(name="Imbue", value="imbue"),
+])
+@app_commands.choices(tool_type=[
+    app_commands.Choice(name="Hoe (Gather)", value="hoe"),
+    app_commands.Choice(name="Tractor (Harvest)", value="tractor"),
+])
+@app_commands.choices(rarity=[
+    app_commands.Choice(name="Common", value="COMMON"),
+    app_commands.Choice(name="Uncommon", value="UNCOMMON"),
+    app_commands.Choice(name="Rare", value="RARE"),
+    app_commands.Choice(name="Super Rare", value="SUPER RARE"),
+    app_commands.Choice(name="Legendary", value="LEGENDARY"),
+    app_commands.Choice(name="Netherite", value="NETHERITE"),
+    app_commands.Choice(name="Luminite", value="LUMINITE"),
+    app_commands.Choice(name="Celestial", value="CELESTIAL"),
+    app_commands.Choice(name="Secret", value="SECRET"),
+])
+@app_commands.autocomplete(shop_item=_give_shop_item_autocomplete, imbue_name=_give_imbue_name_autocomplete)
+async def giveaway(
+    interaction: discord.Interaction,
+    prize_type: str,
+    duration_minutes: float,
+    num_winners: int = 1,
+    amount: float = None,
+    shop_item: str = None,
+    tool_type: str = None,
+    rarity: str = None,
+    imbue_name: str = None,
+):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+        if not hasattr(interaction.channel, "name") or interaction.channel.name != "giveaways":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ This command can only be used in the **#giveaways** channel.", ephemeral=True)
+            return
+        guild = interaction.guild
+        giveaways_ch = discord.utils.get(guild.text_channels, name="giveaways")
+        if not giveaways_ch:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **#giveaways** channel not found.", ephemeral=True)
+            return
+        if duration_minutes < 1 or duration_minutes > 10080:  # max ~1 week
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: Duration must be between 1 and 10080 minutes (1 week).", ephemeral=True)
+            return
+        num_winners = max(1, min(50, int(num_winners)))
+        end_at_ts = time.time() + duration_minutes * 60
+        prize_display = ""
+        prize_data = {}
+        pt = prize_type.lower()
+        if pt == "money":
+            if amount is None or amount <= 0:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ **Error**: Provide a positive `amount` for money prize.", ephemeral=True)
+                return
+            prize_display = f"${amount:,.2f}"
+            prize_data = {"type": "money", "amount": amount}
+        elif pt == "shop_item":
+            if not shop_item or shop_item not in DAILY_SHOP_ITEMS:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ **Error**: Select a valid `shop_item`.", ephemeral=True)
+                return
+            info = DAILY_SHOP_ITEMS[shop_item]
+            prize_display = info.get("name", shop_item)
+            prize_data = {"type": "shop_item", "item_id": shop_item}
+        elif pt == "imbue":
+            if not tool_type or not rarity or not imbue_name:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ **Error**: For imbue prize, set `tool_type`, `rarity`, and `imbue_name`.", ephemeral=True)
+                return
+            pool = HOE_ENCHANTMENTS if tool_type == "hoe" else TRACTOR_ENCHANTMENTS
+            rarity_upper = rarity.upper()
+            if rarity_upper not in pool:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ **Error**: Invalid rarity.", ephemeral=True)
+                return
+            matched = [e for e in pool[rarity_upper] if e["name"].upper() == imbue_name.upper()]
+            if not matched:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    "❌ **Error**: Imbue name not found for that tool and rarity.", ephemeral=True)
+                return
+            attunement = dict(matched[0])
+            prize_display = f"{attunement['name']} ({rarity_upper} {tool_type})"
+            prize_data = {"type": "imbue", "tool_type": tool_type, "attunement": attunement}
+        else:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: Invalid prize type.", ephemeral=True)
+            return
+        title = f"🫐 **/GATHER GIVEAWAY** {NETHER_STAR_EMOJI}"
+        embed = discord.Embed(title=title, color=discord.Color.gold())
+        embed.add_field(name="Prize", value=prize_display, inline=False)
+        embed.add_field(name="ENDS AT", value=f"<t:{int(end_at_ts)}:F>", inline=False)
+        embed.set_footer(text="React with the Nether Star below to enter!")
+        message = await giveaways_ch.send(embed=embed)
+        await message.add_reaction(NETHER_STAR_EMOJI_PARTIAL)
+        _active_giveaways[message.id] = {
+            "channel_id": giveaways_ch.id,
+            "guild_id": guild.id,
+            "end_at_ts": end_at_ts,
+            "prize_display": prize_display,
+            "prize_data": prize_data,
+            "num_winners": num_winners,
+        }
+        asyncio.create_task(_giveaway_end_task(
+            message.id, giveaways_ch.id, guild.id, end_at_ts, prize_display, prize_data, num_winners
+        ))
+        await safe_interaction_response(interaction, interaction.followup.send,
+            f"✅ Giveaway started in #giveaways! Ends in **{int(duration_minutes)}** minutes. React with {NETHER_STAR_EMOJI} to enter.", ephemeral=True)
+        print(f"Admin {interaction.user.name} started /giveaway in #giveaways: {prize_display}, {num_winners} winner(s)")
+    except Exception as e:
         print(f"Error in giveaway command: {e}")
+        import traceback
+        traceback.print_exc()
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 

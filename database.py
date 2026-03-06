@@ -1190,6 +1190,32 @@ def increment_tree_rings(user_id: int, amount: int) -> None:
     )
 
 
+def set_user_tree_rings(user_id: int, amount: int) -> None:
+    """Set user's Tree Rings to a specific value (used by recalculate and wipe)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"tree_rings": max(0, int(amount))}},
+        upsert=True,
+    )
+
+
+def recalculate_user_tree_rings(user_id: int) -> int:
+    """Set Tree Rings to what the user should have based on plants gathered (total_items).
+    Uses current tree ring interval (100 or 50 with Future Gadget, minus premium). Returns new count."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"gather_stats.total_items": 1})
+    total_items = 0
+    if doc and doc.get("gather_stats"):
+        total_items = int(doc.get("gather_stats", {}).get("total_items", 0))
+    interval = get_tree_ring_interval(user_id)
+    expected_rings = total_items // interval if interval > 0 else 0
+    set_user_tree_rings(user_id, expected_rings)
+    return expected_rings
+
+
 def get_bloom_multiplier(user_id: int) -> float:
     """Calculate money multiplier based on Tree Rings. Formula: 1.0 + (tree_rings * 0.005)"""
     tree_rings = get_user_tree_rings(user_id)
@@ -1668,34 +1694,61 @@ def wipe_user_money(user_id: int) -> None:
     )
 
 
+def wipe_guild_money(user_ids: list[int]) -> int:
+    """Bulk reset money/stock/crypto for many users. Returns number of documents modified."""
+    if not user_ids:
+        return 0
+    users = _get_users_collection()
+    default_balance = _get_default_balance()
+    result = users.update_many(
+        {"_id": {"$in": [int(uid) for uid in user_ids]}},
+        {"$set": {
+            "balance": float(default_balance),
+            "stock_holdings": {},
+            "crypto_holdings": {"RTC": 0.0, "TER": 0.0, "CNY": 0.0}
+        }},
+    )
+    return result.modified_count
+
+
+_WIPE_PLANTS_SET = {
+    "items": {},
+    "ripeness_stats": {},
+    "gather_stats": {"total_items": 0, "categories": {}, "items": {}},
+    "total_forage_count": 0,
+    "bloom_cycle_plants": 0,
+    "almanac_entries": {},
+    "achievements.planter": 0,
+    "tree_rings": 0,
+    "last_gather_time": 0.0,
+    "last_harvest_time": 0.0,
+    "last_mine_time": 0.0,
+    "last_roulette_elimination_time": 0.0,
+    "last_coinflip_loss_time": 0.0,
+    "last_water_time": 0.0,
+}
+
+
 def wipe_user_plants(user_id: int) -> None:
     """Reset user's collected plants (items, gather_stats, ripeness_stats), planter achievement, and cooldowns."""
     users = _get_users_collection()
     users.update_one(
         {"_id": int(user_id)},
-        {"$set": {
-            "items": {},
-            "ripeness_stats": {},
-            "gather_stats": {
-                "total_items": 0,
-                "categories": {},
-                "items": {}
-            },
-            "total_forage_count": 0,
-            "bloom_cycle_plants": 0,
-            "almanac_entries": {},
-            # Reset planter achievement since it's based on total_items
-            "achievements.planter": 0,
-            # Reset all cooldowns
-            "last_gather_time": 0.0,
-            "last_harvest_time": 0.0,
-            "last_mine_time": 0.0,
-            "last_roulette_elimination_time": 0.0,
-            "last_coinflip_loss_time": 0.0,
-            "last_water_time": 0.0
-        }},
+        {"$set": _WIPE_PLANTS_SET},
         upsert=True,
     )
+
+
+def wipe_guild_plants(user_ids: list[int]) -> int:
+    """Bulk reset plants for many users. Returns number of documents modified."""
+    if not user_ids:
+        return 0
+    users = _get_users_collection()
+    result = users.update_many(
+        {"_id": {"$in": [int(uid) for uid in user_ids]}},
+        {"$set": _WIPE_PLANTS_SET},
+    )
+    return result.modified_count
 
 
 def wipe_user_crypto(user_id: int) -> None:
@@ -1703,15 +1756,21 @@ def wipe_user_crypto(user_id: int) -> None:
     users = _get_users_collection()
     users.update_one(
         {"_id": int(user_id)},
-        {"$set": {
-            "crypto_holdings": {
-                "RTC": 0.0,
-                "TER": 0.0,
-                "CNY": 0.0
-            }
-        }},
+        {"$set": {"crypto_holdings": {"RTC": 0.0, "TER": 0.0, "CNY": 0.0}}},
         upsert=True,
     )
+
+
+def wipe_guild_crypto(user_ids: list[int]) -> int:
+    """Bulk reset crypto for many users. Returns number of documents modified."""
+    if not user_ids:
+        return 0
+    users = _get_users_collection()
+    result = users.update_many(
+        {"_id": {"$in": [int(uid) for uid in user_ids]}},
+        {"$set": {"crypto_holdings": {"RTC": 0.0, "TER": 0.0, "CNY": 0.0}}},
+    )
+    return result.modified_count
 
 
 def wipe_user_all(user_id: int) -> None:
@@ -1841,16 +1900,106 @@ def wipe_user_all(user_id: int) -> None:
                 "bog": False,
                 "mire": False
             },
-            # Reset daily shop
+            # Reset daily shop and tree rings
             "shop_inventory": {},
             "daily_shop_purchases_count": 0,
             "daily_shop_last_date_est": "",
+            "slot_token_free_spin_used_date_est": "",
+            "tree_rings": 0,
             "gathers_stolen": 0,
             "harvests_stolen": 0,
             "critical_gathers_count": 0,
         }},
         upsert=True,
     )
+
+
+def _wipe_all_set_payload() -> dict:
+    """Build the $set payload for full wipe (shared by wipe_user_all and wipe_guild_all)."""
+    return {
+        "balance": float(_get_default_balance()),
+        "basket_upgrades": {"basket": 0, "shoes": 0, "gloves": 0, "soil": 0},
+        "harvest_upgrades": {"car": 0, "chain": 0, "fertilizer": 0, "cooldown": 0},
+        "gardeners": [],
+        "gpus": [],
+        "items": {},
+        "ripeness_stats": {},
+        "almanac_entries": {},
+        "gather_stats": {"total_items": 0, "categories": {}, "items": {}},
+        "total_forage_count": 0,
+        "bloom_cycle_plants": 0,
+        "stock_holdings": {},
+        "crypto_holdings": {"RTC": 0.0, "TER": 0.0, "CNY": 0.0},
+        "bloom_count": 0,
+        "achievements": {
+            "gatherer": 0,
+            "coinflip_total": 0,
+            "coinflip_win_streak": 0,
+            "harvesting": 0,
+            "planter": 0,
+            "water_streak": 0,
+            "blooming": 0,
+            "russian_roulette": 0,
+            "slayer": 0,
+            "stealing": 0,
+            "almanac": 0,
+            "hidden_achievements_discovered": 0,
+            "hidden_achievements": {
+                "john_rockefeller": False, "beating_the_odds": False, "beneficiary": False,
+                "leap_year": False, "ceo": False, "blockchain": False, "almost_got_it": False,
+                "maxed_out": False, "social_butterfly": False, "high_reroller": False,
+                "no_monkey_business": False, "grizzly_victory": False, "black_bear_blues": False,
+                "polar_power": False, "tiger_tamer": False, "panther_pounce": False,
+                "homeless_hero": False, "bullet_ant_squasher": False, "skunkape_slayer": False,
+                "godzilla_king": False, "mothron_masher": False, "plantera_crusher": False,
+                "retinazer_retired": False, "spazmatism_silenced": False, "pve_master": False,
+                "slots_three_in_a_row": False, "just_like_tf2": False, "moist": False, "no_honor": False,
+            },
+            "areas_unlocked": 0,
+            "slots": 0
+        },
+        "pve_defeated": [],
+        "total_pve_defeats": 0,
+        "coinflip_count": 0,
+        "coinflip_win_streak": 0,
+        "slots_spin_count": 0,
+        "slots_win_streak": 0,
+        "gather_command_count": 0,
+        "harvest_command_count": 0,
+        "consecutive_water_days": 0,
+        "water_count": 0,
+        "russian_games_played": 0,
+        "hoe_enchantment": None,
+        "tractor_enchantment": None,
+        "invite_stats": {"invites_created": 0, "total_joins": 0, "rewards_earned": 0.0, "invite_codes": [], "claimed_rewards": []},
+        "last_gather_time": 0.0,
+        "last_harvest_time": 0.0,
+        "last_mine_time": 0.0,
+        "last_roulette_elimination_time": 0.0,
+        "last_coinflip_loss_time": 0.0,
+        "last_water_time": 0.0,
+        "unlocked_areas": {"grove": False, "marsh": False, "bog": False, "mire": False},
+        "shop_inventory": {},
+        "daily_shop_purchases_count": 0,
+        "daily_shop_last_date_est": "",
+        "slot_token_free_spin_used_date_est": "",
+        "tree_rings": 0,
+        "gathers_stolen": 0,
+        "harvests_stolen": 0,
+        "critical_gathers_count": 0,
+    }
+
+
+def wipe_guild_all(user_ids: list[int]) -> int:
+    """Bulk reset all data for many users. Returns number of documents modified."""
+    if not user_ids:
+        return 0
+    users = _get_users_collection()
+    result = users.update_many(
+        {"_id": {"$in": [int(uid) for uid in user_ids]}},
+        {"$set": _wipe_all_set_payload()},
+    )
+    return result.modified_count
 
 
 def add_shop_item_to_user(user_id: int, item_id: str, amount: int = 1) -> None:
@@ -2787,6 +2936,7 @@ def get_user_dossier(user_id: int) -> Dict:
     Fetch all fields needed for /user (admin) and /userstats in one DB round-trip.
     Replaces 25+ individual queries with a single find_one.
     Returns a normalized dict with defaults for missing keys.
+    Includes every user field for full admin /user display.
     """
     users = _get_users_collection()
     _ensure_user_document(user_id)
@@ -2800,8 +2950,11 @@ def get_user_dossier(user_id: int) -> Dict:
             "bloom_count": 1,
             "tree_rings": 1,
             "consecutive_water_days": 1,
+            "water_count": 1,
             "achievements": 1,
             "items": 1,
+            "ripeness_stats": 1,
+            "almanac_entries": 1,
             "shop_inventory": 1,
             "hoe_enchantment": 1,
             "tractor_enchantment": 1,
@@ -2809,44 +2962,67 @@ def get_user_dossier(user_id: int) -> Dict:
             "gpus": 1,
             "basket_upgrades": 1,
             "harvest_upgrades": 1,
+            "last_gather_time": 1,
+            "last_harvest_time": 1,
+            "last_mine_time": 1,
+            "last_water_time": 1,
+            "last_roulette_elimination_time": 1,
+            "last_coinflip_loss_time": 1,
+            "gather_command_count": 1,
+            "harvest_command_count": 1,
+            "total_forage_count": 1,
+            "crypto_holdings": 1,
+            "stock_holdings": 1,
+            "notification_channel_id": 1,
+            "dayboosts": 1,
+            "daily_shop_purchases_count": 1,
+            "daily_shop_last_date_est": 1,
+            "slot_token_free_spin_used_date_est": 1,
+            "pve_defeated": 1,
+            "total_pve_defeats": 1,
+            "gathers_stolen": 1,
+            "harvests_stolen": 1,
+            "critical_gathers_count": 1,
+            "coinflip_count": 1,
+            "coinflip_win_streak": 1,
+            "slots_spin_count": 1,
+            "slots_win_streak": 1,
+            "russian_games_played": 1,
+            "invite_stats": 1,
+            "unlocked_areas": 1,
+            "beta_tester": 1,
+            "server_booster": 1,
+            "premium_tier": 1,
         },
     )
 
     if not doc:
-        return {
-            "balance": _get_default_balance(),
-            "gather_stats_total_items": 0,
-            "gather_stats_items": {},
-            "bloom_cycle_plants": 0,
-            "bloom_count": 0,
-            "tree_rings": 0,
-            "consecutive_water_days": 0,
-            "achievements": {},
-            "items": {},
-            "shop_inventory": {},
-            "hoe_enchantment": None,
-            "tractor_enchantment": None,
-            "gardeners": [],
-            "gpus": [],
-            "basket_upgrades": {"basket": 0, "shoes": 0, "gloves": 0, "soil": 0},
-            "harvest_upgrades": {"car": 0, "chain": 0, "fertilizer": 0, "cooldown": 0},
-        }
+        return _empty_user_dossier()
 
     gs = doc.get("gather_stats") or {}
     basket = doc.get("basket_upgrades") or {}
     harvest = doc.get("harvest_upgrades") or {}
     achievements = doc.get("achievements") or {}
+    crypto = doc.get("crypto_holdings") or {}
+    stocks = doc.get("stock_holdings") or {}
+    invite_stats = doc.get("invite_stats") or {}
+    unlocked = doc.get("unlocked_areas") or {}
+    dayboosts = doc.get("dayboosts") or {}
 
     return {
         "balance": float(doc.get("balance", _get_default_balance())),
         "gather_stats_total_items": int(gs.get("total_items", 0)),
         "gather_stats_items": dict(gs.get("items") or {}),
+        "gather_stats_categories": dict(gs.get("categories") or {}),
         "bloom_cycle_plants": int(doc.get("bloom_cycle_plants", 0)),
         "bloom_count": int(doc.get("bloom_count", 0)),
         "tree_rings": int(doc.get("tree_rings", 0)),
         "consecutive_water_days": int(doc.get("consecutive_water_days", 0)),
+        "water_count": int(doc.get("water_count", 0)),
         "achievements": achievements,
         "items": dict(doc.get("items") or {}),
+        "ripeness_stats": dict(doc.get("ripeness_stats") or {}),
+        "almanac_entries": dict(doc.get("almanac_entries") or {}),
         "shop_inventory": dict(doc.get("shop_inventory") or {}),
         "hoe_enchantment": doc.get("hoe_enchantment"),
         "tractor_enchantment": doc.get("tractor_enchantment"),
@@ -2864,6 +3040,100 @@ def get_user_dossier(user_id: int) -> Dict:
             "fertilizer": harvest.get("fertilizer", 0),
             "cooldown": harvest.get("cooldown", 0),
         },
+        "last_gather_time": float(doc.get("last_gather_time", 0.0)),
+        "last_harvest_time": float(doc.get("last_harvest_time", 0.0)),
+        "last_mine_time": float(doc.get("last_mine_time", 0.0)),
+        "last_water_time": float(doc.get("last_water_time", 0.0)),
+        "last_roulette_elimination_time": float(doc.get("last_roulette_elimination_time", 0.0)),
+        "last_coinflip_loss_time": float(doc.get("last_coinflip_loss_time", 0.0)),
+        "gather_command_count": int(doc.get("gather_command_count", 0)),
+        "harvest_command_count": int(doc.get("harvest_command_count", 0)),
+        "total_forage_count": int(doc.get("total_forage_count", 0)),
+        "crypto_holdings": {k: float(v) for k, v in crypto.items()},
+        "stock_holdings": dict(stocks),
+        "notification_channel_id": doc.get("notification_channel_id"),
+        "dayboosts": dict(dayboosts),
+        "daily_shop_purchases_count": int(doc.get("daily_shop_purchases_count", 0)),
+        "daily_shop_last_date_est": str(doc.get("daily_shop_last_date_est", "")),
+        "slot_token_free_spin_used_date_est": str(doc.get("slot_token_free_spin_used_date_est", "")),
+        "pve_defeated": list(doc.get("pve_defeated") or []),
+        "total_pve_defeats": int(doc.get("total_pve_defeats", 0)),
+        "gathers_stolen": int(doc.get("gathers_stolen", 0)),
+        "harvests_stolen": int(doc.get("harvests_stolen", 0)),
+        "critical_gathers_count": int(doc.get("critical_gathers_count", 0)),
+        "coinflip_count": int(doc.get("coinflip_count", 0)),
+        "coinflip_win_streak": int(doc.get("coinflip_win_streak", 0)),
+        "slots_spin_count": int(doc.get("slots_spin_count", 0)),
+        "slots_win_streak": int(doc.get("slots_win_streak", 0)),
+        "russian_games_played": int(doc.get("russian_games_played", 0)),
+        "invite_stats": {
+            "invites_created": int(invite_stats.get("invites_created", 0)),
+            "total_joins": int(invite_stats.get("total_joins", 0)),
+            "rewards_earned": float(invite_stats.get("rewards_earned", 0.0)),
+            "invite_codes": list(invite_stats.get("invite_codes") or []),
+            "claimed_rewards": list(invite_stats.get("claimed_rewards") or []),
+        },
+        "unlocked_areas": {k: bool(unlocked.get(k, False)) for k in ("grove", "marsh", "bog", "mire")},
+        "beta_tester": bool(doc.get("beta_tester", False)),
+        "server_booster": bool(doc.get("server_booster", False)),
+        "premium_tier": int(doc.get("premium_tier", 0)),
+    }
+
+
+def _empty_user_dossier() -> Dict:
+    """Return empty dossier with all keys and defaults (for missing user doc)."""
+    return {
+        "balance": _get_default_balance(),
+        "gather_stats_total_items": 0,
+        "gather_stats_items": {},
+        "gather_stats_categories": {},
+        "bloom_cycle_plants": 0,
+        "bloom_count": 0,
+        "tree_rings": 0,
+        "consecutive_water_days": 0,
+        "water_count": 0,
+        "achievements": {},
+        "items": {},
+        "ripeness_stats": {},
+        "almanac_entries": {},
+        "shop_inventory": {},
+        "hoe_enchantment": None,
+        "tractor_enchantment": None,
+        "gardeners": [],
+        "gpus": [],
+        "basket_upgrades": {"basket": 0, "shoes": 0, "gloves": 0, "soil": 0},
+        "harvest_upgrades": {"car": 0, "chain": 0, "fertilizer": 0, "cooldown": 0},
+        "last_gather_time": 0.0,
+        "last_harvest_time": 0.0,
+        "last_mine_time": 0.0,
+        "last_water_time": 0.0,
+        "last_roulette_elimination_time": 0.0,
+        "last_coinflip_loss_time": 0.0,
+        "gather_command_count": 0,
+        "harvest_command_count": 0,
+        "total_forage_count": 0,
+        "crypto_holdings": {},
+        "stock_holdings": {},
+        "notification_channel_id": None,
+        "dayboosts": {},
+        "daily_shop_purchases_count": 0,
+        "daily_shop_last_date_est": "",
+        "slot_token_free_spin_used_date_est": "",
+        "pve_defeated": [],
+        "total_pve_defeats": 0,
+        "gathers_stolen": 0,
+        "harvests_stolen": 0,
+        "critical_gathers_count": 0,
+        "coinflip_count": 0,
+        "coinflip_win_streak": 0,
+        "slots_spin_count": 0,
+        "slots_win_streak": 0,
+        "russian_games_played": 0,
+        "invite_stats": {"invites_created": 0, "total_joins": 0, "rewards_earned": 0.0, "invite_codes": [], "claimed_rewards": []},
+        "unlocked_areas": {"grove": False, "marsh": False, "bog": False, "mire": False},
+        "beta_tester": False,
+        "server_booster": False,
+        "premium_tier": 0,
     }
 
 
