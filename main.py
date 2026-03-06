@@ -14231,7 +14231,7 @@ async def rollback(interaction: discord.Interaction):
         print(f"Admin {interaction.user.name} ran /rollback")
     except Exception as e:
         print(f"Error in rollback command: {e}")
-        await safe_interaction_response(interaction, interaction.followup.send, f"❌ An error occurred: {e}", ephemeral=True)
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # Wipe command - Admin only, #hidden channel
