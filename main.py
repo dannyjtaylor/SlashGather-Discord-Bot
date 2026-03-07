@@ -10452,10 +10452,10 @@ async def stats(interaction: discord.Interaction):
         parts = [
             ("✨ IMBUEMENTS & PLANTER RANK", _imb),
             ("⏱️ COOLDOWNS", _cd),
-            ("💰 EARNINGS MULTIPLIERS", _mult1),
+            ("💰 MULTIPLIERS", _mult1),
         ]
         if multipliers_val_2:
-            parts.append(("💰 EARNINGS MULTIPLIERS (CONT.)", _section_gap + multipliers_val_2[:1024] + _section_rule))
+            parts.append(("💰 MULTIPLIERS (CONT.)", _section_gap + multipliers_val_2[:1024] + _section_rule))
         parts.append(("🎮 GAME COMPLETION", _section_gap + completion_val[:1024]))
 
         embeds = []
