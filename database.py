@@ -483,7 +483,7 @@ def increment_forage_count(user_id: int) -> None:
 
 
 def increment_total_items_only(user_id: int) -> None:
-    """Increment only gather_stats.total_items (for harvests to update userstats, but not gatherer achievements).
+    """Increment only gather_stats.total_items (for harvests to update /stats, but not gatherer achievements).
     Also increments bloom_cycle_plants to track plants gathered this bloom cycle."""
     users = _get_users_collection()
     _ensure_user_document(user_id)
@@ -2954,7 +2954,7 @@ def get_user_harvest_full_data(user_id: int) -> Dict:
 
 def get_user_dossier(user_id: int) -> Dict:
     """
-    Fetch all fields needed for /user (admin) and /userstats in one DB round-trip.
+    Fetch all fields needed for /user (admin) and /stats in one DB round-trip.
     Replaces 25+ individual queries with a single find_one.
     Returns a normalized dict with defaults for missing keys.
     Includes every user field for full admin /user display.

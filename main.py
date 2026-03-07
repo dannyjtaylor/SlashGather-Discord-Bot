@@ -738,6 +738,13 @@ def get_ripeness_imbue_emoji(ripeness_name: str) -> str:
 IMBUE_SEC_GIF_1 = "<a:IMBUE_SEC_1:1474405245563175175>"
 IMBUE_SEC_GIF_2 = "<a:IMBUE_SEC_2:1474405298385981502>"
 
+# Rarity tier -> Roman numeral for /stats imbue display (I = COMMON, IX = SECRET)
+RARITY_TO_ROMAN = {
+    "COMMON": "I", "UNCOMMON": "II", "RARE": "III", "SUPER RARE": "IV",
+    "LEGENDARY": "V", "NETHERITE": "VI", "LUMINITE": "VII",
+    "CELESTIAL": "VIII", "SECRET": "IX",
+}
+
 def _to_roman(num):
     """Convert integer to Roman numeral string (supports negatives)."""
     if num == 0:
@@ -3958,19 +3965,19 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         if crit_chance > 0 and apply_cooldown:  # apply_cooldown=True means player, not gardener
             is_critical_gather = random.random() < crit_chance
 
-    # Single base for all % buffs: (base + enchant) * rank * critical * scarecrow * bloomstone
-    # This ensures displayed amounts match percentages (e.g. 55% always shows more $ than 50%).
+    # Only /gear (basket), /orchard (N/A for gather), and Bloom Rank apply to raw base. All other buffs apply after.
     base_before_rank = base_final_value + enchant_money_bonus
     after_rank = base_before_rank * rank_perma_buff_multiplier
     after_critical = after_rank * (2.0 if is_critical_gather else 1.0)
-    scarecrow_mult = 1.10 if (full_data is not None and full_data.get("shop_inventory", {}).get("scarecrow", 0) >= 1) or (full_data is None and has_shop_item(user_id, "scarecrow")) else 1.0
-    after_scarecrow = after_critical * scarecrow_mult
-    bloomstone_mult = 3.0 if (item.get("category") == "Flower" and ((full_data is not None and full_data.get("shop_inventory", {}).get("bloomstone", 0) >= 1) or (full_data is None and has_shop_item(user_id, "bloomstone")))) else 1.0
-    after_bloomstone = after_scarecrow * bloomstone_mult
-    base_for_buffs = float(after_bloomstone)
+    base_for_buffs = float(after_critical)
 
     # Rank boost display: dollar amount that rank added (for embed only)
     extra_money_from_rank = base_for_buffs * (rank_perma_buff_multiplier - 1.0) / rank_perma_buff_multiplier if rank_perma_buff_multiplier > 1.0 else 0.0
+
+    scarecrow_mult = 1.10 if (full_data is not None and full_data.get("shop_inventory", {}).get("scarecrow", 0) >= 1) or (full_data is None and has_shop_item(user_id, "scarecrow")) else 1.0
+    bloomstone_mult = 3.0 if (item.get("category") == "Flower" and ((full_data is not None and full_data.get("shop_inventory", {}).get("bloomstone", 0) >= 1) or (full_data is None and has_shop_item(user_id, "bloomstone")))) else 1.0
+    extra_money_from_scarecrow = base_for_buffs * (scarecrow_mult - 1.0) if scarecrow_mult > 1.0 else 0.0
+    extra_money_from_bloomstone = base_for_buffs * (bloomstone_mult - 1.0) if bloomstone_mult > 1.0 else 0.0
 
     # All additive % buffs use the SAME base (base_for_buffs) so higher % always = higher $
     extra_money_from_bloom = base_for_buffs * (bloom_multiplier - 1.0)
@@ -4002,7 +4009,7 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         alchemist_extra = base_for_buffs * 0.05
     elif full_data is None and has_shop_item(user_id, "alchemists_pocketwatch"):
         alchemist_extra = base_for_buffs * 0.05
-    final_value = base_for_buffs + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra
+    final_value = base_for_buffs + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra + extra_money_from_scarecrow + extra_money_from_bloomstone
 
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
@@ -7198,7 +7205,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.0.1"
+            name="running /gather on V1.0.2"
         )
     )
     try:
@@ -10016,19 +10023,24 @@ def _format_cooldown_seconds(seconds: int) -> str:
 
 
 def _format_reduction_seconds(seconds: int) -> str:
-    """Format reduction in seconds for display (e.g. '−15s', '−5m', '−1h 20m')."""
-    if seconds <= 0:
+    """Format cooldown change: positive = faster (e.g. '−15s'); negative = slower (e.g. '+5s' for 5 sec added)."""
+    if seconds == 0:
         return "−0s"
-    if seconds < 60:
-        return f"−{seconds}s"
-    if seconds < 3600:
-        m, s = divmod(seconds, 60)
-        return f"−{m}m {s}s" if s else f"−{m}m"
-    h, rem = divmod(seconds, 3600)
+    n = abs(seconds)
+    neg = seconds < 0  # negative = longer cooldown, show as +Xs
+    if n < 60:
+        return f"+{n}s" if neg else f"−{n}s"
+    if n < 3600:
+        m, s = divmod(n, 60)
+        part = f"{m}m {s}s" if s else f"{m}m"
+        return f"+{part}" if neg else f"−{part}"
+    h, rem = divmod(n, 3600)
     m, s = divmod(rem, 60)
     if m or s:
-        return f"−{h}h {m}m {s}s" if s else f"−{h}h {m}m"
-    return f"−{h}h"
+        part = f"{h}h {m}m {s}s" if s else f"{h}h {m}m"
+        return f"+{part}" if neg else f"−{part}"
+    part = f"{h}h"
+    return f"+{part}" if neg else f"−{part}"
 
 
 def _cooldowns_data_sync(user_id: int) -> dict:
@@ -10140,44 +10152,344 @@ def _cooldowns_data_sync(user_id: int) -> dict:
     return data
 
 
-@bot.tree.command(name="cooldowns", description="View time remaining on your cooldowns")
-async def cooldowns(interaction: discord.Interaction):
+@bot.tree.command(name="stats", description="View your profile, cooldowns, and earnings multipliers (ephemeral)")
+async def stats(interaction: discord.Interaction):
+    """Combined stats: profile (balance, plants, rank, imbuements, completion), cooldowns, and all money multipliers. Ephemeral."""
     try:
         if not await safe_defer(interaction, ephemeral=True):
             return
-        # Sync premium tier from Discord roles so reductions reflect current Seed/Sprout/Sapling/Evergreen rank
         await asyncio.to_thread(sync_premium_tier_from_member, interaction.user)
+        await asyncio.to_thread(sync_server_booster_from_member, interaction.user)
+        await asyncio.to_thread(sync_beta_tester_from_member, interaction.user)
         user_id = interaction.user.id
-        data = await asyncio.to_thread(_cooldowns_data_sync, user_id)
-        death_seconds = data["death"]
+        doc = await asyncio.to_thread(get_user_dossier, user_id)
+        cd_data = await asyncio.to_thread(_cooldowns_data_sync, user_id)
+        full_data = await asyncio.to_thread(get_user_harvest_full_data, user_id) or {}
+
+        # --- Profile (from userstats) ---
+        user_balance = doc["balance"]
+        total_items = doc["gather_stats_total_items"]
+        cycle_plants = doc["bloom_cycle_plants"]
+        bloom_count = doc["bloom_count"]
+        tree_rings = doc["tree_rings"]
+        bloom_multiplier = 1.0 + (tree_rings * 0.005)
+        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data={"bloom_count": bloom_count})
+        water_streak = doc["consecutive_water_days"]
+        daily_rate = 0.04 if doc["shop_inventory"].get("golden_watering_can", 0) >= 1 else 0.02
+        daily_bonus_multiplier = 1.0 + (water_streak * daily_rate)
+        ach_data = doc["achievements"]
+        hoe_attunement = doc["hoe_enchantment"]
+        tractor_attunement = doc["tractor_enchantment"]
+        bloom_rank = _bloom_count_to_rank(bloom_count)
+
+        items_needed = None
+        next_rank = None
+        if cycle_plants < 50:
+            items_needed = 50 - cycle_plants
+            next_rank = "PLANTER II"
+        elif cycle_plants < 150:
+            items_needed = 150 - cycle_plants
+            next_rank = "PLANTER III"
+        elif cycle_plants < 300:
+            items_needed = 300 - cycle_plants
+            next_rank = "PLANTER IV"
+        elif cycle_plants < 500:
+            items_needed = 500 - cycle_plants
+            next_rank = "PLANTER V"
+        elif cycle_plants < 1000:
+            items_needed = 1000 - cycle_plants
+            next_rank = "PLANTER VI"
+        elif cycle_plants < 2000:
+            items_needed = 2000 - cycle_plants
+            next_rank = "PLANTER VII"
+        elif cycle_plants < 4000:
+            items_needed = 4000 - cycle_plants
+            next_rank = "PLANTER VIII"
+        elif cycle_plants < 10000:
+            items_needed = 10000 - cycle_plants
+            next_rank = "PLANTER IX"
+        elif cycle_plants < 15000:
+            items_needed = 15000 - cycle_plants
+            next_rank = "PLANTER X"
+        else:
+            items_needed = 0
+            next_rank = "MAX RANK"
+
+        tree_ring_pct = (bloom_multiplier - 1.0) * 100
+        day_text = "day" if water_streak == 1 else "days"
+        water_streak_pct = (daily_bonus_multiplier - 1.0) * 100
+        profile_lines = [
+            f"**💰 Balance: ${user_balance:,.2f}**",
+            f"**🌱 Plants Gathered (Total): {total_items}**",
+        ]
+        if bloom_count > 0:
+            profile_lines.append(f"**🌿 Plants Gathered (This Bloom): {cycle_plants}**")
+        profile_lines.append(f"<:TreeRing:1474244868288282817> **TREE RINGS:** {tree_rings}")
+        profile_lines.append(f"**💧 Water Streak: {water_streak} {day_text} (+{water_streak_pct:.1f}%)**")
+        # Keep Tree Ring line normal (no bold/caps) so custom emoji displays correctly on prod
+        profile_val = "\n".join(line.upper() if "<:TreeRing:" not in line else line for line in profile_lines)
+        # Separator line between profile and imbuements (em dash), appended to description
+        _profile_separator = "\n\n— — — — — — — — — —\n\n"
+        profile_val = profile_val + _profile_separator
+
+        imbuement_lines = []
+        imbuement_lines.append("")
+        if hoe_attunement:
+            hoe_name = hoe_attunement.get("name", "Unknown")
+            hoe_rarity = hoe_attunement.get("rarity", "COMMON")
+            hoe_emoji = RARITY_EMOJI.get(hoe_rarity, "")
+            h_levels = hoe_attunement.get("levels") or {}
+            h_prosp = hoe_attunement.get("money_bonus", 0) or 0
+            h_renew = hoe_attunement.get("cooldown_reduction", 0) or 0
+            h_res = hoe_attunement.get("chain_chance", 0) or 0
+            h_crit = hoe_attunement.get("critical_chance", 0) or 0
+            imbuement_lines.append(f"**Gather — {hoe_name}** {hoe_emoji}".strip())
+            if h_prosp != 0:
+                imbuement_lines.append(f"**Prosperity {_to_roman(int(h_levels.get('prosperity', 0)))} ({h_prosp * 100:+.0f}% Money)**")
+            if h_renew != 0:
+                imbuement_lines.append(f"**Renewal {_to_roman(int(h_levels.get('renewal', 0)))} ({_format_reduction_seconds(int(h_renew))})**")
+            if h_res != 0:
+                imbuement_lines.append(f"**Resonance {_to_roman(int(h_levels.get('resonance', 0)))} ({h_res * 100:+.1f}%)**")
+            if h_crit != 0:
+                imbuement_lines.append(f"**Abundance {_to_roman(int(h_levels.get('abundance', 0)))} ({h_crit * 100:+.1f}%)**")
+        else:
+            imbuement_lines.append("**Gather — None**")
+        if tractor_attunement:
+            tractor_name = tractor_attunement.get("name", "Unknown")
+            tractor_rarity = tractor_attunement.get("rarity", "COMMON")
+            tractor_emoji = RARITY_EMOJI.get(tractor_rarity, "")
+            t_levels = tractor_attunement.get("levels") or {}
+            t_prosp = tractor_attunement.get("money_bonus", 0) or 0
+            t_renew = tractor_attunement.get("cooldown_reduction", 0) or 0
+            t_res = tractor_attunement.get("chain_chance", 0) or 0
+            t_favor = tractor_attunement.get("additional_plants", 0) or 0
+            imbuement_lines.append(f"**Harvest — {tractor_name}** {tractor_emoji}".strip())
+            if t_prosp != 0:
+                imbuement_lines.append(f"**Prosperity {_to_roman(int(t_levels.get('prosperity', 0)))} ({t_prosp * 100:+.0f}% Money)**")
+            if t_renew != 0:
+                imbuement_lines.append(f"**Renewal {_to_roman(int(t_levels.get('renewal', 0)))} ({_format_reduction_seconds(int(t_renew))})**")
+            if t_res != 0:
+                imbuement_lines.append(f"**Resonance {_to_roman(int(t_levels.get('resonance', 0)))} ({t_res * 100:+.1f}%)**")
+            if t_favor != 0:
+                imbuement_lines.append(f"**Nature's Favor {_to_roman(int(t_levels.get('natures_favor', 0)))} (+{t_favor} Plants)**")
+        else:
+            imbuement_lines.append("**Harvest — None**")
+        if items_needed == 0:
+            imbuement_lines.append(f"**📈 Rank Status: {next_rank} — You've Reached PLANTER X!**")
+        else:
+            imbuement_lines.append(f"**📈 Next Rank: {items_needed} More Plants Until {next_rank}**")
+        imbuement_val = "\n".join(imbuement_lines).upper()
+
+        total_achievement_categories = len(ACHIEVEMENTS)
+        total_completion_slots = total_achievement_categories + TOTAL_HIDDEN_ACHIEVEMENTS
+        completed_regular = 0
+        for ach_name, ach_def in ACHIEVEMENTS.items():
+            levels = ach_def.get("levels", [])
+            if not levels:
+                continue
+            max_level = max(l["level"] for l in levels)
+            if int(ach_data.get(ach_name, 0)) >= max_level:
+                completed_regular += 1
+        completed_hidden = int(ach_data.get("hidden_achievements_discovered", 0))
+        completed_slots = completed_regular + completed_hidden
+        max_bloom_level = 18
+        prestige_pct = (bloom_count / max_bloom_level) * 100 if max_bloom_level else 0
+        ach_pct = (completed_slots / total_completion_slots) * 100 if total_completion_slots else 0
+        completion_pct = round(0.7 * min(100, prestige_pct) + 0.3 * min(100, ach_pct))
+        completion_pct = min(100, max(0, completion_pct))
+        bar_length = 15
+        filled = round((completion_pct / 100.0) * bar_length) if bar_length else 0
+        filled = min(bar_length, max(0, filled))
+        progress_bar = "\u2588" * filled + "\u2581" * (bar_length - filled)
+        completion_val = f"\n\n**{progress_bar} {completion_pct}%**".upper()
+
+        maxed_out_just_unlocked = check_maxed_out_achievement(user_id, dossier=doc)
+        if maxed_out_just_unlocked:
+            await send_hidden_achievement_notification(interaction, "maxed_out")
+
+        # --- Cooldowns ---
+        death_seconds = cd_data["death"]
         is_dead = death_seconds > 0
         dead_suffix = " (Dead)" if is_dead else ""
-        has_revolver = data.get("has_gamblers_revolver", False)
+        has_revolver = cd_data.get("has_gamblers_revolver", False)
         death_penalty_desc = "5 min (Gambler's Revolver)" if has_revolver else "30 min"
         russian_status = "Alive" if death_seconds <= 0 else f"Dead ({_format_cooldown_seconds(death_seconds)})"
-        lines = [
-            f"**/gather** - {_format_cooldown_seconds(data['gather'])}{dead_suffix}",
-            f"**/harvest** - {_format_cooldown_seconds(data['harvest'])}{dead_suffix}",
-            f"**/mine** - {_format_cooldown_seconds(data['mine'])}{dead_suffix}",
-            f"**New /dailyshop** - {_format_cooldown_seconds(data['dailyshop'])}",
-            f"**/water** - {_format_cooldown_seconds(data['water'])}",
-            f"**/russian Status** - {russian_status}",
-            f"**Death penalty if eliminated** - {death_penalty_desc}",
+        cd_lines = [
+            "",
+            f"**/gather — {_format_cooldown_seconds(cd_data['gather'])}{dead_suffix}**",
+            f"**/harvest — {_format_cooldown_seconds(cd_data['harvest'])}{dead_suffix}**",
+            f"**/mine — {_format_cooldown_seconds(cd_data['mine'])}{dead_suffix}**",
+            f"**New /dailyshop — {_format_cooldown_seconds(cd_data['dailyshop'])}**",
+            f"**/water — {_format_cooldown_seconds(cd_data['water'])}**",
+            f"**Status — {russian_status}**",
+            f"**Death Penalty If Eliminated — {death_penalty_desc}**",
         ]
-        # Total cooldown reductions for /gather, /harvest, /mine
-        gather_red = data.get("gather_reduction_total", 0)
-        harvest_red = data.get("harvest_reduction_total", 0)
-        mine_red = data.get("mine_reduction_total", 0)
-        reduction_line = f"**Reductions:** /gather {_format_reduction_seconds(gather_red)}, /harvest {_format_reduction_seconds(harvest_red)}, /mine {_format_reduction_seconds(mine_red)}"
-        lines.append(reduction_line)
-        embed = discord.Embed(
-            title=f"⏱️ {interaction.user.name}'s Cooldowns",
-            description="\n".join(lines),
-            color=discord.Color.blue(),
+        # Renewal (from imbues) in cooldowns section
+        if hoe_attunement and (hoe_attunement.get("cooldown_reduction") or 0) != 0:
+            cd_lines.append(f"**Renewal (Gather):** {_format_reduction_seconds(int(hoe_attunement.get('cooldown_reduction', 0)))}")
+        if tractor_attunement and (tractor_attunement.get("cooldown_reduction") or 0) != 0:
+            cd_lines.append(f"**Renewal (Harvest):** {_format_reduction_seconds(int(tractor_attunement.get('cooldown_reduction', 0)))}")
+        gather_red = cd_data.get("gather_reduction_total", 0)
+        harvest_red = cd_data.get("harvest_reduction_total", 0)
+        mine_red = cd_data.get("mine_reduction_total", 0)
+        cd_lines.append(f"**Reductions: /gather {_format_reduction_seconds(gather_red)}, /harvest {_format_reduction_seconds(harvest_red)}, /mine {_format_reduction_seconds(mine_red)}**")
+        cooldowns_val = "\n".join(cd_lines).upper()
+
+        # --- Multipliers ---
+        bloom_mult = get_bloom_multiplier(user_id)
+        water_mult = get_water_multiplier(user_id)
+        daily_mult = get_daily_bonus_multiplier(user_id)
+        achievement_mult = get_achievement_multiplier(user_id, full_data=full_data)
+        rank_mult = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
+        beta_mult = get_beta_tester_money_multiplier(user_id)
+        server_booster_mult = get_server_booster_money_multiplier(user_id)
+        premium_mult = get_premium_tier_money_multiplier(user_id)
+        nether_star_mult = get_nether_star_money_multiplier(user_id)
+        black_shard_mult = get_black_shard_money_multiplier(user_id)
+        shadow_crystal_mult = get_shadow_crystal_money_multiplier(user_id)
+        palace_mult = get_palace_treasure_money_multiplier(user_id)
+        edward_mult = get_edward_splash_money_multiplier(user_id)
+        eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
+        premium_tier = get_user_premium_tier(user_id)
+        shop_inv = full_data.get("shop_inventory", {}) or get_user_shop_inventory(user_id)
+        has_scarecrow = shop_inv.get("scarecrow", 0) >= 1 or has_shop_item(user_id, "scarecrow")
+        has_bloomstone = shop_inv.get("bloomstone", 0) >= 1 or has_shop_item(user_id, "bloomstone")
+        has_fuzzy_dice = shop_inv.get("fuzzy_dice", 0) >= 1 or has_shop_item(user_id, "fuzzy_dice")
+        has_work_lunch = has_shop_item(user_id, "work_lunch")
+        has_alchemist = shop_inv.get("alchemists_pocketwatch", 0) >= 1 or has_shop_item(user_id, "alchemists_pocketwatch")
+        has_msi = has_shop_item(user_id, "msi_afterburner")
+        mult_lines = [""]  # Blank line before section
+        # Only show core multipliers when the user actually has a boost (no 0% lines).
+        # Tree Ring / Nether Star / Black Shard: emoji + bold label, no full-line caps so custom emojis display on prod
+        if bloom_mult > 1.0:
+            pct = (bloom_mult - 1.0) * 100
+            mult_lines.append(f"<:TreeRing:1474244868288282817> **TREE RING** — +{pct:.1f}%")
+        if rank_mult > 1.0:
+            pct = (rank_mult - 1.0) * 100
+            mult_lines.append(f"**⭐ Bloom Rank — +{pct:.1f}% ({bloom_rank})**")
+        if achievement_mult > 1.0:
+            pct = (achievement_mult - 1.0) * 100
+            mult_lines.append(f"**🏆 Achievement — +{pct:.1f}%**")
+        if daily_mult > 1.0:
+            pct = (daily_mult - 1.0) * 100
+            mult_lines.append(f"**💧 Water Streak — +{pct:.1f}%**")
+        if beta_mult > 1.0:
+            pct = (beta_mult - 1.0) * 100
+            mult_lines.append(f"**🧪 Beta Tester — +{pct:.1f}%**")
+        if server_booster_mult > 1.0:
+            pct = (server_booster_mult - 1.0) * 100
+            mult_lines.append(f"**{SERVER_BOOSTER_EMOJI} Server Booster — +{pct:.1f}%**")
+        if premium_mult > 1.0:
+            pct = (premium_mult - 1.0) * 100
+            tier_name = PREMIUM_DISPLAY.get(premium_tier, "None").strip() or "None"
+            mult_lines.append(f"**Premium — +{pct:.1f}% ({tier_name})**")
+        # Dailyshop / item multipliers (only when user has them). Splits into 2 fields if over 1024 chars.
+        if nether_star_mult > 1.0:
+            pct = (nether_star_mult - 1.0) * 100
+            mult_lines.append(f"{NETHER_STAR_EMOJI} **NETHER STAR** — +{pct:.1f}%")
+        if black_shard_mult > 1.0:
+            pct = (black_shard_mult - 1.0) * 100
+            mult_lines.append(f"{BLACK_SHARD_EMOJI} **BLACK SHARD** — +{pct:.1f}%")
+        if shadow_crystal_mult > 1.0:
+            mult_lines.append("**Shadow Crystal — +5%**")
+        if palace_mult > 1.0:
+            mult_lines.append("**Palace Treasure — +50%**")
+        if edward_mult > 1.0:
+            pct = (edward_mult - 1.0) * 100
+            mult_lines.append(f"**Edward / Splash Potion Of Luck — +{pct:.2f}%**")
+        if eclipse_mult > 1.0:
+            mult_lines.append("**Eclipse Glasses — +15%**")
+        if has_scarecrow:
+            mult_lines.append("**Scarecrow — +10%**")
+        if has_bloomstone:
+            mult_lines.append("**Bloomstone — +200% For Flowers**")
+        if has_fuzzy_dice:
+            mult_lines.append("**Fuzzy Dice — +5%**")
+        if has_work_lunch:
+            mult_lines.append("**Work Lunch — +10%**")
+        if has_alchemist:
+            mult_lines.append("**Alchemist's Pocketwatch — +5%**")
+        if has_msi:
+            mult_lines.append("**MSI Afterburner — +20%**")
+        additive_total = 1.0 + (bloom_mult - 1.0) + (water_mult - 1.0) + (achievement_mult - 1.0) + (daily_mult - 1.0)
+        additive_total += (beta_mult - 1.0) + (server_booster_mult - 1.0) + (premium_mult - 1.0)
+        additive_total += (nether_star_mult - 1.0) + (black_shard_mult - 1.0) + (shadow_crystal_mult - 1.0)
+        additive_total += (palace_mult - 1.0) + (edward_mult - 1.0) + (eclipse_mult - 1.0)
+        # Imbue prosperity (Gather + Harvest) counts toward combined %
+        imbue_gather_prosperity = (hoe_attunement.get("money_bonus", 0) or 0) if hoe_attunement else 0
+        imbue_harvest_prosperity = (tractor_attunement.get("money_bonus", 0) or 0) if tractor_attunement else 0
+        additive_total += imbue_gather_prosperity + imbue_harvest_prosperity
+        combined_pct = (additive_total - 1.0) * 100
+        mult_lines.append(f"**Combined (Additive) — {additive_total:.2f}× (+{combined_pct:.1f}%)**")
+        # Don't upper lines with custom emojis (Tree Ring, Nether Star, Black Shard) so they display on prod
+        _custom_emoji_markers = ("<:TreeRing:", NETHER_STAR_EMOJI, BLACK_SHARD_EMOJI)
+        mult_text = "\n".join(
+            line.upper() if not any(m in line for m in _custom_emoji_markers) else line
+            for line in mult_lines
         )
-        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+        if len(mult_text) > 1024:
+            split_at = mult_text[:1020].rfind("\n")
+            if split_at > 0:
+                multipliers_val_1 = mult_text[: split_at + 1]
+                multipliers_val_2 = mult_text[split_at + 1:]
+            else:
+                multipliers_val_1 = mult_text[:1020]
+                multipliers_val_2 = mult_text[1020:]
+        else:
+            multipliers_val_1 = mult_text
+            multipliers_val_2 = None
+
+        # Profile in description so first line sits right under title (no extra space).
+        # Discord embed total limit 6000; split into 2 ephemeral embeds when needed.
+        EMBED_TOTAL_LIMIT = 5500
+        # Section separator (em dash) and spacing so differences between sections are obvious.
+        _section_gap = "\n\n"
+        _section_rule = "\n\n— — — — — — — — — —\n\n"
+        # Profile already has separator at end (in description). First field value has no leading rule.
+        _imb = _section_gap + imbuement_val + _section_rule
+        _cd = _section_gap + cooldowns_val + _section_rule
+        _mult1 = _section_gap + multipliers_val_1[:1024] + _section_rule
+        parts = [
+            ("✨ IMBUEMENTS & PLANTER RANK", _imb),
+            ("⏱️ COOLDOWNS", _cd),
+            ("💰 EARNINGS MULTIPLIERS", _mult1),
+        ]
+        if multipliers_val_2:
+            parts.append(("💰 EARNINGS MULTIPLIERS (CONT.)", _section_gap + multipliers_val_2[:1024] + _section_rule))
+        parts.append(("🎮 GAME COMPLETION", _section_gap + completion_val[:1024]))
+
+        embeds = []
+        _stats_title = (interaction.user.name + "'s Stats").upper()
+        _stats_color = discord.Color(0x2E7D32)  # green
+        current = discord.Embed(
+            title=f"📊 {_stats_title}",
+            description=profile_val,
+            color=_stats_color,
+        )
+        current_len = len(current.title) + len(profile_val or "")
+
+        for name, value in parts:
+            val_str = value[:1024] if len(value) > 1024 else value
+            add_len = len(name) + len(val_str)
+            if current_len + add_len > EMBED_TOTAL_LIMIT and current.fields:
+                embeds.append(current)
+                _cont_title = (interaction.user.name + "'s Stats (Cont.)").upper()
+                current = discord.Embed(
+                    title=f"📊 {_cont_title}",
+                    color=_stats_color,
+                )
+                current_len = len(current.title)
+            current.add_field(name=name, value=val_str, inline=False)
+            current_len += add_len
+
+        embeds.append(current)
+        await safe_interaction_response(
+            interaction, interaction.followup.send, embeds=embeds, ephemeral=True
+        )
     except Exception as e:
-        print(f"Error in cooldowns command: {e}")
+        print(f"Error in stats command: {e}")
+        import traceback
+        traceback.print_exc()
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
@@ -10408,9 +10720,10 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         basket_multiplier *= 1.5
 
     # ----- harvest loop (pure math, no DB writes) -----
+    # Only /gear (basket), /orchard (fertilizer, car, etc.), and Bloom Rank apply to raw. All other buffs apply after to one base.
     gathered_items = []
     total_value = 0.0
-    total_base_value = 0.0
+    total_raw = 0.0
     total_value_before_daily = 0.0
     items_inc: dict[str, int] = {}
     ripeness_inc: dict[str, int] = {}
@@ -10418,6 +10731,7 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     month_name = MONTHS[month_index]
     total_seasonal_bonus = 0.0
     seasonal_label = None
+    has_bloomstone_harvest = (full_data.get("shop_inventory", {}).get("bloomstone", 0) >= 1) if (full_data is not None) else has_shop_item(user_id, "bloomstone")
 
     for _ in range(total_items_to_harvest):
         item = random.choice(GATHERABLE_ITEMS)
@@ -10486,23 +10800,14 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
                 seasonal_label = item_seasonal_label
 
         base_value_before_boosts = final_value
-        extra_bloom = base_value_before_boosts * (bloom_multiplier - 1.0)
-        extra_water = base_value_before_boosts * (water_multiplier - 1.0)
-        extra_achievement = base_value_before_boosts * (achievement_multiplier - 1.0)
-        extra_daily = base_value_before_boosts * (daily_bonus_multiplier - 1.0)
-        extra_enchant = base_value_before_boosts * enchant_money_bonus if enchant_money_bonus != 0 else 0.0
-        subtotal = base_value_before_boosts + extra_bloom + extra_water + extra_achievement + extra_daily + extra_enchant
-        final_value = subtotal * rank_perma_buff_mult
+        raw_item = base_value_before_boosts + (enchant_money_bonus if enchant_money_bonus else 0.0)
+        total_raw += raw_item
+        item_after_rank = raw_item * rank_perma_buff_mult
+        if item.get("category") == "Flower" and has_bloomstone_harvest:
+            item_after_rank *= 3.0
+        final_value = item_after_rank
 
-        # Daily shop: Bloomstone (flowers 3x)
-        if item.get("category") == "Flower":
-            shop_inv_harvest = full_data.get("shop_inventory", {}) if full_data else get_user_shop_inventory(user_id)
-            if shop_inv_harvest.get("bloomstone", 0) >= 1:
-                final_value *= 3.0
-
-        current_balance += final_value
         total_value += final_value
-        total_base_value += base_value_before_boosts
 
         # Accumulate for batch write instead of per-item DB calls
         items_inc[name] = items_inc.get(name, 0) + 1
@@ -10513,13 +10818,16 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
             "ripeness": ripeness["name"], "is_gmo": is_gmo,
         })
 
-    # ----- Daily shop: Fuzzy Dice (+5% harvest money) -----
-    shop_inv = full_data.get("shop_inventory", {}) if full_data else get_user_shop_inventory(user_id)
-    if shop_inv.get("fuzzy_dice", 0) >= 1:
-        total_value *= 1.05
-
-    # All money buffs below apply to the SAME base value (additive stacking). No buff's result becomes the "new base".
+    # All money buffs apply to the SAME base (additive stacking). Base = sum of (raw item * rank * bloomstone).
     base_for_buffs = float(total_value)
+    has_fuzzy_dice = (full_data.get("shop_inventory", {}).get("fuzzy_dice", 0) >= 1) if (full_data is not None) else has_shop_item(user_id, "fuzzy_dice")
+    extra_money_from_fuzzy_dice = base_for_buffs * 0.05 if has_fuzzy_dice else 0.0
+    extra_money_from_bloom = base_for_buffs * (bloom_multiplier - 1.0)
+    extra_money_from_water = base_for_buffs * (water_multiplier - 1.0)
+    extra_money_from_achievement = base_for_buffs * (achievement_multiplier - 1.0)
+    extra_money_from_daily = base_for_buffs * (daily_bonus_multiplier - 1.0) if daily_bonus_multiplier > 1.0 else 0.0
+    extra_money_from_rank = total_raw * (rank_perma_buff_mult - 1.0) if rank_perma_buff_mult > 1.0 else 0.0
+
     beta_tester_mult = get_beta_tester_money_multiplier(user_id)
     server_booster_mult = get_server_booster_money_multiplier(user_id)
     premium_mult = get_premium_tier_money_multiplier(user_id)
@@ -10540,7 +10848,8 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
     work_lunch_extra = base_for_buffs * 0.10 if (not set_cooldown and has_shop_item(user_id, "work_lunch")) else 0.0
     overtime_extra = base_for_buffs * 1.0 if (not set_cooldown and has_shop_item(user_id, "overtime_approval") and random.random() < 0.10) else 0.0
-    total_value = base_for_buffs + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra
+    total_value = base_for_buffs + extra_money_from_fuzzy_dice + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra
+    current_balance = current_balance + total_value
 
     # ----- single batch write: items + ripeness + balance + counts + tree rings + cooldown + almanac -----
     num_items = total_items_to_harvest
@@ -10563,10 +10872,18 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         "gathered_items": gathered_items,
         "current_balance": current_balance,
         "chain_chance": chain_chance,
-        "total_base_value": total_base_value,
+        "total_base_value": total_raw,
         "bloom_multiplier": bloom_multiplier,
         "water_multiplier": water_multiplier,
         "total_value_before_daily": total_value_before_daily,
+        "extra_money_from_bloom": extra_money_from_bloom,
+        "extra_money_from_achievement": extra_money_from_achievement,
+        "extra_money_from_daily": extra_money_from_daily,
+        "extra_money_from_water": extra_money_from_water,
+        "extra_money_from_rank": extra_money_from_rank,
+        "achievement_multiplier": achievement_multiplier,
+        "daily_bonus_multiplier": daily_bonus_multiplier,
+        "rank_perma_buff_multiplier": rank_perma_buff_mult,
         "tree_rings_to_award": tree_rings_to_award,
         "achievement_unlocked": None,
         "tractor_enchant": tractor_enchant,
@@ -10590,6 +10907,8 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         "extra_money_from_nether_star": extra_money_from_nether_star,
         "black_shard_multiplier": black_shard_mult,
         "extra_money_from_black_shard": extra_money_from_black_shard,
+        "shadow_crystal_multiplier": shadow_crystal_mult,
+        "extra_money_from_shadow_crystal": extra_money_from_shadow_crystal,
     }
 
 async def perform_harvest_for_user(user_id: int, allow_chain: bool = True,
@@ -10883,49 +11202,25 @@ async def harvest(interaction: discord.Interaction):
         embed.add_field(name="📦 Items Gathered", value=items_display or "No items", inline=False)
 
         bloom_count = full_data.get("bloom_count", 0)
-        extra_money_from_bloom = total_base_value * (bloom_multiplier - 1.0)
-        if bloom_count > 0 and extra_money_from_bloom > 0:
-            multiplier_percent = (bloom_multiplier - 1.0) * 100
+        if bloom_count > 0 and result.get("extra_money_from_bloom", 0) > 0:
+            multiplier_percent = (result["bloom_multiplier"] - 1.0) * 100
             embed.add_field(name="<:TreeRing:1474244868288282817> Tree Ring Boost",
-                value=f"+{multiplier_percent:.1f}% - **+{format_money(extra_money_from_bloom)}**", inline=False)
+                value=f"+{multiplier_percent:.1f}% - **+{format_money(result['extra_money_from_bloom'])}**", inline=False)
 
-        achievement_multiplier = get_achievement_multiplier(user_id, full_data=full_data)
-        extra_money_from_achievement = total_base_value * (achievement_multiplier - 1.0)
-        if extra_money_from_achievement > 0:
-            achievement_percent = (achievement_multiplier - 1.0) * 100
-            embed.add_field(name="🏆 Achievement Boost",
-                value=f"+{achievement_percent:.1f}% - **+{format_money(extra_money_from_achievement)}**", inline=False)
-
-        bloom_rank = _bloom_count_to_rank(bloom_count)
-        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
-        if bloom_rank != "PINE I" and rank_perma_buff_multiplier > 1.0:
-            enchant_money_bonus = result.get("enchant_money_bonus", 0)
-            extra_money_from_water = total_base_value * (water_multiplier - 1.0)
-            enchant_total = total_base_value * enchant_money_bonus if enchant_money_bonus != 0 else 0.0
-            # Calculate base for Water Streak display (same as Beta Tester base: after rank, fuzzy dice, etc.)
-            # This approximates base_for_buffs by subtracting final buffs from total_value
-            total_subtotal = total_base_value + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + enchant_total
-            extra_money_from_rank = total_subtotal * (rank_perma_buff_multiplier - 1.0)
-            total_after_rank = total_subtotal + extra_money_from_rank
-            # Apply fuzzy dice if present (1.05x)
-            total_after_fuzzy = total_after_rank * 1.05 if (full_data.get("shop_inventory", {}).get("fuzzy_dice", 0) >= 1) else total_after_rank
-            base_for_display = total_after_fuzzy
-            rank_percent = (rank_perma_buff_multiplier - 1.0) * 100
+        if result.get("extra_money_from_rank", 0) > 0:
+            rank_percent = (result["rank_perma_buff_multiplier"] - 1.0) * 100
             embed.add_field(name="⭐ Rank Boost",
-                value=f"+{rank_percent:.1f}% - **+{format_money(extra_money_from_rank)}**", inline=False)
-        else:
-            # No rank boost, so base is just after fuzzy dice
-            total_after_fuzzy = total_base_value * 1.05 if (full_data.get("shop_inventory", {}).get("fuzzy_dice", 0) >= 1) else total_base_value
-            base_for_display = total_after_fuzzy
+                value=f"+{rank_percent:.1f}% - **+{format_money(result['extra_money_from_rank'])}**", inline=False)
 
-        daily_rate_display = 0.04 if full_data.get("shop_inventory", {}).get("golden_watering_can", 0) >= 1 else 0.02
-        daily_bonus_multiplier = 1.0 + (full_data.get("consecutive_water_days", 0) * daily_rate_display)
-        # Calculate Water Streak on same base as Beta Tester for consistent display
-        extra_money_from_daily = base_for_display * (daily_bonus_multiplier - 1.0) if daily_bonus_multiplier > 1.0 else 0.0
-        if extra_money_from_daily > 0:
-            daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
+        if result.get("extra_money_from_achievement", 0) > 0:
+            achievement_percent = (result["achievement_multiplier"] - 1.0) * 100
+            embed.add_field(name="🏆 Achievement Boost",
+                value=f"+{achievement_percent:.1f}% - **+{format_money(result['extra_money_from_achievement'])}**", inline=False)
+
+        if result.get("extra_money_from_daily", 0) > 0:
+            daily_bonus_percent = (result["daily_bonus_multiplier"] - 1.0) * 100
             embed.add_field(name="💧 Water Streak Boost",
-                value=f"+{daily_bonus_percent:.1f}% - **+{format_money(extra_money_from_daily)}**", inline=False)
+                value=f"+{daily_bonus_percent:.1f}% - **+{format_money(result['extra_money_from_daily'])}**", inline=False)
 
         if result.get("extra_money_from_beta_tester", 0) > 0:
             beta_percent = (result['beta_tester_multiplier'] - 1.0) * 100
@@ -12184,7 +12479,7 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
 
 
 # # balance command
-# commented since we have userstats
+# commented since we have /stats
 # @bot.tree.command(name="balance", description="Check your current balance")
 # #use defer for thinking message
 # async def balance(interaction: discord.Interaction):
@@ -12192,133 +12487,6 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
 #     user_id = interaction.user.id
 #     user_balance = get_user_balance(user_id)
 #     await interaction.followup.send(f"{interaction.user.name}, you have **${user_balance:.2f}**.")
-
-
-# userstats command (single DB read via get_user_dossier)
-@bot.tree.command(name="userstats", description="View your statistics!")
-async def userstats(interaction: discord.Interaction):
-    try:
-        if not await safe_defer(interaction, ephemeral=False):
-            return
-
-        user_id = interaction.user.id
-        doc = await asyncio.to_thread(get_user_dossier, user_id)
-
-        user_balance = doc["balance"]
-        total_items = doc["gather_stats_total_items"]
-        cycle_plants = doc["bloom_cycle_plants"]
-        bloom_count = doc["bloom_count"]
-
-        items_needed = None
-        next_rank = None
-        if cycle_plants < 50:
-            items_needed = 50 - cycle_plants
-            next_rank = "PLANTER II"
-        elif cycle_plants < 150:
-            items_needed = 150 - cycle_plants
-            next_rank = "PLANTER III"
-        elif cycle_plants < 300:
-            items_needed = 300 - cycle_plants
-            next_rank = "PLANTER IV"
-        elif cycle_plants < 500:
-            items_needed = 500 - cycle_plants
-            next_rank = "PLANTER V"
-        elif cycle_plants < 1000:
-            items_needed = 1000 - cycle_plants
-            next_rank = "PLANTER VI"
-        elif cycle_plants < 2000:
-            items_needed = 2000 - cycle_plants
-            next_rank = "PLANTER VII"
-        elif cycle_plants < 4000:
-            items_needed = 4000 - cycle_plants
-            next_rank = "PLANTER VIII"
-        elif cycle_plants < 10000:
-            items_needed = 10000 - cycle_plants
-            next_rank = "PLANTER IX"
-        elif cycle_plants < 15000:
-            items_needed = 15000 - cycle_plants
-            next_rank = "PLANTER X"
-        else:
-            items_needed = 0
-            next_rank = "MAX RANK"
-
-        bloom_rank = _bloom_count_to_rank(bloom_count)
-        tree_rings = doc["tree_rings"]
-        bloom_multiplier = 1.0 + (tree_rings * 0.005)
-        rank_perma_buff_multiplier = get_rank_perma_buff_multiplier(user_id, full_data={"bloom_count": bloom_count})
-        water_streak = doc["consecutive_water_days"]
-        daily_rate = 0.04 if doc["shop_inventory"].get("golden_watering_can", 0) >= 1 else 0.02
-        daily_bonus_multiplier = 1.0 + (water_streak * daily_rate)
-        ach_data = doc["achievements"]
-        hoe_attunement = doc["hoe_enchantment"]
-        tractor_attunement = doc["tractor_enchantment"]
-
-        embed = discord.Embed(
-            title=f"📊 {interaction.user.name}'s Stats",
-            color=discord.Color.blue()
-        )
-        embed.add_field(name="💰 Balance", value=f"**${user_balance:.2f}**", inline=True)
-        embed.add_field(name="🌱 Plants Gathered (Total)", value=f"**{total_items}** plants", inline=True)
-        if bloom_count > 0:
-            embed.add_field(name="🌿 Plants Gathered (This Bloom)", value=f"**{cycle_plants}** plants", inline=True)
-        embed.add_field(name="🌲 Bloom Rank", value=f"**{bloom_rank}**", inline=True)
-        tree_ring_boost_pct = (bloom_multiplier - 1.0) * 100
-        embed.add_field(name="<:TreeRing:1474244868288282817> Tree Rings", value=f"**{tree_rings}** (+{tree_ring_boost_pct:.1f}% boost)", inline=True)
-        if bloom_rank != "PINE I":
-            embed.add_field(name="⭐ Rank Boost", value=f"**{rank_perma_buff_multiplier:.2f}x**", inline=True)
-        day_text = "day" if water_streak == 1 else "days"
-        water_streak_pct = (daily_bonus_multiplier - 1.0) * 100
-        embed.add_field(name="💧 Water Streak", value=f"**{water_streak}** {day_text} (+{water_streak_pct:.1f}%)", inline=True)
-        if hoe_attunement:
-            hoe_name = hoe_attunement.get("name", "Unknown")
-            hoe_rarity = hoe_attunement.get("rarity", "COMMON")
-            embed.add_field(name="✨ Gather Imbuement", value=f"**{hoe_name}** {RARITY_EMOJI.get(hoe_rarity, f'[{hoe_rarity}]')}", inline=True)
-        else:
-            embed.add_field(name="✨ Gather Imbuement", value="**None**", inline=True)
-        if tractor_attunement:
-            tractor_name = tractor_attunement.get("name", "Unknown")
-            tractor_rarity = tractor_attunement.get("rarity", "COMMON")
-            embed.add_field(name="✨ Harvest Imbuement", value=f"**{tractor_name}** {RARITY_EMOJI.get(tractor_rarity, f'[{tractor_rarity}]')}", inline=True)
-        else:
-            embed.add_field(name="✨ Harvest Imbuement", value="**None**", inline=True)
-        if items_needed == 0:
-            embed.add_field(name="🏆 Rank Status", value=f"**{next_rank}** - You've reached **PLANTER X**!", inline=False)
-        else:
-            embed.add_field(name="📈 Next Rank", value=f"**{items_needed}** more plants until **{next_rank}**", inline=False)
-
-        maxed_out_just_unlocked = check_maxed_out_achievement(user_id, dossier=doc)
-        if maxed_out_just_unlocked:
-            await send_hidden_achievement_notification(interaction, "maxed_out")
-
-        total_achievement_categories = len(ACHIEVEMENTS)
-        total_completion_slots = total_achievement_categories + TOTAL_HIDDEN_ACHIEVEMENTS
-        completed_regular = 0
-        for ach_name, ach_def in ACHIEVEMENTS.items():
-            levels = ach_def.get("levels", [])
-            if not levels:
-                continue
-            max_level = max(l["level"] for l in levels)
-            if int(ach_data.get(ach_name, 0)) >= max_level:
-                completed_regular += 1
-        completed_hidden = int(ach_data.get("hidden_achievements_discovered", 0))
-        completed_slots = completed_regular + completed_hidden
-        # Weighted completion: prestige (bloom) has most weight so Pine II isn't ~70% done
-        max_bloom_level = 18  # REDWOOD
-        bloom_count = int(doc.get("bloom_count", 0))
-        prestige_pct = (bloom_count / max_bloom_level) * 100 if max_bloom_level else 0
-        ach_pct = (completed_slots / total_completion_slots) * 100 if total_completion_slots else 0
-        completion_pct = round(0.7 * min(100, prestige_pct) + 0.3 * min(100, ach_pct))
-        completion_pct = min(100, max(0, completion_pct))
-        bar_length = 15
-        filled = round((completion_pct / 100.0) * bar_length) if bar_length else 0
-        filled = min(bar_length, max(0, filled))
-        progress_bar = "\u2588" * filled + "\u2581" * (bar_length - filled)
-        embed.add_field(name="GAME COMPLETION", value=f"{progress_bar} **{completion_pct}%**", inline=False)
-
-        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
-    except Exception as e:
-        print(f"Error in userstats command: {e}")
-        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 @bot.tree.command(name="treering", description="[ADMIN] Recalculate Tree Rings for everyone in this server (fix after wipe or desync)")
@@ -14181,7 +14349,7 @@ async def spawn_boss(interaction: discord.Interaction, boss: str, channel: str):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
-# User admin command - full dossier: userstats, items, achievements, hidden achievements, and Wild Animals spawn reference
+# User admin command - full dossier: profile/stats, items, achievements, hidden achievements, and Wild Animals spawn reference
 @bot.tree.command(name="user", description="[ADMIN] View everything about a user: stats, items, achievements, hidden achievements")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="The user to inspect (defaults to yourself)")
@@ -14265,7 +14433,7 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
 
         # ── 1. Userstats embed ──
         embed_stats = discord.Embed(
-            title=f"📊 {display_name}'s Stats (userstats)",
+            title=f"📊 {display_name}'s Stats",
             color=discord.Color.blue()
         )
         embed_stats.add_field(name="💰 Balance", value=f"**${user_balance:.2f}**", inline=True)
@@ -15725,7 +15893,7 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
     # Get all guild member IDs
     guild_member_ids = {member.id for member in guild.members}
     
-    # Get leaderboard data (plants uses Planters Gathered Total = gather_stats.total_items, same as /userstats)
+    # Get leaderboard data (plants uses Planters Gathered Total = gather_stats.total_items, same as /stats)
     if leaderboard_type == "plants":
         all_data = get_all_users_total_items()
     elif leaderboard_type == "money":
