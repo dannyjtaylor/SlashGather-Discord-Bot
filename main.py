@@ -7647,10 +7647,9 @@ def _gather_critical_path(member, user_id: int, channel_name: str, area: dict) -
     Returns a dict describing the outcome so the caller can build the embed
     and send Discord messages without touching the database again.
     """
-    # Sync Discord role state to DB in-thread so the main event loop is not blocked
+    # Sync Discord role state to DB in-thread (GTHR tag is synced from API before this path, do not overwrite)
     sync_beta_tester_from_member(member)
     sync_server_booster_from_member(member)
-    sync_server_tag_from_member(member)
     sync_premium_tier_from_member(member)
     user_planter_level = get_user_planter_level(member)
 
@@ -11243,7 +11242,6 @@ def _harvest_critical_path(member, user_id: int, channel_name: str, area: dict) 
     """
     sync_beta_tester_from_member(member)
     sync_server_booster_from_member(member)
-    sync_server_tag_from_member(member)
     sync_premium_tier_from_member(member)
     user_planter_level = get_user_planter_level(member)
     area_mult = area.get("multiplier", 1.0)
@@ -18686,10 +18684,9 @@ async def mine(interaction: discord.Interaction):
 
 
 def _sell_initial_sync(member, user_id: int) -> dict:
-    """Run in thread: sync beta/booster/GTHR tag/premium + load holdings and prices. Returns dict for sell command."""
+    """Run in thread: sync beta/booster/premium + load holdings and prices. GTHR tag synced from API before this."""
     sync_beta_tester_from_member(member)
     sync_server_booster_from_member(member)
-    sync_server_tag_from_member(member)
     sync_premium_tier_from_member(member)
     holdings = get_user_crypto_holdings(user_id)
     prices = get_crypto_prices()
