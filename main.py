@@ -10692,8 +10692,9 @@ async def stats(interaction: discord.Interaction):
             mult_lines.append(f"**{SERVER_TAG_EMOJI} GTHR Tag —** +{pct:.1f}%")
         if premium_mult > 1.0:
             pct = (premium_mult - 1.0) * 100
-            tier_name = PREMIUM_DISPLAY.get(premium_tier, "None").strip() or "None"
-            mult_lines.append(f"**Premium —** +{pct:.1f}% ({tier_name})")
+            rank_name = PREMIUM_ROLE_NAMES[premium_tier - 1] if 1 <= premium_tier <= 4 else "Premium"
+            emoji = PREMIUM_GARDENER_EMOJI.get(5 + premium_tier, "🌿")
+            mult_lines.append(f"**{emoji} {rank_name.upper()} RANK —** +{pct:.1f}%")
         # Dailyshop / item multipliers (only when user has them). Splits into 2 fields if over 1024 chars.
         if nether_star_mult > 1.0:
             pct = (nether_star_mult - 1.0) * 100
@@ -11932,6 +11933,12 @@ class BloomConfirmView(discord.ui.View):
         except Exception as e:
             print(f"Error editing bloom message: {e}")
         await interaction.followup.send("You bloomed! 🌸", ephemeral=True)
+
+        # Refresh the stock market board so available shares reflect the returned holdings
+        try:
+            await update_marketboard_message(guild)
+        except Exception as e:
+            print(f"Error updating marketboard after bloom: {e}")
 
         bloom_count = get_user_bloom_count(user_id)
         new_blooming_level = get_achievement_level_for_stat("blooming", bloom_count)
