@@ -1493,8 +1493,8 @@ PVE_TRIGGER_CHANCE_GATHER = 0.01   # 1% per /gather for animals (event multiplie
 PVE_TRIGGER_CHANCE_HARVEST = 0.005  # 0.5% per /harvest for animals (event multiplies)
 
 # Steal: stealable chance per successful gather/harvest (no PvE when stealable; crits can be stolen)
-STEAL_CHANCE_GATHER = 0.04   # 4% per /gather (4x previous)
-STEAL_CHANCE_HARVEST = 0.02  # 2% per /harvest (4x previous)
+STEAL_CHANCE_GATHER = 0.07   # 7% per /gather
+STEAL_CHANCE_HARVEST = 0.03  # 3% per /harvest
 STEAL_WINDOW_GATHER_SEC = 5
 STEAL_WINDOW_HARVEST_SEC = 3
 
@@ -7205,7 +7205,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.0.2"
+            name="running /gather on V1.0.3"
         )
     )
     try:
@@ -7881,6 +7881,9 @@ class StealView(discord.ui.View):
 # PvE Wild Animal Event — View, trigger, and reward logic
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Debounce for PvE embed updates (hits apply instantly; message edits batched). Pass message into task so edit always has correct reference.
+PVE_EMBED_UPDATE_DEBOUNCE_SEC = 0.05
+
 class WildAnimalView(discord.ui.View):
     """Interactive button view for the PvE wild animal event.
     
@@ -7908,6 +7911,8 @@ class WildAnimalView(discord.ui.View):
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await safe_defer(interaction, ephemeral=False):
             return
+        if getattr(interaction, "message", None):
+            self.message = interaction.message
         async with self._lock:
             if self.defeated:
                 return  # Already dead; send nothing to avoid flooding chat when spam-clicking
@@ -7979,7 +7984,7 @@ BULLET_ANT_SWARM_REWARD_ANIMAL = {
 
 
 class BulletAntView(discord.ui.View):
-    """Single ant in a Bullet Ant Swarm. On defeat, decrements swarm ants_remaining; when 0, edits intro to defeat and distributes rewards."""
+    """Single ant in a Bullet Ant Swarm. On defeat, decrements swarm ants_remaining; when 0, edits intro to defeat and distributes rewards. Progress embed updates are debounced; no message to user."""
 
     def __init__(self, ant_hp: int, channel_id: int, swarm_state: dict):
         super().__init__(timeout=None)
@@ -7989,16 +7994,48 @@ class BulletAntView(discord.ui.View):
         self.swarm_state = swarm_state
         self.defeated = False
         self._lock = asyncio.Lock()
+        self._dirty = False
+        self._last_hit_name: str | None = None
+        self._update_task: asyncio.Task | None = None
 
     def _hp_bar(self) -> str:
         filled = max(0, round((self.hp / self.max_hp) * 20))
         empty = 20 - filled
         return f"{'🟥' * filled}{'⬛' * empty}"
 
+    def _progress_embed(self, last_hit: str | None) -> discord.Embed:
+        e = discord.Embed(
+            title=f"🚨 {BULLET_ANT_ANIMAL['emoji']} Bullet Ant 🚨",
+            description=BULLET_ANT_ANIMAL["description"],
+            color=BULLET_ANT_ANIMAL["color"])
+        e.add_field(name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
+        if last_hit:
+            e.add_field(name="⚔️ Last Hit", value=f"**{last_hit}**!", inline=False)
+        return e
+
+    async def _debounced_update(self, message: discord.Message | None = None):
+        await asyncio.sleep(PVE_EMBED_UPDATE_DEBOUNCE_SEC)
+        async with self._lock:
+            if self.defeated or not self._dirty:
+                return
+            last_hit = self._last_hit_name
+            self._dirty = False
+        async with self._lock:
+            if self.defeated:
+                return
+        target = message or getattr(self, "message", None)
+        try:
+            if target:
+                await target.edit(embed=self._progress_embed(last_hit), view=self)
+        except Exception:
+            pass
+
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_ant_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await safe_defer(interaction, ephemeral=False):
             return
+        if getattr(interaction, "message", None):
+            self.message = interaction.message
         async with self._lock:
             if self.defeated:
                 await safe_interaction_response(
@@ -8059,15 +8096,11 @@ class BulletAntView(discord.ui.View):
                             max_hp=self.swarm_state.get("total_hp")))
                 return
 
-            progress_embed = discord.Embed(
-                title=f"🚨 {BULLET_ANT_ANIMAL['emoji']} Bullet Ant 🚨",
-                description=BULLET_ANT_ANIMAL["description"],
-                color=BULLET_ANT_ANIMAL["color"])
-            progress_embed.add_field(
-                name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
-            progress_embed.add_field(name="⚔️ Last Hit", value=f"**{interaction.user.display_name}**!", inline=False)
-            await safe_interaction_response(
-                interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+            self._last_hit_name = interaction.user.display_name
+            self._dirty = True
+            if self._update_task is None or self._update_task.done():
+                msg = getattr(interaction, "message", None)
+                self._update_task = asyncio.create_task(self._debounced_update(msg))
 
 
 # Bee Swarm (underground-jungle only): reward display and Larva chance after defeat
@@ -8345,7 +8378,7 @@ class BlackShardClaimView(discord.ui.View):
 
 
 class BossView(discord.ui.View):
-    """Boss PvE: same as wild animal but removes from active_boss_events on defeat; marks guild eligible for Plantera bulb."""
+    """Boss PvE: same as wild animal but removes from active_boss_events on defeat; marks guild eligible for Plantera bulb. Progress embed updates are debounced; no message to user."""
 
     def __init__(self, boss: dict, hp: int, channel_id: int, guild_id: int, area_multiplier: float, boss_state_ref: dict):
         super().__init__(timeout=None)
@@ -8359,16 +8392,50 @@ class BossView(discord.ui.View):
         self.attackers: dict[int, int] = {}
         self.defeated = False
         self._lock = asyncio.Lock()
+        self._dirty = False
+        self._last_hit_name: str | None = None
+        self._update_task: asyncio.Task | None = None
 
     def _hp_bar(self) -> str:
         filled = max(0, round((self.hp / self.max_hp) * 20))
         empty = 20 - filled
         return f"{'🟥' * filled}{'⬛' * empty}"
 
+    def _progress_embed(self, last_hit: str | None) -> discord.Embed:
+        e = discord.Embed(
+            title=f"🚨 {self.boss['emoji']} {self.boss['name']} 🚨",
+            description=self.boss["description"],
+            color=self.boss["color"])
+        e.add_field(name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
+        if last_hit:
+            e.add_field(name="⚔️ Last Hit", value=f"**{last_hit}**!", inline=False)
+        e.set_footer(text="All gathering channels are blocked until this boss is defeated!")
+        return e
+
+    async def _debounced_update(self, message: discord.Message | None = None):
+        await asyncio.sleep(PVE_EMBED_UPDATE_DEBOUNCE_SEC)
+        async with self._lock:
+            if self.defeated or not self._dirty:
+                return
+            last_hit = self._last_hit_name
+            self._dirty = False
+        async with self._lock:
+            if self.defeated:
+                return
+        target = message or getattr(self, "message", None)
+        try:
+            if target:
+                await target.edit(embed=self._progress_embed(last_hit), view=self)
+        except Exception:
+            pass
+
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_boss_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await safe_defer(interaction, ephemeral=False):
             return
+        if getattr(interaction, "message", None):
+            self.message = interaction.message
+        damage = 0
         async with self._lock:
             if self.defeated:
                 return  # Already dead; send nothing to avoid flooding chat when spam-clicking
@@ -8455,14 +8522,11 @@ class BossView(discord.ui.View):
                             achievements_ephemeral=multi_boss, max_hp=max_hp))
                 return
 
-            progress_embed = discord.Embed(
-                title=f"🚨 {self.boss['emoji']} {self.boss['name']} 🚨",
-                description=self.boss["description"],
-                color=self.boss["color"])
-            progress_embed.add_field(name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
-            progress_embed.add_field(name="⚔️ Last Hit", value=f"**{interaction.user.display_name}**!", inline=False)
-            progress_embed.set_footer(text="All gathering channels are blocked until this boss is defeated!")
-            await safe_interaction_response(interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+            self._last_hit_name = interaction.user.display_name
+            self._dirty = True
+            if self._update_task is None or self._update_task.done():
+                msg = getattr(interaction, "message", None)
+                self._update_task = asyncio.create_task(self._debounced_update(msg))
 
 
 # Sans death timer: user_id -> death_end_time (timestamp when death cooldown ends)
@@ -8478,7 +8542,7 @@ SANS_EMOJI_PARTIAL = discord.PartialEmoji(name="sans", id=1479162217525154007, a
 
 
 class SansView(discord.ui.View):
-    """Special boss view for Sans with dodge mechanics and Undertale-style buttons."""
+    """Special boss view for Sans with dodge mechanics and Undertale-style buttons. Progress embed updates are debounced; no message to user."""
 
     def __init__(self, boss: dict, hp: int, channel_id: int, guild_id: int, area_multiplier: float, boss_state_ref: dict):
         super().__init__(timeout=None)
@@ -8495,6 +8559,9 @@ class SansView(discord.ui.View):
         self.defeated = False
         self.mercy_users: set[int] = set()  # Track users who have used MERCY
         self._lock = asyncio.Lock()
+        self._dirty = False
+        self._last_action_name: str | None = None
+        self._update_task: asyncio.Task | None = None
         # Sans is defeated after 50 total attack attempts
         self.DEFEAT_THRESHOLD = 50
 
@@ -8505,11 +8572,41 @@ class SansView(discord.ui.View):
         empty = 20 - filled
         return f"{'🟥' * filled}{'⬛' * empty}"
 
+    def _progress_embed(self, last_action_name: str | None) -> discord.Embed:
+        e = discord.Embed(
+            title=f"🚨 {self.boss['emoji']} {self.boss['name']} 🚨",
+            description=self.boss["description"],
+            color=self.boss["color"])
+        e.add_field(name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
+        if last_action_name:
+            e.add_field(name="⚔️ Last Action", value=f"**{last_action_name}** attacked! *MISS!*", inline=False)
+        e.set_footer(text=f"All gathering channels are blocked! ({self.total_attempts}/{self.DEFEAT_THRESHOLD} attempts)")
+        return e
+
+    async def _debounced_update(self, message: discord.Message | None = None):
+        await asyncio.sleep(PVE_EMBED_UPDATE_DEBOUNCE_SEC)
+        async with self._lock:
+            if self.defeated or not self._dirty:
+                return
+            last_action_name = self._last_action_name
+            self._dirty = False
+        async with self._lock:
+            if self.defeated:
+                return
+        target = message or getattr(self, "message", None)
+        try:
+            if target:
+                await target.edit(embed=self._progress_embed(last_action_name), view=self)
+        except Exception:
+            pass
+
     @discord.ui.button(label="FIGHT", emoji=SOUL_EMOJI_PARTIAL, style=discord.ButtonStyle.danger, custom_id="sans_fight", row=0)
     async def fight(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if not await safe_defer(interaction, ephemeral=False):
                 return
+            if getattr(interaction, "message", None):
+                self.message = interaction.message
             async with self._lock:
                 if self.defeated:
                     return
@@ -8584,16 +8681,12 @@ class SansView(discord.ui.View):
                                 achievements_ephemeral=False, max_hp=None))
                     return
 
-                # Attack "dodged" - show MISS message
-                # Rewards will be distributed on defeat based on all attempts (not capped)
-                progress_embed = discord.Embed(
-                    title=f"🚨 {self.boss['emoji']} {self.boss['name']} 🚨",
-                    description=self.boss["description"],
-                    color=self.boss["color"])
-                progress_embed.add_field(name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
-                progress_embed.add_field(name="⚔️ Last Action", value=f"**{interaction.user.display_name}** attacked! *MISS!*", inline=False)
-                progress_embed.set_footer(text=f"All gathering channels are blocked! ({self.total_attempts}/{self.DEFEAT_THRESHOLD} attempts)")
-                await safe_interaction_response(interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+                # Attack "dodged" - schedule debounced embed update; no message to user
+                self._last_action_name = interaction.user.display_name
+                self._dirty = True
+                if self._update_task is None or self._update_task.done():
+                    msg = getattr(interaction, "message", None)
+                    self._update_task = asyncio.create_task(self._debounced_update(msg))
         except Exception as e:
             print(f"Error in Sans FIGHT button: {e}")
             try:
@@ -8754,7 +8847,7 @@ def _tower_hp_bar(hp: int, max_hp: int = ENDER_DRAGON_TOWER_HP) -> str:
 
 
 class ObsidianTowerView(discord.ui.View):
-    """Obsidian Tower (End Crystal) in non-trigger channels during Ender Dragon. 20 HP; when 0, Break End Crystal to defeat."""
+    """Obsidian Tower (End Crystal) in non-trigger channels during Ender Dragon. 20 HP; when 0, Break End Crystal to defeat. Progress embed updates are debounced; no message to user."""
 
     def __init__(self, channel_id: int, guild_id: int):
         super().__init__(timeout=None)
@@ -8763,6 +8856,9 @@ class ObsidianTowerView(discord.ui.View):
         self.tower_hp = ENDER_DRAGON_TOWER_HP
         self.defeated = False
         self._lock = asyncio.Lock()
+        self._dirty = False
+        self._last_hit_name: str | None = None
+        self._update_task: asyncio.Task | None = None
 
     def _embed(self, last_hit: str | None = None) -> discord.Embed:
         if self.defeated:
@@ -8784,10 +8880,29 @@ class ObsidianTowerView(discord.ui.View):
             embed.set_footer(text=f"Break all End Crystals {END_CRYSTAL_EMOJI} in every channel, then defeat the Ender Dragon!")
         return embed
 
+    async def _debounced_update(self, message: discord.Message | None = None):
+        await asyncio.sleep(PVE_EMBED_UPDATE_DEBOUNCE_SEC)
+        async with self._lock:
+            if self.defeated or not self._dirty:
+                return
+            last_hit = self._last_hit_name
+            self._dirty = False
+        async with self._lock:
+            if self.defeated:
+                return
+        target = message or getattr(self, "message", None)
+        try:
+            if target:
+                await target.edit(embed=self._embed(last_hit), view=self)
+        except Exception:
+            pass
+
     @discord.ui.button(label="⚔️ Attack", style=discord.ButtonStyle.danger, custom_id="obsidian_tower_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await safe_defer(interaction, ephemeral=False):
             return
+        if getattr(interaction, "message", None):
+            self.message = interaction.message
         async with self._lock:
             if self.defeated:
                 await safe_interaction_response(interaction, interaction.response.send_message,
@@ -8801,8 +8916,11 @@ class ObsidianTowerView(discord.ui.View):
             if self.tower_hp <= 0:
                 self.children[1].disabled = False
                 self.children[1].style = discord.ButtonStyle.primary
-            progress_embed = self._embed(interaction.user.display_name)
-            await safe_interaction_response(interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+            self._last_hit_name = interaction.user.display_name
+            self._dirty = True
+            if self._update_task is None or self._update_task.done():
+                msg = getattr(interaction, "message", None)
+                self._update_task = asyncio.create_task(self._debounced_update(msg))
 
     @discord.ui.button(label="Break End Crystal", style=discord.ButtonStyle.secondary, emoji=END_CRYSTAL_EMOJI_PARTIAL, custom_id="obsidian_tower_break_crystal", disabled=True)
     async def break_crystal(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -8828,7 +8946,7 @@ class ObsidianTowerView(discord.ui.View):
 
 
 class EnderDragonView(discord.ui.View):
-    """Ender Dragon boss: HP stored in entry for regen task. Regen 10 HP/sec while any Obsidian Tower stands."""
+    """Ender Dragon boss: HP stored in entry for regen task. Regen 10 HP/sec while any Obsidian Tower stands. Progress embed updates are debounced; no message to user."""
 
     def __init__(self, boss: dict, entry: dict, channel_id: int, guild_id: int, area_multiplier: float):
         super().__init__(timeout=None)
@@ -8840,6 +8958,9 @@ class EnderDragonView(discord.ui.View):
         self.attackers: dict[int, int] = {}
         self.defeated = False
         self._lock = asyncio.Lock()
+        self._dirty = False
+        self._last_hit_name: str | None = None
+        self._update_task: asyncio.Task | None = None
 
     def _hp_bar(self) -> str:
         hp, max_hp = self.entry["hp"], self.entry["max_hp"]
@@ -8862,10 +8983,29 @@ class EnderDragonView(discord.ui.View):
         embed.set_footer(text="All gathering channels are BLOCKED until the Ender Dragon is defeated!")
         return embed
 
+    async def _debounced_update(self, message: discord.Message | None = None):
+        await asyncio.sleep(PVE_EMBED_UPDATE_DEBOUNCE_SEC)
+        async with self._lock:
+            if self.defeated or not self._dirty:
+                return
+            last_hit = self._last_hit_name
+            self._dirty = False
+        async with self._lock:
+            if self.defeated:
+                return
+        target = message or getattr(self, "message", None)
+        try:
+            if target:
+                await target.edit(embed=self._embed(last_hit), view=self)
+        except Exception:
+            pass
+
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_ender_dragon_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await safe_defer(interaction, ephemeral=False):
             return
+        if getattr(interaction, "message", None):
+            self.message = interaction.message
         async with self._lock:
             if self.defeated:
                 return  # Already dead; send nothing to avoid flooding chat when spam-clicking
@@ -8932,8 +9072,11 @@ class EnderDragonView(discord.ui.View):
                         interaction, self.boss, combined_attackers, self.channel_id, self.area_multiplier, max_hp=dragon_max_hp))
                 return
 
-            progress_embed = self._embed(interaction.user.display_name)
-            await safe_interaction_response(interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+            self._last_hit_name = interaction.user.display_name
+            self._dirty = True
+            if self._update_task is None or self._update_task.done():
+                msg = getattr(interaction, "message", None)
+                self._update_task = asyncio.create_task(self._debounced_update(msg))
 
 
 def _ender_dragon_embed_from_entry(entry: dict, boss: dict, guild_id: int) -> discord.Embed:
@@ -10218,14 +10361,24 @@ async def stats(interaction: discord.Interaction):
         tree_ring_pct = (bloom_multiplier - 1.0) * 100
         day_text = "day" if water_streak == 1 else "days"
         water_streak_pct = (daily_bonus_multiplier - 1.0) * 100
+        # Chain chance totals (Gather = gloves + hoe imbue, Harvest = season upgrade + tractor imbue)
+        gloves_tier = doc.get("basket_upgrades", {}).get("gloves", 0)
+        chain_tier = doc.get("harvest_upgrades", {}).get("chain", 0)
+        gather_chain = (GLOVES_UPGRADES[gloves_tier - 1]["chain_chance"] if gloves_tier > 0 else 0.0) + ((hoe_attunement.get("chain_chance", 0) or 0) if hoe_attunement else 0)
+        harvest_chain = (HARVEST_CHAIN_UPGRADES[chain_tier - 1]["chain_chance"] if chain_tier > 0 else 0.0) + ((tractor_attunement.get("chain_chance", 0) or 0) if tractor_attunement else 0)
         profile_lines = [
-            f"**💰 Balance: ${user_balance:,.2f}**",
-            f"**🌱 Plants Gathered (Total): {total_items}**",
+            f"**💰 Balance:** ${user_balance:,.2f}",
+            f"**🌱 Plants Gathered (Total):** {total_items}",
         ]
         if bloom_count > 0:
-            profile_lines.append(f"**🌿 Plants Gathered (This Bloom): {cycle_plants}**")
+            profile_lines.append(f"**🌿 Plants Gathered (This Bloom):** {cycle_plants}")
         profile_lines.append(f"<:TreeRing:1474244868288282817> **TREE RINGS:** {tree_rings}")
-        profile_lines.append(f"**💧 Water Streak: {water_streak} {day_text} (+{water_streak_pct:.1f}%)**")
+        profile_lines.append(f"**🔗 CHAIN CHANCE —** Gather: {gather_chain * 100:.1f}%, Harvest: {harvest_chain * 100:.1f}%")
+        profile_lines.append(f"**💧 Water Streak:** {water_streak} {day_text} (+{water_streak_pct:.1f}%)")
+        if items_needed == 0:
+            profile_lines.append(f"**📈 Rank Status: {next_rank} — You've Reached PLANTER X!**")
+        else:
+            profile_lines.append(f"**📈 {items_needed} More Plants Until {next_rank}**")
         # Keep Tree Ring line normal (no bold/caps) so custom emoji displays correctly on prod
         profile_val = "\n".join(line.upper() if "<:TreeRing:" not in line else line for line in profile_lines)
         # Separator line between profile and imbuements (em dash), appended to description
@@ -10245,13 +10398,13 @@ async def stats(interaction: discord.Interaction):
             h_crit = hoe_attunement.get("critical_chance", 0) or 0
             imbuement_lines.append(f"**Gather — {hoe_name}** {hoe_emoji}".strip())
             if h_prosp != 0:
-                imbuement_lines.append(f"**Prosperity {_to_roman(int(h_levels.get('prosperity', 0)))} ({h_prosp * 100:+.0f}% Money)**")
+                imbuement_lines.append(f"**Prosperity {_to_roman(int(h_levels.get('prosperity', 0)))}** ({h_prosp * 100:+.0f}% Money)")
             if h_renew != 0:
-                imbuement_lines.append(f"**Renewal {_to_roman(int(h_levels.get('renewal', 0)))} ({_format_reduction_seconds(int(h_renew))})**")
+                imbuement_lines.append(f"**Renewal {_to_roman(int(h_levels.get('renewal', 0)))}** ({_format_reduction_seconds(int(h_renew))})")
             if h_res != 0:
-                imbuement_lines.append(f"**Resonance {_to_roman(int(h_levels.get('resonance', 0)))} ({h_res * 100:+.1f}%)**")
+                imbuement_lines.append(f"**Resonance {_to_roman(int(h_levels.get('resonance', 0)))}** ({h_res * 100:+.1f}%)")
             if h_crit != 0:
-                imbuement_lines.append(f"**Abundance {_to_roman(int(h_levels.get('abundance', 0)))} ({h_crit * 100:+.1f}%)**")
+                imbuement_lines.append(f"**Abundance {_to_roman(int(h_levels.get('abundance', 0)))}** ({h_crit * 100:+.1f}%)")
         else:
             imbuement_lines.append("**Gather — None**")
         if tractor_attunement:
@@ -10265,19 +10418,15 @@ async def stats(interaction: discord.Interaction):
             t_favor = tractor_attunement.get("additional_plants", 0) or 0
             imbuement_lines.append(f"**Harvest — {tractor_name}** {tractor_emoji}".strip())
             if t_prosp != 0:
-                imbuement_lines.append(f"**Prosperity {_to_roman(int(t_levels.get('prosperity', 0)))} ({t_prosp * 100:+.0f}% Money)**")
+                imbuement_lines.append(f"**Prosperity {_to_roman(int(t_levels.get('prosperity', 0)))}** ({t_prosp * 100:+.0f}% Money)")
             if t_renew != 0:
-                imbuement_lines.append(f"**Renewal {_to_roman(int(t_levels.get('renewal', 0)))} ({_format_reduction_seconds(int(t_renew))})**")
+                imbuement_lines.append(f"**Renewal {_to_roman(int(t_levels.get('renewal', 0)))}** ({_format_reduction_seconds(int(t_renew))})")
             if t_res != 0:
-                imbuement_lines.append(f"**Resonance {_to_roman(int(t_levels.get('resonance', 0)))} ({t_res * 100:+.1f}%)**")
+                imbuement_lines.append(f"**Resonance {_to_roman(int(t_levels.get('resonance', 0)))}** ({t_res * 100:+.1f}%)")
             if t_favor != 0:
-                imbuement_lines.append(f"**Nature's Favor {_to_roman(int(t_levels.get('natures_favor', 0)))} (+{t_favor} Plants)**")
+                imbuement_lines.append(f"**Nature's Favor {_to_roman(int(t_levels.get('natures_favor', 0)))}** (+{t_favor} Plants)")
         else:
             imbuement_lines.append("**Harvest — None**")
-        if items_needed == 0:
-            imbuement_lines.append(f"**📈 Rank Status: {next_rank} — You've Reached PLANTER X!**")
-        else:
-            imbuement_lines.append(f"**📈 Next Rank: {items_needed} More Plants Until {next_rank}**")
         imbuement_val = "\n".join(imbuement_lines).upper()
 
         total_achievement_categories = len(ACHIEVEMENTS)
@@ -10301,7 +10450,7 @@ async def stats(interaction: discord.Interaction):
         filled = round((completion_pct / 100.0) * bar_length) if bar_length else 0
         filled = min(bar_length, max(0, filled))
         progress_bar = "\u2588" * filled + "\u2581" * (bar_length - filled)
-        completion_val = f"\n\n**{progress_bar} {completion_pct}%**".upper()
+        completion_val = f"\n\n**{progress_bar}** {completion_pct}%".upper()
 
         maxed_out_just_unlocked = check_maxed_out_achievement(user_id, dossier=doc)
         if maxed_out_just_unlocked:
@@ -10316,13 +10465,13 @@ async def stats(interaction: discord.Interaction):
         russian_status = "Alive" if death_seconds <= 0 else f"Dead ({_format_cooldown_seconds(death_seconds)})"
         cd_lines = [
             "",
-            f"**/gather — {_format_cooldown_seconds(cd_data['gather'])}{dead_suffix}**",
-            f"**/harvest — {_format_cooldown_seconds(cd_data['harvest'])}{dead_suffix}**",
-            f"**/mine — {_format_cooldown_seconds(cd_data['mine'])}{dead_suffix}**",
-            f"**New /dailyshop — {_format_cooldown_seconds(cd_data['dailyshop'])}**",
-            f"**/water — {_format_cooldown_seconds(cd_data['water'])}**",
-            f"**Status — {russian_status}**",
-            f"**Death Penalty If Eliminated — {death_penalty_desc}**",
+            f"**/gather —** {_format_cooldown_seconds(cd_data['gather'])}{dead_suffix}",
+            f"**/harvest —** {_format_cooldown_seconds(cd_data['harvest'])}{dead_suffix}",
+            f"**/mine —** {_format_cooldown_seconds(cd_data['mine'])}{dead_suffix}",
+            f"**New /dailyshop —** {_format_cooldown_seconds(cd_data['dailyshop'])}",
+            f"**/water —** {_format_cooldown_seconds(cd_data['water'])}",
+            f"**Status —** {russian_status}",
+            f"**Death Penalty If Eliminated —** {death_penalty_desc}",
         ]
         # Renewal (from imbues) in cooldowns section
         if hoe_attunement and (hoe_attunement.get("cooldown_reduction") or 0) != 0:
@@ -10332,7 +10481,7 @@ async def stats(interaction: discord.Interaction):
         gather_red = cd_data.get("gather_reduction_total", 0)
         harvest_red = cd_data.get("harvest_reduction_total", 0)
         mine_red = cd_data.get("mine_reduction_total", 0)
-        cd_lines.append(f"**Reductions: /gather {_format_reduction_seconds(gather_red)}, /harvest {_format_reduction_seconds(harvest_red)}, /mine {_format_reduction_seconds(mine_red)}**")
+        cd_lines.append(f"**Reductions:** /gather {_format_reduction_seconds(gather_red)}, /harvest {_format_reduction_seconds(harvest_red)}, /mine {_format_reduction_seconds(mine_red)}")
         cooldowns_val = "\n".join(cd_lines).upper()
 
         # --- Multipliers ---
@@ -10366,23 +10515,23 @@ async def stats(interaction: discord.Interaction):
             mult_lines.append(f"<:TreeRing:1474244868288282817> **TREE RING** — +{pct:.1f}%")
         if rank_mult > 1.0:
             pct = (rank_mult - 1.0) * 100
-            mult_lines.append(f"**⭐ Bloom Rank — +{pct:.1f}% ({bloom_rank})**")
+            mult_lines.append(f"**⭐ Bloom Rank —** +{pct:.1f}% ({bloom_rank})")
         if achievement_mult > 1.0:
             pct = (achievement_mult - 1.0) * 100
-            mult_lines.append(f"**🏆 Achievement — +{pct:.1f}%**")
+            mult_lines.append(f"**🏆 Achievement —** +{pct:.1f}%")
         if daily_mult > 1.0:
             pct = (daily_mult - 1.0) * 100
-            mult_lines.append(f"**💧 Water Streak — +{pct:.1f}%**")
+            mult_lines.append(f"**💧 Water Streak —** +{pct:.1f}%")
         if beta_mult > 1.0:
             pct = (beta_mult - 1.0) * 100
-            mult_lines.append(f"**🧪 Beta Tester — +{pct:.1f}%**")
+            mult_lines.append(f"**🧪 Beta Tester —** +{pct:.1f}%")
         if server_booster_mult > 1.0:
             pct = (server_booster_mult - 1.0) * 100
-            mult_lines.append(f"**{SERVER_BOOSTER_EMOJI} Server Booster — +{pct:.1f}%**")
+            mult_lines.append(f"**{SERVER_BOOSTER_EMOJI} Server Booster —** +{pct:.1f}%")
         if premium_mult > 1.0:
             pct = (premium_mult - 1.0) * 100
             tier_name = PREMIUM_DISPLAY.get(premium_tier, "None").strip() or "None"
-            mult_lines.append(f"**Premium — +{pct:.1f}% ({tier_name})**")
+            mult_lines.append(f"**Premium —** +{pct:.1f}% ({tier_name})")
         # Dailyshop / item multipliers (only when user has them). Splits into 2 fields if over 1024 chars.
         if nether_star_mult > 1.0:
             pct = (nether_star_mult - 1.0) * 100
@@ -10391,26 +10540,26 @@ async def stats(interaction: discord.Interaction):
             pct = (black_shard_mult - 1.0) * 100
             mult_lines.append(f"{BLACK_SHARD_EMOJI} **BLACK SHARD** — +{pct:.1f}%")
         if shadow_crystal_mult > 1.0:
-            mult_lines.append("**Shadow Crystal — +5%**")
+            mult_lines.append("**Shadow Crystal —** +5%")
         if palace_mult > 1.0:
-            mult_lines.append("**Palace Treasure — +50%**")
+            mult_lines.append("**Palace Treasure —** +50%")
         if edward_mult > 1.0:
             pct = (edward_mult - 1.0) * 100
-            mult_lines.append(f"**Edward / Splash Potion Of Luck — +{pct:.2f}%**")
+            mult_lines.append(f"**Edward / Splash Potion Of Luck —** +{pct:.2f}%")
         if eclipse_mult > 1.0:
-            mult_lines.append("**Eclipse Glasses — +15%**")
+            mult_lines.append("**Eclipse Glasses —** +15%")
         if has_scarecrow:
-            mult_lines.append("**Scarecrow — +10%**")
+            mult_lines.append("**Scarecrow —** +10%")
         if has_bloomstone:
-            mult_lines.append("**Bloomstone — +200% For Flowers**")
+            mult_lines.append("**Bloomstone —** +200% For Flowers")
         if has_fuzzy_dice:
-            mult_lines.append("**Fuzzy Dice — +5%**")
+            mult_lines.append("**Fuzzy Dice —** +5%")
         if has_work_lunch:
-            mult_lines.append("**Work Lunch — +10%**")
+            mult_lines.append("**Work Lunch —** +10%")
         if has_alchemist:
-            mult_lines.append("**Alchemist's Pocketwatch — +5%**")
+            mult_lines.append("**Alchemist's Pocketwatch —** +5%")
         if has_msi:
-            mult_lines.append("**MSI Afterburner — +20%**")
+            mult_lines.append("**MSI Afterburner —** +20%")
         additive_total = 1.0 + (bloom_mult - 1.0) + (water_mult - 1.0) + (achievement_mult - 1.0) + (daily_mult - 1.0)
         additive_total += (beta_mult - 1.0) + (server_booster_mult - 1.0) + (premium_mult - 1.0)
         additive_total += (nether_star_mult - 1.0) + (black_shard_mult - 1.0) + (shadow_crystal_mult - 1.0)
@@ -10420,8 +10569,8 @@ async def stats(interaction: discord.Interaction):
         imbue_harvest_prosperity = (tractor_attunement.get("money_bonus", 0) or 0) if tractor_attunement else 0
         additive_total += imbue_gather_prosperity + imbue_harvest_prosperity
         combined_pct = (additive_total - 1.0) * 100
-        mult_lines.append(f"**Combined (Additive) — {additive_total:.2f}× (+{combined_pct:.1f}%)**")
-        # Don't upper lines with custom emojis (Tree Ring, Nether Star, Black Shard) so they display on prod
+        mult_lines.append(f"**Combined —** {additive_total:.2f}× (+{combined_pct:.1f}%)")
+        # Don't upper lines with custom emojis (Tree Ring, Nethe Star, Black Shard) so they display on prod
         _custom_emoji_markers = ("<:TreeRing:", NETHER_STAR_EMOJI, BLACK_SHARD_EMOJI)
         mult_text = "\n".join(
             line.upper() if not any(m in line for m in _custom_emoji_markers) else line
@@ -10450,7 +10599,7 @@ async def stats(interaction: discord.Interaction):
         _cd = _section_gap + cooldowns_val + _section_rule
         _mult1 = _section_gap + multipliers_val_1[:1024] + _section_rule
         parts = [
-            ("✨ IMBUEMENTS & PLANTER RANK", _imb),
+            ("✨ IMBUEMENTS", _imb),
             ("⏱️ COOLDOWNS", _cd),
             ("💰 MULTIPLIERS", _mult1),
         ]
@@ -17447,26 +17596,33 @@ async def send_event_end_embed(guild: discord.Guild, event: dict):
     
     # Get the actual event ID from effects (not the database event_id)
     event_type_id = event.get("effects", {}).get("event_id")
-    if not event_type_id:
-        print(f"No event_id found in effects for event: {event}")
-        return
-    
     event_info = None
-    if event["event_type"] == "hourly":
-        event_info = next((e for e in HOURLY_EVENTS if e["id"] == event_type_id), None)
-    elif event["event_type"] == "daily":
-        event_info = next((e for e in DAILY_EVENTS if e["id"] == event_type_id), None)
+    if event_type_id:
+        if event["event_type"] == "hourly":
+            event_info = next((e for e in HOURLY_EVENTS if e["id"] == event_type_id), None)
+        elif event["event_type"] == "daily":
+            event_info = next((e for e in DAILY_EVENTS if e["id"] == event_type_id), None)
     
     if not event_info:
-        print(f"Event info not found for {event_type_id} in {event['event_type']} events")
-        return
-    
-    event_name = event_info['name'].rstrip('!')
-    embed = discord.Embed(
-        title=f"{event_info['emoji']} {event_name} Event Ended",
-        description="Conditions are back to normal. Stay tuned for any future events...",
-        color=discord.Color.red()
-    )
+        # Fallback: still send an end embed using event_name so we never skip the end message
+        if not event_type_id:
+            print(f"No event_id in effects for event: {event}")
+        else:
+            print(f"Event info not found for {event_type_id} in {event['event_type']} events")
+        display_name = (event.get("event_name") or "Event").rstrip("!").rstrip()
+        title = f"{display_name} Event Ended"
+        embed = discord.Embed(
+            title=title,
+            description="Conditions are back to normal. Stay tuned for any future events...",
+            color=discord.Color.red()
+        )
+    else:
+        event_name = event_info['name'].rstrip('!')
+        embed = discord.Embed(
+            title=f"{event_info['emoji']} {event_name} Event Ended",
+            description="Conditions are back to normal. Stay tuned for any future events...",
+            color=discord.Color.red()
+        )
     
     try:
         await events_channel.send(embed=embed)
@@ -17564,10 +17720,6 @@ async def hourly_event_check():
     
     while not bot.is_closed():
         try:
-            # CRITICAL: Send end embeds for any expired events first (e.g. after bot restart), then clear from DB
-            await _send_end_embeds_for_expired_events()
-            clear_expired_events()
-
             # Check if there's already an active hourly event
             existing_hourly = get_active_event_by_type("hourly")
             if existing_hourly:
@@ -17616,7 +17768,7 @@ async def hourly_event_check():
                         effects={"event_id": event_info["id"]}
                     )
                     
-                    # Send announcement to all guilds
+                    # Send START embed first so channel order is Start then End (avoid "Ended" then "Started!" for same event name)
                     for guild in bot.guilds:
                         try:
                             await send_event_start_embed(guild, {
@@ -17630,13 +17782,17 @@ async def hourly_event_check():
                             import traceback
                             traceback.print_exc()
                     
+                    # Then send end embeds for any expired events (e.g. from bot restart), so order is Start (new) then End (old)
+                    await _send_end_embeds_for_expired_events()
+                    clear_expired_events()
+                    
                     print(f"Started hourly event: {event_info['name']} for {duration_minutes} minutes")
                     
                     # Wait until 5 seconds before event ends
                     wait_seconds = duration_seconds - 5
                     await asyncio.sleep(wait_seconds)
                     
-                    # Send end message 5 seconds before event actually ends
+                    # Build event dict for end embed
                     event = {
                         "event_id": event_id,
                         "event_type": "hourly",
@@ -17646,23 +17802,29 @@ async def hourly_event_check():
                         "effects": {"event_id": event_info["id"]}
                     }
                     
-                    # Clear event from DB BEFORE sending embeds so event_cleanup_task/celestial loop can't also send (prevents duplicate end embeds)
-                    clear_event(event_id)
-                    clear_expired_events()
-                    
-                    # Send end embed to #events channel in all guilds
+                    # Send end embed BEFORE clearing so a crash during send doesn't lose the end embed (cleanup can retry)
                     for guild in bot.guilds:
                         try:
                             await send_event_end_embed(guild, event)
                             print(f"Sent end embed to #events channel in {guild.name}")
                         except Exception as e:
                             print(f"Error sending end embed to {guild.name}: {e}")
+                    clear_event(event_id)
+                    clear_expired_events()
                     
                     print(f"Sent end message for hourly event: {event_info['name']} (5 seconds remaining)")
                     
                     # Wait for remaining 5 seconds until event actually ends
                     await asyncio.sleep(5)
                     print(f"Ended hourly event: {event_info['name']}")
+                else:
+                    # No new event this iteration: send end embeds for expired and clear
+                    await _send_end_embeds_for_expired_events()
+                    clear_expired_events()
+            else:
+                # Existing event or celestial active: send end embeds for any expired and clear
+                await _send_end_embeds_for_expired_events()
+                clear_expired_events()
             
             # Wait for the configured interval before next check
             print(f"Hourly event check completed. Waiting {HOURLY_EVENT_INTERVAL} seconds until next check...")
@@ -17685,10 +17847,6 @@ async def daily_event_check():
     
     while not bot.is_closed():
         try:
-            # CRITICAL: Send end embeds for any expired events first (e.g. after bot restart), then clear from DB
-            await _send_end_embeds_for_expired_events()
-            clear_expired_events()
-
             # Check if there's already an active daily event
             existing_daily = get_active_event_by_type("daily")
             if existing_daily:
@@ -17730,7 +17888,7 @@ async def daily_event_check():
                         effects={"event_id": event_info["id"]}
                     )
                     
-                    # Send announcement to all guilds
+                    # Send START embed first so channel order is Start then End (avoid "Ended" then "Started!" for same event name)
                     for guild in bot.guilds:
                         try:
                             await send_event_start_embed(guild, {
@@ -17744,13 +17902,17 @@ async def daily_event_check():
                             import traceback
                             traceback.print_exc()
                     
+                    # Then send end embeds for any expired events (e.g. from bot restart), so order is Start (new) then End (old)
+                    await _send_end_embeds_for_expired_events()
+                    clear_expired_events()
+                    
                     print(f"Started daily event: {event_info['name']} for 24 hours")
                     
                     # Wait until 5 seconds before event ends
                     wait_seconds = duration_seconds - 5
                     await asyncio.sleep(wait_seconds)
                     
-                    # Send end message 5 seconds before event actually ends
+                    # Build event dict for end embed
                     event = {
                         "event_id": event_id,
                         "event_type": "daily",
@@ -17760,23 +17922,29 @@ async def daily_event_check():
                         "effects": {"event_id": event_info["id"]}
                     }
                     
-                    # Clear event from DB BEFORE sending embeds so event_cleanup_task/celestial loop can't also send (prevents duplicate end embeds)
-                    clear_event(event_id)
-                    clear_expired_events()
-                    
-                    # Send end embed to #events channel in all guilds
+                    # Send end embed BEFORE clearing so a crash during send doesn't lose the end embed (cleanup can retry)
                     for guild in bot.guilds:
                         try:
                             await send_event_end_embed(guild, event)
                             print(f"Sent end embed to #events channel in {guild.name}")
                         except Exception as e:
                             print(f"Error sending end embed to {guild.name}: {e}")
+                    clear_event(event_id)
+                    clear_expired_events()
                     
                     print(f"Sent end message for daily event: {event_info['name']} (5 seconds remaining)")
                     
                     # Wait for remaining 5 seconds until event actually ends
                     await asyncio.sleep(5)
                     print(f"Ended daily event: {event_info['name']}")
+                else:
+                    # No new event this iteration: send end embeds for expired and clear
+                    await _send_end_embeds_for_expired_events()
+                    clear_expired_events()
+            else:
+                # Existing event or celestial active: send end embeds for any expired and clear
+                await _send_end_embeds_for_expired_events()
+                clear_expired_events()
             
             # Wait for the configured interval before next check
             print(f"Daily event check completed. Waiting {DAILY_EVENT_INTERVAL} seconds until next check...")
@@ -17806,14 +17974,14 @@ async def event_cleanup_task():
 
 
 async def _end_active_event_for_all_guilds(event: dict):
-    """Send event end embed to #events in all guilds and clear the event from DB. Clears from DB first so no other task can send a duplicate end embed."""
+    """Send event end embed to #events in all guilds, then clear the event from DB. Sends first so a crash during send doesn't lose the end embed; cleanup can retry."""
     event_id = event.get("event_id", "")
-    clear_event(event_id)
     for guild in bot.guilds:
         try:
             await send_event_end_embed(guild, event)
         except Exception as e:
             print(f"Error sending event end embed to {guild.name}: {e}")
+    clear_event(event_id)
 
 
 async def _send_end_embeds_for_expired_events():
