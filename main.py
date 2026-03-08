@@ -9937,50 +9937,50 @@ async def gather(interaction: discord.Interaction):
             bloom_count = full_data.get("bloom_count", 0)
             if bloom_count > 0 and gather_result.get('extra_money_from_bloom', 0) > 0:
                 multiplier_percent = (gather_result['bloom_multiplier'] - 1.0) * 100
-                embed.add_field(name="<:TreeRing:1474244868288282817> Tree Ring Boost",
-                    value=f"+{multiplier_percent:.1f}% - **+{format_money(gather_result['extra_money_from_bloom'])}**", inline=False)
+                embed.add_field(name="<:TreeRing:1474244868288282817> **TREE RING MULTI**",
+                    value=f"+{multiplier_percent:.2f}% - **+${gather_result['extra_money_from_bloom']:,.2f}**", inline=False)
             bloom_rank = _bloom_count_to_rank(bloom_count)
             if bloom_rank != "PINE I" and gather_result.get('extra_money_from_rank', 0) > 0:
                 rank_percent = (gather_result['rank_perma_buff_multiplier'] - 1.0) * 100
-                embed.add_field(name="⭐ Rank Boost",
-                    value=f"+{rank_percent:.1f}% - **+${gather_result['extra_money_from_rank']:.2f}**", inline=False)
+                embed.add_field(name=f"⭐ **{bloom_rank} MULTI**",
+                    value=f"+{rank_percent:.2f}% - **+${gather_result['extra_money_from_rank']:,.2f}**", inline=False)
             if gather_result.get('extra_money_from_achievement', 0) > 0:
                 achievement_percent = (gather_result['achievement_multiplier'] - 1.0) * 100
-                embed.add_field(name="🏆 Achievement Boost",
-                    value=f"+{achievement_percent:.1f}% - **+{format_money(gather_result['extra_money_from_achievement'])}**", inline=False)
+                embed.add_field(name="🏆 **ACHIEVEMENT MULTI**",
+                    value=f"+{achievement_percent:.2f}% - **+${gather_result['extra_money_from_achievement']:,.2f}**", inline=False)
             if gather_result.get('extra_money_from_daily', 0) > 0:
                 daily_bonus_percent = (gather_result['daily_bonus_multiplier'] - 1.0) * 100
-                embed.add_field(name="💧 Water Streak Boost",
-                    value=f"+{daily_bonus_percent:.1f}% - **+{format_money(gather_result['extra_money_from_daily'])}**", inline=False)
+                embed.add_field(name="💧 **WATER STREAK MULTI**",
+                    value=f"+{daily_bonus_percent:.2f}% - **+${gather_result['extra_money_from_daily']:,.2f}**", inline=False)
 
-            embed.add_field(name="\u2728 Imbuement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
-            embed.add_field(name="\U0001f4a5 Critical Multiplier",
+            embed.add_field(name="\u2728 **IMBUEMENT**", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
+            embed.add_field(name="\U0001f4a5 **CRITICAL MULTIPLIER**",
                 value=f"{format_money(pre_crit_value)} \u2192 **{format_money(gather_result['value'])}**", inline=False)
             if gather_result.get('extra_money_from_beta_tester', 0) > 0:
                 beta_percent = (gather_result['beta_tester_multiplier'] - 1.0) * 100
-                embed.add_field(name="🧪 Beta Tester!",
-                    value=f"+{beta_percent:.1f}% - **+{format_money(gather_result['extra_money_from_beta_tester'])}**", inline=False)
+                embed.add_field(name="🧪 **BETA TESTER**",
+                    value=f"+{beta_percent:.2f}% - **+${gather_result['extra_money_from_beta_tester']:,.2f}**", inline=False)
             if gather_result.get('extra_money_from_server_booster', 0) > 0:
                 booster_percent = (gather_result['server_booster_multiplier'] - 1.0) * 100
-                embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
-                    value=f"+{booster_percent:.1f}% - **+{format_money(gather_result['extra_money_from_server_booster'])}**", inline=False)
+                embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} **SERVER BOOSTER**",
+                    value=f"+{booster_percent:.2f}% - **+${gather_result['extra_money_from_server_booster']:,.2f}**", inline=False)
             if gather_result.get('extra_money_from_server_tag', 0) > 0:
                 tag_percent = (gather_result['server_tag_multiplier'] - 1.0) * 100
-                embed.add_field(name=f"{SERVER_TAG_EMOJI} GTHR Tag!",
-                    value=f"+{tag_percent:.1f}% - **+{format_money(gather_result['extra_money_from_server_tag'])}**", inline=False)
+                embed.add_field(name=f"{SERVER_TAG_EMOJI} **GTHR TAG**",
+                    value=f"+{tag_percent:.2f}% - **+${gather_result['extra_money_from_server_tag']:,.2f}**", inline=False)
             if gather_result.get('extra_money_from_premium', 0) > 0:
                 tier = get_user_premium_tier(user_id)
                 premium_percent = (gather_result['premium_tier_multiplier'] - 1.0) * 100
-                embed.add_field(name=PREMIUM_DISPLAY.get(tier, "Premium"),
-                    value=f"+{premium_percent:.1f}% - **+{format_money(gather_result['extra_money_from_premium'])}**", inline=False)
+                embed.add_field(name=f"**{(PREMIUM_DISPLAY.get(tier, 'Premium')).upper()}**",
+                    value=f"+{premium_percent:.2f}% - **+${gather_result['extra_money_from_premium']:,.2f}**", inline=False)
             if item_boost_sources:
                 extra_ns = gather_result.get("extra_money_from_nether_star", 0)
                 extra_bs = gather_result.get("extra_money_from_black_shard", 0)
                 total_extra = extra_ns + extra_bs
-                value_parts = [f"**+{format_money(total_extra)}**"] if total_extra > 0 else []
+                value_parts = [f"**+${total_extra:,.2f}**"] if total_extra > 0 else []
                 value_parts.append("\n".join(_format_item_boost_source(name, count) for name, count in item_boost_sources))
                 embed.add_field(
-                    name="📦 Item Boost",
+                    name="📦 **ITEMS**",
                     value="\n".join(value_parts),
                     inline=False
                 )
@@ -10001,50 +10001,50 @@ async def gather(interaction: discord.Interaction):
             bloom_count = full_data.get("bloom_count", 0)
             if bloom_count > 0 and gather_result.get('extra_money_from_bloom', 0) > 0:
                 multiplier_percent = (gather_result['bloom_multiplier'] - 1.0) * 100
-                embed.add_field(name="<:TreeRing:1474244868288282817> Tree Ring Boost",
-                    value=f"+{multiplier_percent:.1f}% - **+{format_money(gather_result['extra_money_from_bloom'])}**", inline=False)
+                embed.add_field(name="<:TreeRing:1474244868288282817> **TREE RING MULTI**",
+                    value=f"+{multiplier_percent:.2f}% - **+${gather_result['extra_money_from_bloom']:,.2f}**", inline=False)
 
             bloom_rank = _bloom_count_to_rank(bloom_count)
             if bloom_rank != "PINE I" and gather_result.get('extra_money_from_rank', 0) > 0:
                 rank_percent = (gather_result['rank_perma_buff_multiplier'] - 1.0) * 100
-                embed.add_field(name="⭐ Rank Boost",
-                    value=f"+{rank_percent:.1f}% - **+{format_money(gather_result['extra_money_from_rank'])}**", inline=False)
+                embed.add_field(name=f"⭐ **{bloom_rank} MULTI**",
+                    value=f"+{rank_percent:.2f}% - **+${gather_result['extra_money_from_rank']:,.2f}**", inline=False)
 
             if gather_result.get('extra_money_from_achievement', 0) > 0:
                 achievement_percent = (gather_result['achievement_multiplier'] - 1.0) * 100
-                embed.add_field(name="🏆 Achievement Boost",
-                    value=f"+{achievement_percent:.1f}% - **+{format_money(gather_result['extra_money_from_achievement'])}**", inline=False)
+                embed.add_field(name="🏆 **ACHIEVEMENT MULTI**",
+                    value=f"+{achievement_percent:.2f}% - **+${gather_result['extra_money_from_achievement']:,.2f}**", inline=False)
 
             if gather_result.get('extra_money_from_daily', 0) > 0:
                 daily_bonus_percent = (gather_result['daily_bonus_multiplier'] - 1.0) * 100
-                embed.add_field(name="💧 Water Streak Boost",
-                    value=f"+{daily_bonus_percent:.1f}% - **+{format_money(gather_result['extra_money_from_daily'])}**", inline=False)
+                embed.add_field(name="💧 **WATER STREAK MULTI**",
+                    value=f"+{daily_bonus_percent:.2f}% - **+${gather_result['extra_money_from_daily']:,.2f}**", inline=False)
 
             if gather_result.get('extra_money_from_beta_tester', 0) > 0:
                 beta_percent = (gather_result['beta_tester_multiplier'] - 1.0) * 100
-                embed.add_field(name="🧪 Beta Tester!",
-                    value=f"+{beta_percent:.1f}% - **+{format_money(gather_result['extra_money_from_beta_tester'])}**", inline=False)
+                embed.add_field(name="🧪 **BETA TESTER**",
+                    value=f"+{beta_percent:.2f}% - **+${gather_result['extra_money_from_beta_tester']:,.2f}**", inline=False)
             if gather_result.get('extra_money_from_server_booster', 0) > 0:
                 booster_percent = (gather_result['server_booster_multiplier'] - 1.0) * 100
-                embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
-                    value=f"+{booster_percent:.1f}% - **+{format_money(gather_result['extra_money_from_server_booster'])}**", inline=False)
+                embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} **SERVER BOOSTER**",
+                    value=f"+{booster_percent:.2f}% - **+${gather_result['extra_money_from_server_booster']:,.2f}**", inline=False)
             if gather_result.get('extra_money_from_server_tag', 0) > 0:
                 tag_percent = (gather_result['server_tag_multiplier'] - 1.0) * 100
-                embed.add_field(name=f"{SERVER_TAG_EMOJI} GTHR Tag!",
-                    value=f"+{tag_percent:.1f}% - **+{format_money(gather_result['extra_money_from_server_tag'])}**", inline=False)
+                embed.add_field(name=f"{SERVER_TAG_EMOJI} **GTHR TAG**",
+                    value=f"+{tag_percent:.2f}% - **+${gather_result['extra_money_from_server_tag']:,.2f}**", inline=False)
             if gather_result.get('extra_money_from_premium', 0) > 0:
                 tier = get_user_premium_tier(user_id)
                 premium_percent = (gather_result['premium_tier_multiplier'] - 1.0) * 100
-                embed.add_field(name=PREMIUM_DISPLAY.get(tier, "Premium"),
-                    value=f"+{premium_percent:.1f}% - **+{format_money(gather_result['extra_money_from_premium'])}**", inline=False)
+                embed.add_field(name=f"**{(PREMIUM_DISPLAY.get(tier, 'Premium')).upper()}**",
+                    value=f"+{premium_percent:.2f}% - **+${gather_result['extra_money_from_premium']:,.2f}**", inline=False)
             if item_boost_sources:
                 extra_ns = gather_result.get("extra_money_from_nether_star", 0)
                 extra_bs = gather_result.get("extra_money_from_black_shard", 0)
                 total_extra = extra_ns + extra_bs
-                value_parts = [f"**+{format_money(total_extra)}**"] if total_extra > 0 else []
+                value_parts = [f"**+${total_extra:,.2f}**"] if total_extra > 0 else []
                 value_parts.append("\n".join(_format_item_boost_source(name, count) for name, count in item_boost_sources))
                 embed.add_field(
-                    name="📦 Item Boost",
+                    name="📦 **ITEMS**",
                     value="\n".join(value_parts),
                     inline=False
                 )
@@ -10054,7 +10054,7 @@ async def gather(interaction: discord.Interaction):
                 hoe_name = hoe_enc.get("name", "Unknown")
                 hoe_rarity = hoe_enc.get("rarity", "COMMON")
                 hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]")
-                embed.add_field(name="\u2728 Imbuement", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
+                embed.add_field(name="\u2728 **IMBUEMENT**", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
 
             month_name = gather_result.get("month_name", "—")
             embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
@@ -11514,43 +11514,44 @@ async def harvest(interaction: discord.Interaction):
         embed.add_field(name="📦 Items Gathered", value=items_display or "No items", inline=False)
 
         bloom_count = full_data.get("bloom_count", 0)
+        bloom_rank = _bloom_count_to_rank(bloom_count)
         if bloom_count > 0 and result.get("extra_money_from_bloom", 0) > 0:
             multiplier_percent = (result["bloom_multiplier"] - 1.0) * 100
-            embed.add_field(name="<:TreeRing:1474244868288282817> Tree Ring Boost",
-                value=f"+{multiplier_percent:.1f}% - **+{format_money(result['extra_money_from_bloom'])}**", inline=False)
+            embed.add_field(name="<:TreeRing:1474244868288282817> **TREE RING MULTI**",
+                value=f"+{multiplier_percent:.2f}% - **+${result['extra_money_from_bloom']:,.2f}**", inline=False)
 
         if result.get("extra_money_from_rank", 0) > 0:
             rank_percent = (result["rank_perma_buff_multiplier"] - 1.0) * 100
-            embed.add_field(name="⭐ Rank Boost",
-                value=f"+{rank_percent:.1f}% - **+{format_money(result['extra_money_from_rank'])}**", inline=False)
+            embed.add_field(name=f"⭐ **{bloom_rank} MULTI**",
+                value=f"+{rank_percent:.2f}% - **+${result['extra_money_from_rank']:,.2f}**", inline=False)
 
         if result.get("extra_money_from_achievement", 0) > 0:
             achievement_percent = (result["achievement_multiplier"] - 1.0) * 100
-            embed.add_field(name="🏆 Achievement Boost",
-                value=f"+{achievement_percent:.1f}% - **+{format_money(result['extra_money_from_achievement'])}**", inline=False)
+            embed.add_field(name="🏆 **ACHIEVEMENT MULTI**",
+                value=f"+{achievement_percent:.2f}% - **+${result['extra_money_from_achievement']:,.2f}**", inline=False)
 
         if result.get("extra_money_from_daily", 0) > 0:
             daily_bonus_percent = (result["daily_bonus_multiplier"] - 1.0) * 100
-            embed.add_field(name="💧 Water Streak Boost",
-                value=f"+{daily_bonus_percent:.1f}% - **+{format_money(result['extra_money_from_daily'])}**", inline=False)
+            embed.add_field(name="💧 **WATER STREAK MULTI**",
+                value=f"+{daily_bonus_percent:.2f}% - **+${result['extra_money_from_daily']:,.2f}**", inline=False)
 
         if result.get("extra_money_from_beta_tester", 0) > 0:
             beta_percent = (result['beta_tester_multiplier'] - 1.0) * 100
-            embed.add_field(name="🧪 Beta Tester!",
-                value=f"+{beta_percent:.1f}% - **+{format_money(result['extra_money_from_beta_tester'])}**", inline=False)
+            embed.add_field(name="🧪 **BETA TESTER**",
+                value=f"+{beta_percent:.2f}% - **+${result['extra_money_from_beta_tester']:,.2f}**", inline=False)
         if result.get("extra_money_from_server_booster", 0) > 0:
             booster_percent = (result['server_booster_multiplier'] - 1.0) * 100
-            embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
-                value=f"+{booster_percent:.1f}% - **+{format_money(result['extra_money_from_server_booster'])}**", inline=False)
+            embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} **SERVER BOOSTER**",
+                value=f"+{booster_percent:.2f}% - **+${result['extra_money_from_server_booster']:,.2f}**", inline=False)
         if result.get("extra_money_from_server_tag", 0) > 0:
             tag_percent = (result['server_tag_multiplier'] - 1.0) * 100
-            embed.add_field(name=f"{SERVER_TAG_EMOJI} GTHR Tag!",
-                value=f"+{tag_percent:.1f}% - **+{format_money(result['extra_money_from_server_tag'])}**", inline=False)
+            embed.add_field(name=f"{SERVER_TAG_EMOJI} **GTHR TAG**",
+                value=f"+{tag_percent:.2f}% - **+${result['extra_money_from_server_tag']:,.2f}**", inline=False)
         if result.get("extra_money_from_premium", 0) > 0:
             tier = get_user_premium_tier(user_id)
             premium_percent = (result['premium_tier_multiplier'] - 1.0) * 100
-            embed.add_field(name=PREMIUM_DISPLAY.get(tier, "Premium"),
-                value=f"+{premium_percent:.1f}% - **+{format_money(result['extra_money_from_premium'])}**", inline=False)
+            embed.add_field(name=f"**{(PREMIUM_DISPLAY.get(tier, 'Premium')).upper()}**",
+                value=f"+{premium_percent:.2f}% - **+${result['extra_money_from_premium']:,.2f}**", inline=False)
         # Daily shop / item boosts that affected this harvest
         item_boost_sources = []
         shop_inv = full_data.get("shop_inventory", {}) if full_data else {}
@@ -11577,10 +11578,10 @@ async def harvest(interaction: discord.Interaction):
             extra_ns = result.get("extra_money_from_nether_star", 0)
             extra_bs = result.get("extra_money_from_black_shard", 0)
             total_extra = extra_ns + extra_bs
-            value_parts = [f"**+{format_money(total_extra)}**"] if total_extra > 0 else []
+            value_parts = [f"**+${total_extra:,.2f}**"] if total_extra > 0 else []
             value_parts.append("\n".join(_format_item_boost_source(name, count) for name, count in item_boost_sources))
             embed.add_field(
-                name="📦 Item Boost",
+                name="📦 **ITEMS**",
                 value="\n".join(value_parts),
                 inline=False
             )
@@ -11590,7 +11591,7 @@ async def harvest(interaction: discord.Interaction):
             tractor_name = tractor_enc.get("name", "Unknown")
             tractor_rarity = tractor_enc.get("rarity", "COMMON")
             tractor_rarity_display = RARITY_EMOJI.get(tractor_rarity, f"[{tractor_rarity}]")
-            embed.add_field(name="\u2728 Imbuement",
+            embed.add_field(name="\u2728 **IMBUEMENT**",
                 value=f"**{tractor_name}** {tractor_rarity_display}", inline=False)
 
         month_name = result.get("month_name", "")
@@ -14759,7 +14760,7 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
         tree_ring_boost_pct = (bloom_multiplier - 1.0) * 100
         embed_stats.add_field(name="<:TreeRing:1474244868288282817> Tree Rings", value=f"**{tree_rings}** (+{tree_ring_boost_pct:.1f}% boost)", inline=True)
         if bloom_rank != "PINE I":
-            embed_stats.add_field(name="⭐ Rank Boost", value=f"**{rank_perma_buff_multiplier:.2f}x**", inline=True)
+            embed_stats.add_field(name=f"⭐ {bloom_rank}", value=f"**{rank_perma_buff_multiplier:.2f}x**", inline=True)
         day_text = "day" if water_streak == 1 else "days"
         water_streak_pct = (daily_bonus_multiplier - 1.0) * 100
         embed_stats.add_field(name="💧 Water Streak", value=f"**{water_streak}** {day_text} (+{water_streak_pct:.1f}%)", inline=True)
@@ -18801,23 +18802,23 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         if bloom_count > 0 and extra_from_bloom > 0:
             multiplier_percent = (bloom_multiplier - 1.0) * 100
             embed.add_field(
-                name="<:TreeRing:1474244868288282817> Tree Ring Boost",
-                value=f"+{multiplier_percent:.1f}% - **+${extra_from_bloom:.2f}**",
+                name="<:TreeRing:1474244868288282817> **TREE RING MULTI**",
+                value=f"+{multiplier_percent:.2f}% - **+${extra_from_bloom:.2f}**",
                 inline=False,
             )
         # Show achievement boost if applicable
         if extra_from_achievement > 0:
             achievement_percent = (achievement_multiplier - 1.0) * 100
             embed.add_field(
-                name="🏆 Achievement Boost",
-                value=f"+{achievement_percent:.1f}% - **+${extra_from_achievement:.2f}**",
+                name="🏆 **ACHIEVEMENT MULTI**",
+                value=f"+{achievement_percent:.2f}% - **+${extra_from_achievement:.2f}**",
                 inline=False,
             )
         if extra_from_daily > 0:
             daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
             embed.add_field(
-                name="💧 Water Streak Boost",
-                value=f"+{daily_bonus_percent:.1f}% - **+${extra_from_daily:.2f}**",
+                name="💧 **WATER STREAK MULTI**",
+                value=f"+{daily_bonus_percent:.2f}% - **+${extra_from_daily:.2f}**",
                 inline=False,
             )
         # Show rank perma buff if applicable (only if not PINE I) - multiplicative on subtotal
@@ -18825,29 +18826,29 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         if bloom_rank != "PINE I" and extra_from_rank > 0:
             rank_percent = (rank_perma_buff_multiplier - 1.0) * 100
             embed.add_field(
-                name="⭐ Rank Boost",
-                value=f"+{rank_percent:.1f}% - **+${extra_from_rank:.2f}**",
+                name=f"⭐ **{bloom_rank} MULTI**",
+                value=f"+{rank_percent:.2f}% - **+${extra_from_rank:.2f}**",
                 inline=False,
             )
         if extra_beta > 0:
             beta_percent = (beta_mult - 1.0) * 100
             embed.add_field(
-                name="🧪 Beta Tester!",
-                value=f"+{beta_percent:.1f}% - **+${extra_beta:.2f}**",
+                name="🧪 **BETA TESTER**",
+                value=f"+{beta_percent:.2f}% - **+${extra_beta:.2f}**",
                 inline=False,
             )
         if extra_booster > 0:
             booster_percent = (sb_mult - 1.0) * 100
             embed.add_field(
-                name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
-                value=f"+{booster_percent:.1f}% - **+${extra_booster:.2f}**",
+                name=f"{SERVER_BOOSTER_EMOJI} **SERVER BOOSTER**",
+                value=f"+{booster_percent:.2f}% - **+${extra_booster:.2f}**",
                 inline=False,
             )
         if extra_tag > 0:
             tag_percent = (tag_mult - 1.0) * 100
             embed.add_field(
-                name=f"{SERVER_TAG_EMOJI} GTHR Tag!",
-                value=f"+{tag_percent:.1f}% - **+${extra_tag:.2f}**",
+                name=f"{SERVER_TAG_EMOJI} **GTHR TAG**",
+                value=f"+{tag_percent:.2f}% - **+${extra_tag:.2f}**",
                 inline=False,
             )
         premium_tier = get_user_premium_tier(user_id)
@@ -18855,8 +18856,8 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
             mult = PREMIUM_MONEY_MULTIPLIERS.get(premium_tier, 1.0)
             premium_percent = (mult - 1.0) * 100
             embed.add_field(
-                name=PREMIUM_DISPLAY.get(premium_tier, "Premium"),
-                value=f"+{premium_percent:.1f}% - **+${extra_premium:.2f}**",
+                name=f"**{(PREMIUM_DISPLAY.get(premium_tier, 'Premium')).upper()}**",
+                value=f"+{premium_percent:.2f}% - **+${extra_premium:.2f}**",
                 inline=False,
             )
 
@@ -18881,7 +18882,7 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
             value_parts = [f"**+${total_item_extra:.2f}**"] if total_item_extra > 0 else []
             value_parts.append("\n".join(_format_item_boost_source(name, count) for name, count in item_boost_sources))
             embed.add_field(
-                name="📦 Item Boost",
+                name="📦 **ITEMS**",
                 value="\n".join(value_parts),
                 inline=False,
             )
@@ -18993,23 +18994,23 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
     if bloom_count > 0 and extra_from_bloom > 0:
         multiplier_percent = (bloom_multiplier - 1.0) * 100
         embed.add_field(
-            name="<:TreeRing:1474244868288282817> Tree Ring Boost",
-            value=f"+{multiplier_percent:.1f}% - **+${extra_from_bloom:.2f}**",
+            name="<:TreeRing:1474244868288282817> **TREE RING MULTI**",
+            value=f"+{multiplier_percent:.2f}% - **+${extra_from_bloom:.2f}**",
             inline=False,
         )
     # Show achievement boost if applicable
     if extra_from_achievement > 0:
         achievement_percent = (achievement_multiplier - 1.0) * 100
         embed.add_field(
-            name="🏆 Achievement Boost",
-            value=f"+{achievement_percent:.1f}% - **+${extra_from_achievement:.2f}**",
+            name="🏆 **ACHIEVEMENT MULTI**",
+            value=f"+{achievement_percent:.2f}% - **+${extra_from_achievement:.2f}**",
             inline=False,
         )
     if extra_from_daily > 0:
         daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
         embed.add_field(
-            name="💧 Water Streak Boost",
-            value=f"+{daily_bonus_percent:.1f}% - **+${extra_from_daily:.2f}**",
+            name="💧 **WATER STREAK MULTI**",
+            value=f"+{daily_bonus_percent:.2f}% - **+${extra_from_daily:.2f}**",
             inline=False,
         )
     # Show rank perma buff if applicable (only if not PINE I) - multiplicative on subtotal
@@ -19017,29 +19018,29 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
     if bloom_rank != "PINE I" and extra_from_rank > 0:
         rank_percent = (rank_perma_buff_multiplier - 1.0) * 100
         embed.add_field(
-            name="⭐ Rank Boost",
-            value=f"+{rank_percent:.1f}% - **+${extra_from_rank:.2f}**",
+            name=f"⭐ **{bloom_rank} MULTI**",
+            value=f"+{rank_percent:.2f}% - **+${extra_from_rank:.2f}**",
             inline=False,
         )
     if extra_beta > 0:
         beta_percent = (beta_mult - 1.0) * 100
         embed.add_field(
-            name="🧪 Beta Tester!",
-            value=f"+{beta_percent:.1f}% - **+${extra_beta:.2f}**",
+            name="🧪 **BETA TESTER**",
+            value=f"+{beta_percent:.2f}% - **+${extra_beta:.2f}**",
             inline=False,
         )
     if extra_booster > 0:
         booster_percent = (sb_mult - 1.0) * 100
         embed.add_field(
-            name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
-            value=f"+{booster_percent:.1f}% - **+${extra_booster:.2f}**",
+            name=f"{SERVER_BOOSTER_EMOJI} **SERVER BOOSTER**",
+            value=f"+{booster_percent:.2f}% - **+${extra_booster:.2f}**",
             inline=False,
         )
     if extra_tag > 0:
         tag_percent = (tag_mult - 1.0) * 100
         embed.add_field(
-            name=f"{SERVER_TAG_EMOJI} GTHR Tag!",
-            value=f"+{tag_percent:.1f}% - **+${extra_tag:.2f}**",
+            name=f"{SERVER_TAG_EMOJI} **GTHR TAG**",
+            value=f"+{tag_percent:.2f}% - **+${extra_tag:.2f}**",
             inline=False,
         )
     premium_tier = get_user_premium_tier(user_id)
@@ -19047,8 +19048,8 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         mult = PREMIUM_MONEY_MULTIPLIERS.get(premium_tier, 1.0)
         premium_percent = (mult - 1.0) * 100
         embed.add_field(
-            name=PREMIUM_DISPLAY.get(premium_tier, "Premium"),
-            value=f"+{premium_percent:.1f}% - **+${extra_premium:.2f}**",
+            name=f"**{(PREMIUM_DISPLAY.get(premium_tier, 'Premium')).upper()}**",
+            value=f"+{premium_percent:.2f}% - **+${extra_premium:.2f}**",
             inline=False,
         )
     # Item Boosts (shop / dailyshop items affecting this sale)
@@ -19074,7 +19075,7 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         value_parts = [f"**+${total_item_extra:.2f}**"] if total_item_extra > 0 else []
         value_parts.append("\n".join(_format_item_boost_source(name, count) for name, count in item_boost_sources))
         embed.add_field(
-            name="📦 Item Boost",
+            name="📦 **ITEMS**",
             value="\n".join(value_parts),
             inline=False,
         )
