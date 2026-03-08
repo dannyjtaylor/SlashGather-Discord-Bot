@@ -1494,14 +1494,14 @@ CELESTIAL_TRIGGER_CHANCE = 0.2   # 20% at start time, Terraria-style
 # PvE Wild Animal Event System
 # ═══════════════════════════════════════════════════════════════════════════════
 
-PVE_TRIGGER_CHANCE_GATHER = 0.01   # 1% per /gather for animals (event multiplies); animals much more common than bosses
-PVE_TRIGGER_CHANCE_HARVEST = 0.005  # 0.5% per /harvest for animals (event multiplies)
+PVE_TRIGGER_CHANCE_GATHER = 0.0125   # 1.25% per /gather for animals (event multiplies); animals much more common than bosses
+PVE_TRIGGER_CHANCE_HARVEST = 0.02  # 2% per /harvest for animals (event multiplies)
 
 # Steal: stealable chance per successful gather/harvest (no PvE when stealable; crits can be stolen)
 STEAL_CHANCE_GATHER = 0.07   # 7% per /gather
 STEAL_CHANCE_HARVEST = 0.03  # 3% per /harvest
-STEAL_WINDOW_GATHER_SEC = 5
-STEAL_WINDOW_HARVEST_SEC = 3
+STEAL_WINDOW_GATHER_SEC = 6
+STEAL_WINDOW_HARVEST_SEC = 4
 
 PVE_WILD_ANIMALS = [
     {
@@ -1708,7 +1708,7 @@ def _guild_has_active_pve(guild: discord.Guild) -> bool:
 
 
 # Bosses: block all gather channels in guild, @here on warning, rarer spawn. 1-min warning embed before spawn.
-PVE_BOSS_TRIGGER_CHANCE = 0.001  # 0.1% per gather/harvest (when no boss and no enemy active); event multiplies; rarer than animals
+PVE_BOSS_TRIGGER_CHANCE = 0.0012  # 0.12% per gather/harvest (when no boss and no enemy active); event multiplies; rarer than animals
 PVE_BOSSES = [
     {
         "id": "skunkape",
@@ -7840,7 +7840,7 @@ async def _gather_post_response(interaction: discord.Interaction, user_id: int,
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class StealView(discord.ui.View):
-    """Red STEAL button on stealable gather/harvest. Valid for 5s (gather) or 1s (harvest)."""
+    """Red STEAL button on stealable gather/harvest. Valid for 6s (gather) or 4s (harvest)."""
 
     def __init__(self, victim_id: int, victim_planter_level: int, steal_type: str, steal_payload: dict, window_sec: float):
         super().__init__(timeout=window_sec + 1.0)  # slightly longer so we can disable on_timeout
@@ -13834,7 +13834,7 @@ class HireView(discord.ui.View):
             embed.add_field(name="Status", value="\U0001f512 Locked \u2014 Invite 10 people to unlock!", inline=False)
         embed.add_field(name="Gather Chance", value="**50%** chance to /gather every minute", inline=False)
         if sg_harvest:
-            embed.add_field(name="Auto Harvest", value="**UNLOCKED** \u2705 \u2014 Can auto-harvest like other gardeners!", inline=False)
+            embed.add_field(name="Auto Harvest", value="**UNLOCKED** \u2705", inline=False)
         else:
             embed.add_field(name="Auto Harvest", value="\U0001f512 Locked \u2014 Invite 12 people to unlock!", inline=False)
         embed.set_footer(text=f"Page {self.total_pages} of {self.total_pages}")
