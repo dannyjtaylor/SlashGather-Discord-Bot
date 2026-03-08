@@ -1,6 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
+from discord.http import Route
 import logging
 from collections import Counter
 from dotenv import load_dotenv
@@ -3330,23 +3331,49 @@ SERVER_TAG_MONEY_MULTIPLIER = 1.10
 SERVER_TAG_EMOJI = "\U0001f3f7"  # label/tag
 
 
+def _parse_primary_guild(primary) -> tuple[int | None, bool, str | None]:
+    """Get (identity_guild_id, identity_enabled, tag) from primary_guild object or dict. identity_enabled None -> True."""
+    if primary is None:
+        return None, False, None
+    if isinstance(primary, dict):
+        gid = primary.get("identity_guild_id")
+        if gid is not None:
+            gid = int(gid)
+        enabled = primary.get("identity_enabled")
+        if enabled is None:
+            enabled = True
+        return gid, bool(enabled), primary.get("tag")
+    identity_guild_id = getattr(primary, "identity_guild_id", None)
+    if identity_guild_id is not None:
+        identity_guild_id = int(identity_guild_id)
+    identity_enabled = getattr(primary, "identity_enabled", None)
+    if identity_enabled is None:
+        identity_enabled = True
+    tag_text = getattr(primary, "tag", None)
+    return identity_guild_id, bool(identity_enabled), str(tag_text) if tag_text is not None else None
+
+
+def _gthr_tag_matches(tag_text: str | None) -> bool:
+    return tag_text is not None and str(tag_text).strip().upper() == SERVER_TAG_NAME.upper()
+
+
 def sync_server_tag_from_member(member: discord.Member) -> None:
     """Sync: True when user has this server's tag equipped and the tag text is GTHR."""
     if member is None:
         return
-    primary = getattr(member, "primary_guild", None)
+    guild_id = member.guild.id if member.guild else None
+    if guild_id is None:
+        set_user_server_tag_equipped(member.id, False)
+        return
+    primary = getattr(member, "primary_guild", None) or (getattr(getattr(member, "user", None), "primary_guild", None) if getattr(member, "user", None) else None)
     if primary is None:
         set_user_server_tag_equipped(member.id, False)
         return
     try:
-        guild_id = member.guild.id if member.guild else None
-        identity_guild_id = getattr(primary, "identity_guild_id", None)
-        identity_enabled = getattr(primary, "identity_enabled", False)
-        tag_text = getattr(primary, "tag", None)
-        tag_matches = tag_text is not None and str(tag_text).strip().upper() == SERVER_TAG_NAME.upper()
+        identity_guild_id, identity_enabled, tag_text = _parse_primary_guild(primary)
+        tag_matches = _gthr_tag_matches(tag_text)
         has_tag = (
-            guild_id is not None
-            and identity_guild_id is not None
+            identity_guild_id is not None
             and identity_guild_id == guild_id
             and identity_enabled
             and tag_matches
@@ -3354,6 +3381,34 @@ def sync_server_tag_from_member(member: discord.Member) -> None:
         set_user_server_tag_equipped(member.id, bool(has_tag))
     except Exception:
         set_user_server_tag_equipped(member.id, False)
+
+
+async def sync_gthr_tag_from_api(bot: discord.Client, guild_id: int, user_id: int) -> None:
+    """Fetch member from Discord API and sync GTHR tag state from raw response (library may not parse primary_guild)."""
+    try:
+        data = await bot.http.request(Route("GET", "/guilds/{guild_id}/members/{user_id}", guild_id=guild_id, user_id=user_id))
+    except Exception:
+        return
+    user_data = data.get("user") if isinstance(data, dict) else None
+    if not user_data:
+        set_user_server_tag_equipped(user_id, False)
+        return
+    primary = user_data.get("primary_guild") if isinstance(user_data, dict) else None
+    if primary is None:
+        set_user_server_tag_equipped(user_id, False)
+        return
+    try:
+        identity_guild_id, identity_enabled, tag_text = _parse_primary_guild(primary)
+        tag_matches = _gthr_tag_matches(tag_text)
+        has_tag = (
+            identity_guild_id is not None
+            and identity_guild_id == guild_id
+            and identity_enabled
+            and tag_matches
+        )
+        set_user_server_tag_equipped(user_id, bool(has_tag))
+    except Exception:
+        set_user_server_tag_equipped(user_id, False)
 
 
 def sync_server_booster_from_member(member: discord.Member) -> None:
@@ -9796,6 +9851,10 @@ async def gather(interaction: discord.Interaction):
         except Exception:
             pass
 
+        # Sync GTHR tag from Discord API (library often omits primary_guild on Member)
+        if interaction.guild:
+            await sync_gthr_tag_from_api(interaction.client, interaction.guild.id, user_id)
+
         # === ONE thread call: sync roles to DB + data fetch + area check + cooldown + gather + chain roll ===
         result = await asyncio.to_thread(
             _gather_critical_path, member_for_gather, user_id, channel_name, area)
@@ -10395,6 +10454,8 @@ async def stats(interaction: discord.Interaction):
         await asyncio.to_thread(sync_server_booster_from_member, member_for_sync)
         await asyncio.to_thread(sync_server_tag_from_member, member_for_sync)
         await asyncio.to_thread(sync_beta_tester_from_member, member_for_sync)
+        if interaction.guild:
+            await sync_gthr_tag_from_api(interaction.client, interaction.guild.id, interaction.user.id)
         user_id = interaction.user.id
         doc = await asyncio.to_thread(get_user_dossier, user_id)
         cd_data = await asyncio.to_thread(_cooldowns_data_sync, user_id)
@@ -11389,6 +11450,10 @@ async def harvest(interaction: discord.Interaction):
             return
 
         area = GATHERING_AREAS[channel_name]
+
+        # Sync GTHR tag from Discord API before harvest (so multiplier is correct)
+        if interaction.guild:
+            await sync_gthr_tag_from_api(interaction.client, interaction.guild.id, user_id)
 
         # === ONE thread call: sync roles + data fetch + area check + cooldown + harvest + chain roll ===
         crit = await asyncio.to_thread(
@@ -19040,6 +19105,8 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
             return
 
         user_id = interaction.user.id
+        if interaction.guild:
+            await sync_gthr_tag_from_api(interaction.client, interaction.guild.id, user_id)
         result = await asyncio.to_thread(_sell_critical_path, interaction.user, user_id, coin, amount)
 
         if result.get("error"):
