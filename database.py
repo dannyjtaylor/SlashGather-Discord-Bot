@@ -440,6 +440,24 @@ def set_user_server_booster(user_id: int, value: bool) -> None:
     )
 
 
+def get_user_server_tag_equipped(user_id: int) -> bool:
+    """Return True if user has this server's tag equipped (cached in DB, synced from member.primary_guild)."""
+    users = _get_users_collection()
+    doc = users.find_one({"_id": int(user_id)}, {"server_tag_equipped": 1})
+    return bool(doc.get("server_tag_equipped", False) if doc else False)
+
+
+def set_user_server_tag_equipped(user_id: int, value: bool) -> None:
+    """Set the cached server tag equipped flag (synced from Discord member.primary_guild for this guild)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"server_tag_equipped": bool(value)}},
+        upsert=True,
+    )
+
+
 # Premium tier: 0 = none, 1 = Seed ($2), 2 = Sprout ($5), 3 = Sapling ($10), 4 = Evergreen ($15). Synced from Discord roles.
 PREMIUM_TREE_RING_REDUCTION = {0: 0, 1: 5, 2: 8, 3: 15, 4: 25}  # plants less per tree ring
 
@@ -3013,6 +3031,7 @@ def get_user_dossier(user_id: int) -> Dict:
             "unlocked_areas": 1,
             "beta_tester": 1,
             "server_booster": 1,
+            "server_tag_equipped": 1,
             "premium_tier": 1,
         },
     )
@@ -3097,6 +3116,7 @@ def get_user_dossier(user_id: int) -> Dict:
         "unlocked_areas": {k: bool(unlocked.get(k, False)) for k in ("grove", "marsh", "bog", "mire")},
         "beta_tester": bool(doc.get("beta_tester", False)),
         "server_booster": bool(doc.get("server_booster", False)),
+        "server_tag_equipped": bool(doc.get("server_tag_equipped", False)),
         "premium_tier": int(doc.get("premium_tier", 0)),
     }
 
@@ -3154,6 +3174,7 @@ def _empty_user_dossier() -> Dict:
         "unlocked_areas": {"grove": False, "marsh": False, "bog": False, "mire": False},
         "beta_tester": False,
         "server_booster": False,
+        "server_tag_equipped": False,
         "premium_tier": 0,
     }
 

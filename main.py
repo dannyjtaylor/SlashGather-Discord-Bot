@@ -219,6 +219,8 @@ from database import (
     set_user_beta_tester,
     get_user_server_booster,
     set_user_server_booster,
+    get_user_server_tag_equipped,
+    set_user_server_tag_equipped,
     get_user_premium_tier,
     set_user_premium_tier,
     get_all_user_ids_with_premium_tier,
@@ -3319,7 +3321,39 @@ def get_beta_tester_money_multiplier(user_id: int) -> float:
 
 
 SERVER_BOOSTER_MONEY_MULTIPLIER = 1.50
-SERVER_BOOSTER_EMOJI = "<:ServerBoost:1477896878338347160>"
+# Same format as RARITY_EMOJI so it displays in Discord; name must match server emoji :serverbooster:
+SERVER_BOOSTER_EMOJI = "<:serverbooster:1477896878338347160>"
+
+# GTHR server tag: 10% boost when the server's tag text is exactly "GTHR" and user has it equipped.
+SERVER_TAG_NAME = "GTHR"
+SERVER_TAG_MONEY_MULTIPLIER = 1.10
+SERVER_TAG_EMOJI = "\U0001f3f7"  # label/tag
+
+
+def sync_server_tag_from_member(member: discord.Member) -> None:
+    """Sync: True when user has this server's tag equipped and the tag text is GTHR."""
+    if member is None:
+        return
+    primary = getattr(member, "primary_guild", None)
+    if primary is None:
+        set_user_server_tag_equipped(member.id, False)
+        return
+    try:
+        guild_id = member.guild.id if member.guild else None
+        identity_guild_id = getattr(primary, "identity_guild_id", None)
+        identity_enabled = getattr(primary, "identity_enabled", False)
+        tag_text = getattr(primary, "tag", None)
+        tag_matches = tag_text is not None and str(tag_text).strip().upper() == SERVER_TAG_NAME.upper()
+        has_tag = (
+            guild_id is not None
+            and identity_guild_id is not None
+            and identity_guild_id == guild_id
+            and identity_enabled
+            and tag_matches
+        )
+        set_user_server_tag_equipped(member.id, bool(has_tag))
+    except Exception:
+        set_user_server_tag_equipped(member.id, False)
 
 
 def sync_server_booster_from_member(member: discord.Member) -> None:
@@ -3333,6 +3367,11 @@ def sync_server_booster_from_member(member: discord.Member) -> None:
 def get_server_booster_money_multiplier(user_id: int) -> float:
     """Return 1.50 if user is a server booster (cached in DB), else 1.0."""
     return SERVER_BOOSTER_MONEY_MULTIPLIER if get_user_server_booster(user_id) else 1.0
+
+
+def get_server_tag_money_multiplier(user_id: int) -> float:
+    """Return 1.10 if user has GTHR tag equipped (cached in DB), else 1.0."""
+    return SERVER_TAG_MONEY_MULTIPLIER if get_user_server_tag_equipped(user_id) else 1.0
 
 
 # Premium tiers (Discord roles): Seed $2, Sprout $5, Sapling $10, Evergreen $15. Exclusive: higher tier = better benefits, no stacking.
@@ -3980,11 +4019,13 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     extra_money_from_bloomstone = base_for_buffs * (bloomstone_mult - 1.0) if bloomstone_mult > 1.0 else 0.0
 
     # All additive % buffs use the SAME base (base_for_buffs) so higher % always = higher $
+    # Server Booster and Server Tag applied at the same moment (same base); show in same order in every embed.
     extra_money_from_bloom = base_for_buffs * (bloom_multiplier - 1.0)
     extra_money_from_water = base_for_buffs * (water_multiplier - 1.0)
     extra_money_from_achievement = base_for_buffs * (achievement_multiplier - 1.0)
     beta_tester_mult = get_beta_tester_money_multiplier(user_id)
     server_booster_mult = get_server_booster_money_multiplier(user_id)
+    server_tag_mult = get_server_tag_money_multiplier(user_id)
     premium_mult = get_premium_tier_money_multiplier(user_id)
     nether_star_mult = get_nether_star_money_multiplier(user_id)
     black_shard_mult = get_black_shard_money_multiplier(user_id)
@@ -3995,6 +4036,7 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     extra_money_from_daily = base_for_buffs * (daily_bonus_multiplier - 1.0) if daily_bonus_multiplier > 1.0 else 0.0
     extra_money_from_beta_tester = base_for_buffs * (beta_tester_mult - 1.0) if beta_tester_mult > 1.0 else 0.0
     extra_money_from_server_booster = base_for_buffs * (server_booster_mult - 1.0) if server_booster_mult > 1.0 else 0.0
+    extra_money_from_server_tag = base_for_buffs * (server_tag_mult - 1.0) if server_tag_mult > 1.0 else 0.0
     extra_money_from_premium = base_for_buffs * (premium_mult - 1.0) if premium_mult > 1.0 else 0.0
     extra_money_from_nether_star = base_for_buffs * (nether_star_mult - 1.0) if nether_star_mult > 1.0 else 0.0
     extra_money_from_black_shard = base_for_buffs * (black_shard_mult - 1.0) if black_shard_mult > 1.0 else 0.0
@@ -4009,7 +4051,7 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         alchemist_extra = base_for_buffs * 0.05
     elif full_data is None and has_shop_item(user_id, "alchemists_pocketwatch"):
         alchemist_extra = base_for_buffs * 0.05
-    final_value = base_for_buffs + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra + extra_money_from_scarecrow + extra_money_from_bloomstone
+    final_value = base_for_buffs + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_server_tag + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra + extra_money_from_scarecrow + extra_money_from_bloomstone
 
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
@@ -4052,6 +4094,8 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         "extra_money_from_beta_tester": extra_money_from_beta_tester,
         "server_booster_multiplier": server_booster_mult,
         "extra_money_from_server_booster": extra_money_from_server_booster,
+        "server_tag_multiplier": server_tag_mult,
+        "extra_money_from_server_tag": extra_money_from_server_tag,
         "premium_tier_multiplier": premium_mult,
         "extra_money_from_premium": extra_money_from_premium,
         "nether_star_multiplier": nether_star_mult,
@@ -7354,18 +7398,31 @@ async def on_member_join(member):
 
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    """Sync server booster and premium tier when a member boosts or their roles change."""
+    """Sync server booster, GTHR tag, and premium tier when a member boosts or their roles change."""
     # Sync server booster flag when Nitro boosting starts/stops
     if before.premium_since != after.premium_since:
         try:
             set_user_server_booster(after.id, after.premium_since is not None)
         except Exception as e:
             print(f"[Server Booster] Error syncing booster status for {after.id}: {e}")
+        # Announce new boost in #rares
+        if after.premium_since is not None:
+            try:
+                msg = f"**{SERVER_BOOSTER_EMOJI} — {after.mention} JUST BOOSTED THE SERVER! THANK YOU FOR SUPPORTING /GATHER‼️**"
+                await _post_to_rares_channel(after.guild, msg)
+            except Exception as e:
+                print(f"Error posting server boost to #rares: {e}")
 
-    # Sync premium tier cache whenever roles change so premium gardeners unlock from roles alone
+    # Sync premium tier and GTHR tag whenever roles change (tag also refreshed when booster changes)
     before_role_ids = {r.id for r in before.roles}
     after_role_ids = {r.id for r in after.roles}
-    if before_role_ids != after_role_ids:
+    roles_changed = before_role_ids != after_role_ids
+    if before.premium_since != after.premium_since or roles_changed:
+        try:
+            await asyncio.to_thread(sync_server_tag_from_member, after)
+        except Exception as e:
+            print(f"[GTHR Tag] Error syncing for {after.id}: {e}")
+    if roles_changed:
         try:
             await asyncio.to_thread(sync_premium_tier_from_member, after)
         except Exception as e:
@@ -7397,6 +7454,14 @@ async def on_entitlement_create(entitlement):
         assigned = await assign_premium_role_for_entitlement(guild, user_id, str(sku_id))
         if assigned:
             print(f"[Premium] Assigned role for SKU {sku_id} to user {user_id} in guild {guild_id}")
+            # Announce in #rares
+            tier = PREMIUM_SKU_TO_TIER.get(str(sku_id))
+            if tier is not None and 1 <= tier <= 4:
+                member = guild.get_member(user_id)
+                rank_label = PREMIUM_DISPLAY.get(tier, "").strip() or PREMIUM_ROLE_NAMES_SKU.get(tier) or PREMIUM_ROLE_NAMES[tier - 1]
+                mention = member.mention if member else f"<@{user_id}>"
+                msg = f"**{SERVER_BOOSTER_EMOJI} — {mention} JUST PURCHASED {rank_label}! THANK YOU FOR SUPPORTING /GATHER‼️**"
+                await _post_to_rares_channel(guild, msg)
     except Exception as e:
         print(f"[Premium] Error handling entitlement_create: {e}")
 
@@ -7530,6 +7595,7 @@ def _gather_critical_path(member, user_id: int, channel_name: str, area: dict) -
     # Sync Discord role state to DB in-thread so the main event loop is not blocked
     sync_beta_tester_from_member(member)
     sync_server_booster_from_member(member)
+    sync_server_tag_from_member(member)
     sync_premium_tier_from_member(member)
     user_planter_level = get_user_planter_level(member)
 
@@ -9373,13 +9439,14 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
         base_for_buffs = float(fv)
         beta_mult = get_beta_tester_money_multiplier(user_id)
         sb_mult = get_server_booster_money_multiplier(user_id)
+        tag_mult = get_server_tag_money_multiplier(user_id)
         prem_mult = get_premium_tier_money_multiplier(user_id)
         nether_mult = get_nether_star_money_multiplier(user_id)
         shadow_crystal_mult = get_shadow_crystal_money_multiplier(user_id)
         palace_mult = get_palace_treasure_money_multiplier(user_id)
         edward_mult = get_edward_splash_money_multiplier(user_id)
         eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
-        fv = base_for_buffs * (1.0 + (beta_mult - 1.0) + (sb_mult - 1.0) + (prem_mult - 1.0) + (nether_mult - 1.0) + (shadow_crystal_mult - 1.0) + (palace_mult - 1.0) + (edward_mult - 1.0) + (eclipse_mult - 1.0))
+        fv = base_for_buffs * (1.0 + (beta_mult - 1.0) + (sb_mult - 1.0) + (tag_mult - 1.0) + (prem_mult - 1.0) + (nether_mult - 1.0) + (shadow_crystal_mult - 1.0) + (palace_mult - 1.0) + (edward_mult - 1.0) + (eclipse_mult - 1.0))
         total_balance += fv
         name = item["name"]
         items_inc[name] = items_inc.get(name, 0) + 1
@@ -9721,9 +9788,17 @@ async def gather(interaction: discord.Interaction):
 
         area = GATHERING_AREAS[channel_name]
 
+        # Fetch member so primary_guild (GTHR tag) is populated from API if not in cache
+        member_for_gather = interaction.user
+        try:
+            if interaction.guild:
+                member_for_gather = await interaction.guild.fetch_member(interaction.user.id)
+        except Exception:
+            pass
+
         # === ONE thread call: sync roles to DB + data fetch + area check + cooldown + gather + chain roll ===
         result = await asyncio.to_thread(
-            _gather_critical_path, interaction.user, user_id, channel_name, area)
+            _gather_critical_path, member_for_gather, user_id, channel_name, area)
 
         # --- handle early-exit cases ---
         if result.get("area_error"):
@@ -9831,6 +9906,10 @@ async def gather(interaction: discord.Interaction):
                 booster_percent = (gather_result['server_booster_multiplier'] - 1.0) * 100
                 embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
                     value=f"+{booster_percent:.1f}% - **+{format_money(gather_result['extra_money_from_server_booster'])}**", inline=False)
+            if gather_result.get('extra_money_from_server_tag', 0) > 0:
+                tag_percent = (gather_result['server_tag_multiplier'] - 1.0) * 100
+                embed.add_field(name=f"{SERVER_TAG_EMOJI} GTHR Tag!",
+                    value=f"+{tag_percent:.1f}% - **+{format_money(gather_result['extra_money_from_server_tag'])}**", inline=False)
             if gather_result.get('extra_money_from_premium', 0) > 0:
                 tier = get_user_premium_tier(user_id)
                 premium_percent = (gather_result['premium_tier_multiplier'] - 1.0) * 100
@@ -9891,6 +9970,10 @@ async def gather(interaction: discord.Interaction):
                 booster_percent = (gather_result['server_booster_multiplier'] - 1.0) * 100
                 embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
                     value=f"+{booster_percent:.1f}% - **+{format_money(gather_result['extra_money_from_server_booster'])}**", inline=False)
+            if gather_result.get('extra_money_from_server_tag', 0) > 0:
+                tag_percent = (gather_result['server_tag_multiplier'] - 1.0) * 100
+                embed.add_field(name=f"{SERVER_TAG_EMOJI} GTHR Tag!",
+                    value=f"+{tag_percent:.1f}% - **+{format_money(gather_result['extra_money_from_server_tag'])}**", inline=False)
             if gather_result.get('extra_money_from_premium', 0) > 0:
                 tier = get_user_premium_tier(user_id)
                 premium_percent = (gather_result['premium_tier_multiplier'] - 1.0) * 100
@@ -10301,9 +10384,17 @@ async def stats(interaction: discord.Interaction):
     try:
         if not await safe_defer(interaction, ephemeral=True):
             return
-        await asyncio.to_thread(sync_premium_tier_from_member, interaction.user)
-        await asyncio.to_thread(sync_server_booster_from_member, interaction.user)
-        await asyncio.to_thread(sync_beta_tester_from_member, interaction.user)
+        # Fetch member so primary_guild (GTHR tag) is populated from API if not in cache
+        member_for_sync = interaction.user
+        try:
+            if interaction.guild:
+                member_for_sync = await interaction.guild.fetch_member(interaction.user.id)
+        except Exception:
+            pass
+        await asyncio.to_thread(sync_premium_tier_from_member, member_for_sync)
+        await asyncio.to_thread(sync_server_booster_from_member, member_for_sync)
+        await asyncio.to_thread(sync_server_tag_from_member, member_for_sync)
+        await asyncio.to_thread(sync_beta_tester_from_member, member_for_sync)
         user_id = interaction.user.id
         doc = await asyncio.to_thread(get_user_dossier, user_id)
         cd_data = await asyncio.to_thread(_cooldowns_data_sync, user_id)
@@ -10492,6 +10583,7 @@ async def stats(interaction: discord.Interaction):
         rank_mult = get_rank_perma_buff_multiplier(user_id, full_data=full_data)
         beta_mult = get_beta_tester_money_multiplier(user_id)
         server_booster_mult = get_server_booster_money_multiplier(user_id)
+        server_tag_mult = get_server_tag_money_multiplier(user_id)
         premium_mult = get_premium_tier_money_multiplier(user_id)
         nether_star_mult = get_nether_star_money_multiplier(user_id)
         black_shard_mult = get_black_shard_money_multiplier(user_id)
@@ -10528,6 +10620,9 @@ async def stats(interaction: discord.Interaction):
         if server_booster_mult > 1.0:
             pct = (server_booster_mult - 1.0) * 100
             mult_lines.append(f"**{SERVER_BOOSTER_EMOJI} Server Booster —** +{pct:.1f}%")
+        if server_tag_mult > 1.0:
+            pct = (server_tag_mult - 1.0) * 100
+            mult_lines.append(f"**{SERVER_TAG_EMOJI} GTHR Tag —** +{pct:.1f}%")
         if premium_mult > 1.0:
             pct = (premium_mult - 1.0) * 100
             tier_name = PREMIUM_DISPLAY.get(premium_tier, "None").strip() or "None"
@@ -10561,7 +10656,7 @@ async def stats(interaction: discord.Interaction):
         if has_msi:
             mult_lines.append("**MSI Afterburner —** +20%")
         additive_total = 1.0 + (bloom_mult - 1.0) + (water_mult - 1.0) + (achievement_mult - 1.0) + (daily_mult - 1.0)
-        additive_total += (beta_mult - 1.0) + (server_booster_mult - 1.0) + (premium_mult - 1.0)
+        additive_total += (beta_mult - 1.0) + (server_booster_mult - 1.0) + (server_tag_mult - 1.0) + (premium_mult - 1.0)
         additive_total += (nether_star_mult - 1.0) + (black_shard_mult - 1.0) + (shadow_crystal_mult - 1.0)
         additive_total += (palace_mult - 1.0) + (edward_mult - 1.0) + (eclipse_mult - 1.0)
         # Imbue prosperity (Gather + Harvest) counts toward combined %
@@ -10979,6 +11074,7 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
 
     beta_tester_mult = get_beta_tester_money_multiplier(user_id)
     server_booster_mult = get_server_booster_money_multiplier(user_id)
+    server_tag_mult = get_server_tag_money_multiplier(user_id)
     premium_mult = get_premium_tier_money_multiplier(user_id)
     nether_star_mult = get_nether_star_money_multiplier(user_id)
     black_shard_mult = get_black_shard_money_multiplier(user_id)
@@ -10988,6 +11084,7 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
     extra_money_from_beta_tester = base_for_buffs * (beta_tester_mult - 1.0) if beta_tester_mult > 1.0 else 0.0
     extra_money_from_server_booster = base_for_buffs * (server_booster_mult - 1.0) if server_booster_mult > 1.0 else 0.0
+    extra_money_from_server_tag = base_for_buffs * (server_tag_mult - 1.0) if server_tag_mult > 1.0 else 0.0
     extra_money_from_premium = base_for_buffs * (premium_mult - 1.0) if premium_mult > 1.0 else 0.0
     extra_money_from_nether_star = base_for_buffs * (nether_star_mult - 1.0) if nether_star_mult > 1.0 else 0.0
     extra_money_from_black_shard = base_for_buffs * (black_shard_mult - 1.0) if black_shard_mult > 1.0 else 0.0
@@ -10997,7 +11094,7 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
     work_lunch_extra = base_for_buffs * 0.10 if (not set_cooldown and has_shop_item(user_id, "work_lunch")) else 0.0
     overtime_extra = base_for_buffs * 1.0 if (not set_cooldown and has_shop_item(user_id, "overtime_approval") and random.random() < 0.10) else 0.0
-    total_value = base_for_buffs + extra_money_from_fuzzy_dice + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra
+    total_value = base_for_buffs + extra_money_from_fuzzy_dice + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_server_tag + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra
     current_balance = current_balance + total_value
 
     # ----- single batch write: items + ripeness + balance + counts + tree rings + cooldown + almanac -----
@@ -11050,6 +11147,8 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         "extra_money_from_beta_tester": extra_money_from_beta_tester,
         "server_booster_multiplier": server_booster_mult,
         "extra_money_from_server_booster": extra_money_from_server_booster,
+        "server_tag_multiplier": server_tag_mult,
+        "extra_money_from_server_tag": extra_money_from_server_tag,
         "premium_tier_multiplier": premium_mult,
         "extra_money_from_premium": extra_money_from_premium,
         "nether_star_multiplier": nether_star_mult,
@@ -11083,6 +11182,7 @@ def _harvest_critical_path(member, user_id: int, channel_name: str, area: dict) 
     """
     sync_beta_tester_from_member(member)
     sync_server_booster_from_member(member)
+    sync_server_tag_from_member(member)
     sync_premium_tier_from_member(member)
     user_planter_level = get_user_planter_level(member)
     area_mult = area.get("multiplier", 1.0)
@@ -11379,6 +11479,10 @@ async def harvest(interaction: discord.Interaction):
             booster_percent = (result['server_booster_multiplier'] - 1.0) * 100
             embed.add_field(name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
                 value=f"+{booster_percent:.1f}% - **+{format_money(result['extra_money_from_server_booster'])}**", inline=False)
+        if result.get("extra_money_from_server_tag", 0) > 0:
+            tag_percent = (result['server_tag_multiplier'] - 1.0) * 100
+            embed.add_field(name=f"{SERVER_TAG_EMOJI} GTHR Tag!",
+                value=f"+{tag_percent:.1f}% - **+{format_money(result['extra_money_from_server_tag'])}**", inline=False)
         if result.get("extra_money_from_premium", 0) > 0:
             tier = get_user_premium_tier(user_id)
             premium_percent = (result['premium_tier_multiplier'] - 1.0) * 100
@@ -18517,9 +18621,10 @@ async def mine(interaction: discord.Interaction):
 
 
 def _sell_initial_sync(member, user_id: int) -> dict:
-    """Run in thread: sync beta/booster/premium + load holdings and prices. Returns dict for sell command."""
+    """Run in thread: sync beta/booster/GTHR tag/premium + load holdings and prices. Returns dict for sell command."""
     sync_beta_tester_from_member(member)
     sync_server_booster_from_member(member)
+    sync_server_tag_from_member(member)
     sync_premium_tier_from_member(member)
     holdings = get_user_crypto_holdings(user_id)
     prices = get_crypto_prices()
@@ -18597,6 +18702,7 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         base_for_buffs = float(subtotal + extra_from_rank)
         beta_mult = get_beta_tester_money_multiplier(user_id)
         sb_mult = get_server_booster_money_multiplier(user_id)
+        tag_mult = get_server_tag_money_multiplier(user_id)
         prem_mult = get_premium_tier_money_multiplier(user_id)
         nether_mult = get_nether_star_money_multiplier(user_id)
         black_shard_mult = get_black_shard_money_multiplier(user_id)
@@ -18605,6 +18711,7 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
         extra_beta = base_for_buffs * (beta_mult - 1.0) if beta_mult > 1.0 else 0.0
         extra_booster = base_for_buffs * (sb_mult - 1.0) if sb_mult > 1.0 else 0.0
+        extra_tag = base_for_buffs * (tag_mult - 1.0) if tag_mult > 1.0 else 0.0
         extra_premium = base_for_buffs * (prem_mult - 1.0) if prem_mult > 1.0 else 0.0
         extra_ns = base_for_buffs * (nether_mult - 1.0) if nether_mult > 1.0 else 0.0
         extra_bs = base_for_buffs * (black_shard_mult - 1.0) if black_shard_mult > 1.0 else 0.0
@@ -18612,7 +18719,7 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
         extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
         extra_msi = base_for_buffs * 0.20 if has_shop_item(user_id, "msi_afterburner") else 0.0
-        total_sale_value = base_for_buffs + extra_beta + extra_booster + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi
+        total_sale_value = base_for_buffs + extra_beta + extra_booster + extra_tag + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi
 
         # Add money to balance (with boosts)
         current_balance = get_user_balance(user_id)
@@ -18672,6 +18779,13 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
             embed.add_field(
                 name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
                 value=f"+{booster_percent:.1f}% - **+${extra_booster:.2f}**",
+                inline=False,
+            )
+        if extra_tag > 0:
+            tag_percent = (tag_mult - 1.0) * 100
+            embed.add_field(
+                name=f"{SERVER_TAG_EMOJI} GTHR Tag!",
+                value=f"+{tag_percent:.1f}% - **+${extra_tag:.2f}**",
                 inline=False,
             )
         premium_tier = get_user_premium_tier(user_id)
@@ -18772,6 +18886,7 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
     base_for_buffs = float(subtotal + extra_from_rank)
     beta_mult = get_beta_tester_money_multiplier(user_id)
     sb_mult = get_server_booster_money_multiplier(user_id)
+    tag_mult = get_server_tag_money_multiplier(user_id)
     prem_mult = get_premium_tier_money_multiplier(user_id)
     nether_mult = get_nether_star_money_multiplier(user_id)
     black_shard_mult = get_black_shard_money_multiplier(user_id)
@@ -18780,6 +18895,7 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
     eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
     extra_beta = base_for_buffs * (beta_mult - 1.0) if beta_mult > 1.0 else 0.0
     extra_booster = base_for_buffs * (sb_mult - 1.0) if sb_mult > 1.0 else 0.0
+    extra_tag = base_for_buffs * (tag_mult - 1.0) if tag_mult > 1.0 else 0.0
     extra_premium = base_for_buffs * (prem_mult - 1.0) if prem_mult > 1.0 else 0.0
     extra_ns = base_for_buffs * (nether_mult - 1.0) if nether_mult > 1.0 else 0.0
     extra_bs = base_for_buffs * (black_shard_mult - 1.0) if black_shard_mult > 1.0 else 0.0
@@ -18787,7 +18903,7 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
     extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
     extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
     extra_msi = base_for_buffs * 0.20 if has_shop_item(user_id, "msi_afterburner") else 0.0
-    sale_value = base_for_buffs + extra_beta + extra_booster + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi
+    sale_value = base_for_buffs + extra_beta + extra_booster + extra_tag + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi
 
     # Update holdings (subtract) in DB and locally
     update_user_crypto_holdings(user_id, coin, -amount)
@@ -18855,6 +18971,13 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         embed.add_field(
             name=f"{SERVER_BOOSTER_EMOJI} Server Booster!",
             value=f"+{booster_percent:.1f}% - **+${extra_booster:.2f}**",
+            inline=False,
+        )
+    if extra_tag > 0:
+        tag_percent = (tag_mult - 1.0) * 100
+        embed.add_field(
+            name=f"{SERVER_TAG_EMOJI} GTHR Tag!",
+            value=f"+{tag_percent:.1f}% - **+${extra_tag:.2f}**",
             inline=False,
         )
     premium_tier = get_user_premium_tier(user_id)
