@@ -1,6 +1,6 @@
 import os
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 from pymongo import MongoClient
 from pymongo.collection import Collection
@@ -1054,6 +1054,39 @@ def update_gardener_stats(user_id: int, gardener_id: int, money_earned: float, p
                 "gardeners.$.total_money_earned": float(money_earned)
             }
         }
+    )
+
+
+def get_virtual_gardener_stats(user_id: int) -> Dict:
+    """Get stats for virtual gardeners (premium 6-9 and secret). Keys are '6','7','8','9','secret'."""
+    users = _get_users_collection()
+    doc = users.find_one({"_id": int(user_id)}, {"virtual_gardener_stats": 1})
+    raw = doc.get("virtual_gardener_stats") if doc else None
+    if not raw or not isinstance(raw, dict):
+        return {}
+    result = {}
+    for k, v in raw.items():
+        if isinstance(v, dict):
+            result[str(k)] = {
+                "plants_gathered": int(v.get("plants_gathered", 0)),
+                "total_money_earned": float(v.get("total_money_earned", 0.0)),
+            }
+    return result
+
+
+def update_virtual_gardener_stats(user_id: int, gardener_key: Union[str, int], money_earned: float, plants_count: int = 1) -> None:
+    """Update stats for a virtual gardener (premium slot 6-9 or 'secret'). Creates field if missing."""
+    key = str(gardener_key)
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": int(user_id)},
+        {
+            "$inc": {
+                f"virtual_gardener_stats.{key}.plants_gathered": int(plants_count),
+                f"virtual_gardener_stats.{key}.total_money_earned": float(money_earned),
+            }
+        },
+        upsert=True,
     )
 
 

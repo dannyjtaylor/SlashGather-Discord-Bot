@@ -95,6 +95,8 @@ from database import (
     get_user_gardeners,
     add_gardener,
     update_gardener_stats,
+    update_virtual_gardener_stats,
+    get_virtual_gardener_stats,
     set_gardener_has_tool,
     get_all_users_with_gardeners,
     get_user_gpus,
@@ -3446,13 +3448,13 @@ PREMIUM_COOLDOWN_REDUCTIONS = {
     3: {"gather_reduction": 5, "harvest_reduction": 240, "mine_reduction": 480},
     4: {"gather_reduction": 7, "harvest_reduction": 420, "mine_reduction": 900},
 }
-# Display names must match Discord role names exactly (e.g. "🪴SAPLING ($10)" with no space after emoji)
+# Display names must match Discord role names exactly (emoji on left, e.g. "🌰 SEED ($2)")
 PREMIUM_DISPLAY = {
     0: "",
     1: "🌰 SEED ($2)",
     2: "🌱 SPROUT ($5)",
-    3: "🪴SAPLING ($10)",
-    4: "🌲 EVERGREEN ($15)",
+    3: "🪴 SAPLING ($10)",
+    4: "🌳 EVERGREEN ($15)",
 }
 # Base daily /water amount per streak day for each premium rank
 # 0 (none): 5,000; Seed: 15,000; Sprout: 50,000; Sapling: 100,000; Evergreen: 500,000
@@ -3507,18 +3509,18 @@ PREMIUM_GARDENER_EMOJI = {
 
 # Map Discord SKU IDs (from Developer Portal → Monetization → SKUs) to premium tier 1–4.
 PREMIUM_SKU_TO_TIER: dict[str, int] = {
-    "1479298502399098962": 1,   # SEED RANK ($2) 🌰
-    "1479312006095048724": 2,   # SPROUT RANK ($5) 🌱
-    "1479313565864165603": 3,   # SAPLING RANK ($10) 🪴
-    "1479315594183446691": 4,   # EVERGREEN RANK ($15) 🌲
+    "1479298502399098962": 1,   # 🌰 SEED ($2)
+    "1479312006095048724": 2,   # 🌱 SPROUT ($5)
+    "1479313565864165603": 3,   # 🪴 SAPLING ($10)
+    "1479315594183446691": 4,   # 🌳 EVERGREEN ($15)
 }
 
-# Role names that match the SKU product names (create these exact roles in your server).
+# Role names that match your Discord server roles (emoji on left).
 PREMIUM_ROLE_NAMES_SKU: dict[int, str] = {
-    1: "SEED RANK ($2) 🌰",
-    2: "SPROUT RANK ($5) 🌱",
-    3: "SAPLING RANK ($10) 🪴",
-    4: "EVERGREEN RANK ($15) 🌲",
+    1: "🌰 SEED ($2)",
+    2: "🌱 SPROUT ($5)",
+    3: "🪴 SAPLING ($10)",
+    4: "🌳 EVERGREEN ($15)",
 }
 
 
@@ -3534,8 +3536,13 @@ async def assign_premium_role_for_entitlement(
         return False
     member = guild.get_member(user_id)
     if member is None:
+        try:
+            member = await guild.fetch_member(user_id)
+        except (discord.NotFound, discord.HTTPException):
+            return False
+    if member is None:
         return False
-    # Try SKU role name first (e.g. "SEED RANK ($2) 🌰"), then PREMIUM_DISPLAY, then simple name
+    # Try SKU role name first (e.g. "🌰 SEED ($2)"), then PREMIUM_DISPLAY, then simple name
     role_name = PREMIUM_ROLE_NAMES_SKU.get(tier) or PREMIUM_DISPLAY.get(tier, "").strip() or PREMIUM_ROLE_NAMES[tier - 1]
     role = discord.utils.get(guild.roles, name=role_name)
     if role is None:
@@ -3573,7 +3580,7 @@ def get_premium_tier_from_member(member: discord.Member | None) -> int:
     legacy_names = ["Seed", "Sprout", "Sapling", "Evergreen"]
 
     tier = 0
-    # Check against SKU role names first (e.g. "SEED RANK ($2) 🌰")
+    # Check against SKU role names first (e.g. "🌰 SEED ($2)")
     for i in range(1, 5):
         sku_name = PREMIUM_ROLE_NAMES_SKU.get(i)
         if sku_name and sku_name in member_role_names:
@@ -10903,6 +10910,15 @@ async def syncpremium(interaction: discord.Interaction, user: discord.Member | N
                 f"✅ {who.capitalize()} premium role has been assigned based on their purchase.",
                 ephemeral=True,
             )
+            # Announce in #rares (same as on_entitlement_create) so syncpremium restores the support message
+            try:
+                tier = get_premium_tier_from_member(target_member)
+                if 1 <= tier <= 4:
+                    rank_label = PREMIUM_DISPLAY.get(tier, "").strip() or PREMIUM_ROLE_NAMES_SKU.get(tier) or PREMIUM_ROLE_NAMES[tier - 1]
+                    msg = f"**{SERVER_BOOSTER_EMOJI} — {target_member.mention} JUST PURCHASED {rank_label}! THANK YOU FOR SUPPORTING /GATHER‼️**"
+                    await _post_to_rares_channel(guild, msg)
+            except Exception as e:
+                print(f"[syncpremium] Error posting to #rares: {e}")
         else:
             who = "You don't" if target_member.id == interaction.user.id else f"**{target_member.display_name}** doesn't"
             await safe_interaction_response(
@@ -10916,6 +10932,63 @@ async def syncpremium(interaction: discord.Interaction, user: discord.Member | N
         await safe_interaction_response(
             interaction, interaction.followup.send,
             "❌ An error occurred. Please try again.",
+            ephemeral=True,
+        )
+
+
+def _read_last_log_lines(log_path: str, amount: int) -> str:
+    """Read the last `amount` lines from the log file. Runs in thread. Returns content or error string."""
+    try:
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+        last = lines[-amount:] if len(lines) >= amount else lines
+        return ''.join(last).strip() or "(log empty)"
+    except FileNotFoundError:
+        return f"(log file not found: {log_path})"
+    except Exception as e:
+        return f"(error reading log: {e})"
+
+
+@bot.tree.command(name="log", description="[ADMIN] Get the last N lines from the Raspberry Pi bot log (only in #hidden)")
+@app_commands.describe(amount="Number of lines to show (default 50, max 100)")
+@app_commands.default_permissions(administrator=True)
+async def log_cmd(interaction: discord.Interaction, amount: int = 50):
+    """Admin-only. Returns the last `amount` lines from discord.log. Only usable in #hidden."""
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if not _is_admin(interaction.user):
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ Only server administrators can use this command.",
+                ephemeral=True,
+            )
+            return
+        channel_name = (interaction.channel.name or "").strip().lower()
+        if channel_name != "hidden":
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ This command can only be used in **#hidden**.",
+                ephemeral=True,
+            )
+            return
+        amount = max(1, min(100, amount))
+        log_path = os.getenv("LOG_FILE", "discord.log")
+        content = await asyncio.to_thread(_read_last_log_lines, log_path, amount)
+        max_len = 1900
+        if len(content) > max_len:
+            content = "… (truncated)\n" + content[-max_len:]
+        await safe_interaction_response(
+            interaction, interaction.followup.send,
+            f"```\n{content}\n```",
+            ephemeral=True,
+        )
+    except Exception as e:
+        print(f"Error in /log command: {e}")
+        traceback.print_exc()
+        await safe_interaction_response(
+            interaction, interaction.followup.send,
+            "❌ An error occurred while reading the log.",
             ephemeral=True,
         )
 
@@ -13693,8 +13766,11 @@ class HireView(discord.ui.View):
                 color=color
             )
             embed.add_field(name="Status", value="**HIRED** ✅", inline=False)
-            embed.add_field(name="Plants Gathered", value="**N/A**", inline=True)
-            embed.add_field(name="Total Money Earned", value="**N/A**", inline=True)
+            extra_stats = get_virtual_gardener_stats(self.user_id).get(str(slot_id), {})
+            plants_gathered = extra_stats.get("plants_gathered", 0)
+            total_money = extra_stats.get("total_money_earned", 0.0)
+            embed.add_field(name="Plants Gathered", value=f"**{plants_gathered}**", inline=True)
+            embed.add_field(name="Total Money Earned", value=f"**${total_money:,.2f}**", inline=True)
             embed.set_footer(text=f"Page {page + 1} of {self.total_pages}")
             return embed
         # Regular gardener 1-5
@@ -13742,6 +13818,11 @@ class HireView(discord.ui.View):
         )
         if sg_unlocked:
             embed.add_field(name="Status", value="**UNLOCKED** \u2705", inline=False)
+            extra_stats = get_virtual_gardener_stats(self.user_id).get("secret", {})
+            plants_gathered = extra_stats.get("plants_gathered", 0)
+            total_money = extra_stats.get("total_money_earned", 0.0)
+            embed.add_field(name="Plants Gathered", value=f"**{plants_gathered}**", inline=True)
+            embed.add_field(name="Total Money Earned", value=f"**${total_money:,.2f}**", inline=True)
         else:
             embed.add_field(name="Status", value="\U0001f512 Locked \u2014 Invite 10 people to unlock!", inline=False)
         embed.add_field(name="Gather Chance", value="**50%** chance to /gather every minute", inline=False)
@@ -17344,15 +17425,17 @@ async def gardener_background_task():
                                 upgraded_to_harvest = total_harvest_upgrade_chance > 0 and random.random() < total_harvest_upgrade_chance
                             
                             if upgraded_to_harvest:
-                                # Perform full harvest instead of single gather (orchard upgrades apply; no chain)
+                                # Perform full harvest: credits user balance + plants (same as regular gardeners)
                                 harvest_result = await perform_harvest_for_user(user_id, allow_chain=False)
                                 total_value = harvest_result["total_value"]
                                 current_balance = harvest_result["current_balance"]
                                 item_count = len(harvest_result["gathered_items"])
                                 
-                                # Update gardener stats only for regular gardeners (premium 6-9 have no DB record)
+                                # Update gardener stats (regular 1-5 in gardeners array; premium 6-9 in virtual_gardener_stats)
                                 if gardener_id <= 5:
                                     await asyncio.to_thread(update_gardener_stats, user_id, gardener_id, total_value, item_count)
+                                else:
+                                    await asyncio.to_thread(update_virtual_gardener_stats, user_id, str(gardener_id), total_value, item_count)
                                 
                                 # Send cool upgrade message to #lawn
                                 for guild in bot.guilds:
@@ -17394,10 +17477,12 @@ async def gardener_background_task():
                                                 print(f"Error sending gardener harvest-upgrade notification to #lawn in {guild.name} for user {user_id}: {e}")
                                         break
                             else:
-                                # Normal single gather (orchard fertilizer applies; no chain)
+                                # Normal single gather: credits user balance + plants (same as regular gardeners)
                                 gather_result = await perform_gather_for_user(user_id, apply_cooldown=False, apply_orchard_fertilizer=True)
                                 if gardener_id <= 5:
                                     await asyncio.to_thread(update_gardener_stats, user_id, gardener_id, gather_result["value"], 1)
+                                else:
+                                    await asyncio.to_thread(update_virtual_gardener_stats, user_id, str(gardener_id), gather_result["value"], 1)
                                 
                                 user_name = "User"
                                 for guild in bot.guilds:
@@ -17464,8 +17549,11 @@ async def secret_gardener_background_task():
                         # Determine if this is a harvest or gather
                         # If user has auto-harvest (tier 12), use the same tool-upgrade logic
                         if sg_has_harvest and random.random() < 0.25:
+                            # perform_harvest_for_user credits user balance + plants (same as regular gardeners)
                             harvest_result = await perform_harvest_for_user(user_id, allow_chain=False)
                             total_value = harvest_result["total_value"]
+                            item_count = len(harvest_result.get("gathered_items", []))
+                            await asyncio.to_thread(update_virtual_gardener_stats, user_id, "secret", total_value, item_count)
                             
                             # Notify in #lawn
                             for guild in bot.guilds:
@@ -17500,8 +17588,9 @@ async def secret_gardener_background_task():
                                             print(f"Error sending secret gardener harvest notification: {e}")
                                     break
                         else:
-                            # Normal single gather
+                            # perform_gather_for_user credits user balance + plants (same as regular gardeners)
                             gather_result = await perform_gather_for_user(user_id, apply_cooldown=False, apply_orchard_fertilizer=True)
+                            await asyncio.to_thread(update_virtual_gardener_stats, user_id, "secret", gather_result["value"], 1)
                             
                             user_name = "User"
                             for guild in bot.guilds:
