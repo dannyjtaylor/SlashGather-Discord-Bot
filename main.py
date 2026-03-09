@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 import uuid
 import threading
 import datetime
+from zoneinfo import ZoneInfo
 import subprocess
 import sys
 import traceback
@@ -23,6 +24,17 @@ import yfinance as yf
 # Suppress Pandas4Warning from yfinance library (deprecated Timestamp.utcnow)
 warnings.filterwarnings("ignore", category=FutureWarning, message=".*Timestamp.utcnow.*")
 warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*Timestamp.utcnow.*")
+
+
+def _now_est() -> datetime.datetime:
+    """Current time in Eastern (America/New_York). DST-aware: EST in winter, EDT in summer."""
+    return datetime.datetime.now(datetime.timezone.utc).astimezone(ZoneInfo("America/New_York"))
+
+
+def _utc_timestamp_to_est(ts: float) -> datetime.datetime:
+    """Convert Unix timestamp (seconds since epoch, UTC) to Eastern datetime. DST-aware."""
+    return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).astimezone(ZoneInfo("America/New_York"))
+
 
 # Load environment variables FIRST
 load_dotenv(override=True)
@@ -1465,15 +1477,12 @@ VALID_GATHERING_CHANNELS = set(GATHERING_AREAS.keys())
 # Order of unlockable areas for areas_unlocked achievement (forest is default; jungle before grove)
 AREA_ORDER_FOR_ACHIEVEMENT = ["underground-jungle", "grove", "marsh", "bog", "mire"]
 
-# Day/Night (Terraria-style): Solar Eclipse = day (4:30 AM–7:29 PM EST), Blood Moon = night (7:30 PM–4:29 AM EST). Spawn boost during these.
+# Day/Night (Terraria-style): Solar Eclipse = day (4:30 AM–7:29 PM Eastern), Blood Moon = night (7:30 PM–4:29 AM Eastern). DST-aware (EST/EDT).
 def _is_solar_eclipse_or_blood_moon():
-    """Return (is_solar_eclipse, is_blood_moon) based on EST hour. Day 4:30–19:29 EST, Night 19:30–4:29 EST."""
-    from datetime import datetime, timezone
-    from zoneinfo import ZoneInfo
-    now_utc = datetime.now(timezone.utc)
-    now_est = now_utc.astimezone(ZoneInfo("America/New_York"))
+    """Return (is_solar_eclipse, is_blood_moon) based on Eastern hour. Day 4:30–19:29, Night 19:30–4:29. Uses America/New_York (DST-aware)."""
+    now_est = _now_est()
     h = now_est.hour + now_est.minute / 60.0 + now_est.second / 3600.0
-    is_day = 4.5 <= h < 19.5   # 4:30 AM – 7:29 PM EST
+    is_day = 4.5 <= h < 19.5   # 4:30 AM – 7:29 PM Eastern
     is_night = not is_day
     return is_day, is_night
 
@@ -1483,7 +1492,7 @@ def _pve_spawn_multiplier():
         return 5.0, 5.0
     return 1.0, 1.0
 
-# Solar Eclipse and Blood Moon: 50% chance at respective start times (4:30 EST, 19:30 EST). Display in #events with start/end embeds.
+# Solar Eclipse and Blood Moon: 50% chance at respective start times (4:30 / 19:30 Eastern, DST-aware). Display in #events with start/end embeds.
 SOLAR_ECLIPSE_TITLE = "A Solar Eclipse is happening!"
 SOLAR_ECLIPSE_DESCRIPTION = "A Solar Eclipse is happening!"
 SOLAR_ECLIPSE_FOOTER = "Wild animals and bosses are more common!"
@@ -1492,8 +1501,8 @@ BLOOD_MOON_DESCRIPTION = "The Blood Moon is rising..."
 BLOOD_MOON_FOOTER = "Wild animals and bosses are more common!"
 SOLAR_ECLIPSE_COLOR = 0xFF8C00   # bright orange
 BLOOD_MOON_COLOR = 0xDC143C      # bright red (crimson, distinct from discord red)
-CELESTIAL_DAY_START_EST = (4, 30)   # 4:30 AM EST (Solar Eclipse start)
-CELESTIAL_NIGHT_START_EST = (19, 30)  # 7:30 PM EST (Blood Moon start)
+CELESTIAL_DAY_START_EST = (4, 30)   # 4:30 AM Eastern (Solar Eclipse start)
+CELESTIAL_NIGHT_START_EST = (19, 30)  # 7:30 PM Eastern (Blood Moon start)
 CELESTIAL_TRIGGER_CHANCE = 0.2   # 20% at start time, Terraria-style
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -10161,10 +10170,8 @@ async def gather(interaction: discord.Interaction):
 
 def _water_critical_path(user_id: int) -> dict:
     """Run in thread: all DB reads + logic + writes for /water. Returns dict for response and notifications."""
-    EST_OFFSET = datetime.timedelta(hours=-5)
     current_time = time.time()
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_est = now_utc + EST_OFFSET
+    now_est = _now_est()
     current_date = now_est.date()
     current_hour = now_est.hour
 
@@ -10180,8 +10187,7 @@ def _water_critical_path(user_id: int) -> dict:
 
     already_watered = False
     if last_water_time > 0:
-        last_water_utc = datetime.datetime.utcfromtimestamp(last_water_time)
-        last_water_est = last_water_utc + EST_OFFSET
+        last_water_est = _utc_timestamp_to_est(last_water_time)
         last_water_date = last_water_est.date()
         last_water_hour = last_water_est.hour
         if last_water_date == current_date:
@@ -10213,8 +10219,7 @@ def _water_critical_path(user_id: int) -> dict:
     consecutive_days = get_user_consecutive_water_days(user_id)
     is_first_water_today = True
     if last_water_time > 0:
-        last_water_utc = datetime.datetime.utcfromtimestamp(last_water_time)
-        last_water_est = last_water_utc + EST_OFFSET
+        last_water_est = _utc_timestamp_to_est(last_water_time)
         last_water_date = last_water_est.date()
         if last_water_date == current_date:
             is_first_water_today = False
@@ -10343,9 +10348,8 @@ def _cooldowns_data_sync(user_id: int) -> dict:
     """Gather all cooldown remaining times for /cooldowns. Runs in thread."""
     data = {}
     current_time = time.time()
-    EST_OFFSET = datetime.timedelta(hours=-5)
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_est = now_utc + EST_OFFSET
+    now_est = _now_est()
 
     # /gather
     can_g, time_g, _ = can_gather(user_id)
@@ -10382,16 +10386,16 @@ def _cooldowns_data_sync(user_id: int) -> dict:
         end = last_mine + mine_cd
         data["mine"] = max(0, int(end - current_time))
 
-    # /dailyshop — resets at 12 AM EST
+    # /dailyshop — resets at midnight Eastern (America/New_York, DST-aware)
     data["dailyshop"] = max(0, int(_seconds_until_midnight_est()))
 
-    # /water — midnight EST, or 12 PM & 12 AM EST if water_double
+    # /water — midnight Eastern, or 12 PM & 12 AM Eastern if water_double (DST-aware)
     has_double = get_invite_cooldown_reductions(user_id).get("water_double", False)
     if has_double and now_est.hour < 12:
         next_water_est = now_est.replace(hour=12, minute=0, second=0, microsecond=0)
     else:
         next_water_est = (now_est + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    target_utc = next_water_est - EST_OFFSET
+    target_utc = next_water_est.astimezone(datetime.timezone.utc)
     data["water"] = max(0, int((target_utc - now_utc).total_seconds()))
 
     # Death timer (/russian) — also blocks /gather, /harvest, /mine
@@ -12140,7 +12144,7 @@ INVITE_REWARDS = {
     16: {"type": "tree_rings", "amount": 100, "description": "**100 Tree Rings**"},
     17: {"type": "money", "amount": 100_000_000, "description": "**$100,000,000**"},
     18: {"type": "tree_rings", "amount": 300, "description": "**300 Tree Rings**"},
-    19: {"type": "water_double", "amount": 0, "description": "**Permanent /water cooldown reduction! Water twice a day (12 PM & 12 AM EST)**"},
+    19: {"type": "water_double", "amount": 0, "description": "**Permanent /water cooldown reduction! Water twice a day (12 PM & 12 AM Eastern)**"},
     20: {"type": "hidden_achievement", "amount": 0, "description": "**HIDDEN ACHIEVEMENT**"},
 }
 
@@ -12393,7 +12397,7 @@ DAILY_SHOP_ITEMS = {
         "name": "Slot Token",
         "description": "Let's go gambling!",
         "cost": 195,
-        "effect": "One free Slot Spin every day (resets midnight EST)",
+        "effect": "One free Slot Spin every day (resets midnight Eastern)",
     },
     "blanks": {
         "name": "Blanks",
@@ -12454,25 +12458,19 @@ def get_daily_shop_offerings(date_est: str, user_id: int = None) -> list:
 
 
 def _get_date_est() -> str:
-    """Current date in EST as YYYY-MM-DD."""
-    EST_OFFSET = datetime.timedelta(hours=-5)
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_est = now_utc + EST_OFFSET
-    return now_est.strftime("%Y-%m-%d")
+    """Current date in Eastern (America/New_York, DST-aware) as YYYY-MM-DD."""
+    return _now_est().strftime("%Y-%m-%d")
 
 
 def _seconds_until_midnight_est() -> float:
-    """Seconds from now until next midnight EST."""
-    EST_OFFSET = datetime.timedelta(hours=-5)
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_est = now_utc + EST_OFFSET
+    """Seconds from now until next midnight Eastern (America/New_York, DST-aware)."""
+    now_est = _now_est()
     next_midnight = (now_est + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    target_utc = next_midnight - EST_OFFSET
-    return (target_utc - now_utc).total_seconds()
+    return (next_midnight - now_est).total_seconds()
 
 
 def _format_refresh_countdown() -> str:
-    """Human-readable countdown to next midnight EST (e.g. '19h 54m')."""
+    """Human-readable countdown to next midnight Eastern (e.g. '19h 54m')."""
     secs = max(0, int(_seconds_until_midnight_est()))
     h, remainder = divmod(secs, 3600)
     m, _ = divmod(remainder, 60)
@@ -12695,7 +12693,7 @@ class DailyShopBuyButton(discord.ui.Button):
         max_purchases = await asyncio.to_thread(get_effective_daily_shop_max_purchases, user_id)
         if purchase_count >= max_purchases:
             await safe_interaction_response(interaction, interaction.followup.send,
-                f"❌ You've already bought **{max_purchases}** items today. Come back at midnight EST!", ephemeral=True)
+                f"❌ You've already bought **{max_purchases}** items today. Come back at midnight Eastern!", ephemeral=True)
             return
         info = DAILY_SHOP_ITEMS[item_id]
         cost = info["cost"]
@@ -12846,7 +12844,7 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
                     value="*No items yet. Use /dailyshop to open the shop and buy!*",
                     inline=False,
                 )
-                embed.set_footer(text="Shop refreshes daily at midnight EST")
+                embed.set_footer(text="Shop refreshes daily at midnight Eastern")
                 await safe_interaction_response(
                     interaction, interaction.followup.send, embed=embed, ephemeral=True)
                 return
@@ -12861,7 +12859,7 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
                     color=discord.Color.gold()
                 )
                 embed.add_field(name="Items", value=chunk, inline=False)
-                embed.set_footer(text="Shop refreshes daily at midnight EST")
+                embed.set_footer(text="Shop refreshes daily at midnight Eastern")
                 embeds.append(embed)
 
             if len(embeds) == 1:
@@ -17929,15 +17927,13 @@ async def send_event_end_embed(guild: discord.Guild, event: dict):
 
 
 def _apply_auto_water_for_user(user_id: int, now_est: datetime.datetime) -> bool:
-    """Apply one water for a user (irrigation). Returns True if water was applied."""
-    EST_OFFSET = datetime.timedelta(hours=-5)
+    """Apply one water for a user (irrigation). Returns True if water was applied. now_est must be Eastern (America/New_York) DST-aware."""
     last_water_time = get_user_last_water_time(user_id)
     current_date = now_est.date()
     current_hour = now_est.hour
     has_double_water = get_invite_cooldown_reductions(user_id).get("water_double", False)
     if last_water_time > 0:
-        last_water_utc = datetime.datetime.utcfromtimestamp(last_water_time)
-        last_water_est = last_water_utc + EST_OFFSET
+        last_water_est = _utc_timestamp_to_est(last_water_time)
         last_water_date = last_water_est.date()
         last_water_hour = last_water_est.hour
         already_watered = False
@@ -17956,8 +17952,7 @@ def _apply_auto_water_for_user(user_id: int, now_est: datetime.datetime) -> bool
     consecutive_days = get_user_consecutive_water_days(user_id)
     is_first_water_today = True
     if last_water_time > 0:
-        last_water_utc = datetime.datetime.utcfromtimestamp(last_water_time)
-        last_water_est = last_water_utc + EST_OFFSET
+        last_water_est = _utc_timestamp_to_est(last_water_time)
         last_water_date = last_water_est.date()
         if last_water_date == current_date:
             is_first_water_today = False
@@ -17982,15 +17977,13 @@ def _apply_auto_water_for_user(user_id: int, now_est: datetime.datetime) -> bool
 
 
 async def irrigation_auto_water_task():
-    """At 12 PM and 12 AM EST, auto-water users who have the Irrigation System."""
+    """At 12 PM and 12 AM Eastern (America/New_York, DST-aware), auto-water users who have the Irrigation System."""
     await bot.wait_until_ready()
-    EST_OFFSET = datetime.timedelta(hours=-5)
     await asyncio.sleep(60)
     last_run_date_hour = None
     while not bot.is_closed():
         try:
-            now_utc = datetime.datetime.now(datetime.timezone.utc)
-            now_est = now_utc + EST_OFFSET
+            now_est = _now_est()
             if now_est.hour in (0, 12) and now_est.minute < 2:
                 key = (now_est.date(), now_est.hour)
                 if key != last_run_date_hour:
@@ -18305,19 +18298,17 @@ async def _send_end_embeds_for_expired_events():
 
 
 async def celestial_event_check():
-    """At 4:30 EST roll 50% for Solar Eclipse (until 19:30 EST). At 19:30 EST roll 50% for Blood Moon (until 4:30 EST next day). Start/end embeds in #events."""
-    from zoneinfo import ZoneInfo
+    """At 4:30 Eastern roll 50% for Solar Eclipse (until 19:30). At 19:30 Eastern roll 50% for Blood Moon (until 4:30 next day). DST-aware. Start/end embeds in #events."""
     await bot.wait_until_ready()
     await asyncio.sleep(15)
-    last_solar_trigger_date = None  # (year, month, day) in EST
+    last_solar_trigger_date = None  # (year, month, day) in Eastern
     last_blood_trigger_date = None
-    est = ZoneInfo("America/New_York")
     while not bot.is_closed():
         try:
             await _send_end_embeds_for_expired_events()
             clear_expired_events()
-            now_utc = datetime.datetime.now(datetime.timezone.utc)
-            now_est = now_utc.astimezone(est)
+            now_est = _now_est()
+            now_utc = now_est.astimezone(datetime.timezone.utc)
             now_ts = now_utc.timestamp()
             today_est = (now_est.year, now_est.month, now_est.day)
 
@@ -18331,7 +18322,7 @@ async def celestial_event_check():
                 await _end_active_event_for_all_guilds(bm)
                 print("Blood Moon ended (time expired).")
 
-            # At 4:30 EST: 50% chance to start Solar Eclipse (day: 4:30 -> 19:30 EST)
+            # At 4:30 Eastern: 50% chance to start Solar Eclipse (day: 4:30 -> 19:30 Eastern)
             if (now_est.hour, now_est.minute) == CELESTIAL_DAY_START_EST and today_est != last_solar_trigger_date:
                 last_solar_trigger_date = today_est
                 if not get_active_event_by_type("solar_eclipse") and random.random() < CELESTIAL_TRIGGER_CHANCE:
@@ -18362,9 +18353,9 @@ async def celestial_event_check():
                             }, 0)
                         except Exception as e:
                             print(f"Error sending Solar Eclipse start to {guild.name}: {e}")
-                    print("Started Solar Eclipse (50% roll at 4:30 EST).")
+                    print("Started Solar Eclipse (50% roll at 4:30 Eastern).")
 
-            # At 19:30 EST: 50% chance to start Blood Moon (night: 19:30 -> 4:30 EST next day)
+            # At 19:30 Eastern: 50% chance to start Blood Moon (night: 19:30 -> 4:30 Eastern next day)
             if (now_est.hour, now_est.minute) == CELESTIAL_NIGHT_START_EST and today_est != last_blood_trigger_date:
                 last_blood_trigger_date = today_est
                 if not get_active_event_by_type("blood_moon") and random.random() < CELESTIAL_TRIGGER_CHANCE:
@@ -18396,7 +18387,7 @@ async def celestial_event_check():
                             }, 0)
                         except Exception as e:
                             print(f"Error sending Blood Moon start to {guild.name}: {e}")
-                    print("Started Blood Moon (50% roll at 19:30 EST).")
+                    print("Started Blood Moon (50% roll at 19:30 Eastern).")
 
             await asyncio.sleep(60)
         except Exception as e:
