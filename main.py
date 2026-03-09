@@ -293,19 +293,21 @@ async def safe_interaction_response(interaction: discord.Interaction,
     try:
         return await response_func(*args, **kwargs)
     except discord.errors.InteractionResponded:
-        # Already responded, try followup instead if applicable
+        # Already responded (e.g. deferred), use followup so the user never sees "This interaction failed"
         if hasattr(interaction, 'followup'):
             try:
                 if 'send_message' in str(response_func) or 'send' in str(response_func):
-                    # Extract message content from args/kwargs
                     content = args[0] if args else kwargs.get('content', error_message)
                     ephemeral = kwargs.get('ephemeral', True)
-                    return await interaction.followup.send(content, ephemeral=ephemeral)
+                    send_kw = {"content": content, "ephemeral": ephemeral}
+                    for k in ("embed", "embeds", "view"):
+                        if k in kwargs and kwargs[k] is not None:
+                            send_kw[k] = kwargs[k]
+                    return await interaction.followup.send(**send_kw)
                 elif 'edit_message' in str(response_func) or 'edit' in str(response_func):
-                    message_id = interaction.message.id if hasattr(interaction, 'message') else None
-                    if message_id:
-                        return await interaction.followup.edit_message(message_id, *args[1:], **kwargs)
-            except:
+                    if hasattr(interaction, 'message') and interaction.message:
+                        return await interaction.followup.edit_message(interaction.message.id, *args[1:], **kwargs)
+            except Exception:
                 pass
     except discord.errors.NotFound:
         # Interaction expired
@@ -324,7 +326,11 @@ async def safe_interaction_response(interaction: discord.Interaction,
 
 # Helper function to safely defer an interaction
 async def safe_defer(interaction: discord.Interaction, ephemeral: bool = False):
-    """Safely defer an interaction, handling all possible errors. Call this FIRST in every button/callback to avoid 'This interaction failed.'"""
+    """Safely defer an interaction, handling all possible errors.
+    Call this FIRST (before any other await or blocking work) in every slash command and
+    button/select/modal callback that does any async work (DB, API, etc.), then use
+    interaction.followup for all replies. Discord requires a response within 3 seconds
+    or the user sees 'This interaction failed.' Deferring immediately gives 15 minutes."""
     try:
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=ephemeral)
@@ -10240,10 +10246,9 @@ def _water_critical_path(user_id: int) -> dict:
         increment_tree_rings(user_id, 10)
         tree_rings_awarded = 10
 
-    water_label = "💧💧 **Double Water!** " if not is_first_water_today else ""
     daily_bonus_percent = (daily_bonus_multiplier - 1.0) * 100
     message = (
-        f"{water_label}You've been rewarded with **{format_money(money_reward)}**. "
+        f"You've been rewarded with **{format_money(money_reward)}**. "
         f"Your streak is **{consecutive_days}**! (+{daily_bonus_percent:.1f}% money)"
     )
     if tree_rings_awarded > 0:
@@ -10456,16 +10461,23 @@ async def stats(interaction: discord.Interaction):
                 member_for_sync = await interaction.guild.fetch_member(interaction.user.id)
         except Exception:
             pass
-        await asyncio.to_thread(sync_premium_tier_from_member, member_for_sync)
-        await asyncio.to_thread(sync_server_booster_from_member, member_for_sync)
-        await asyncio.to_thread(sync_server_tag_from_member, member_for_sync)
-        await asyncio.to_thread(sync_beta_tester_from_member, member_for_sync)
-        if interaction.guild:
-            await sync_gthr_tag_from_api(interaction.client, interaction.guild.id, interaction.user.id)
         user_id = interaction.user.id
-        doc = await asyncio.to_thread(get_user_dossier, user_id)
-        cd_data = await asyncio.to_thread(_cooldowns_data_sync, user_id)
-        full_data = await asyncio.to_thread(get_user_harvest_full_data, user_id) or {}
+        # Run all sync + data fetches in parallel for speed
+        sync_tasks = [
+            asyncio.to_thread(sync_premium_tier_from_member, member_for_sync),
+            asyncio.to_thread(sync_server_booster_from_member, member_for_sync),
+            asyncio.to_thread(sync_server_tag_from_member, member_for_sync),
+            asyncio.to_thread(sync_beta_tester_from_member, member_for_sync),
+            asyncio.to_thread(get_user_dossier, user_id),
+            asyncio.to_thread(_cooldowns_data_sync, user_id),
+            asyncio.to_thread(get_user_harvest_full_data, user_id),
+        ]
+        if interaction.guild:
+            sync_tasks.append(sync_gthr_tag_from_api(interaction.client, interaction.guild.id, user_id))
+        results = await asyncio.gather(*sync_tasks)
+        doc = results[4]
+        cd_data = results[5]
+        full_data = results[6] or {}
 
         # --- Profile (from userstats) ---
         user_balance = doc["balance"]
@@ -12656,54 +12668,57 @@ class DailyShopBuyButton(discord.ui.Button):
         super().__init__(style=discord.ButtonStyle.primary, label=label, custom_id=f"dailyshop_buy_{item_id}")
 
     async def callback(self, interaction: discord.Interaction):
+        # Defer FIRST so we have time for DB work and never hit "This interaction failed"
+        if not await safe_defer(interaction, ephemeral=True):
+            return
         item_id = self.custom_id.replace("dailyshop_buy_", "")
         if item_id not in DAILY_SHOP_ITEMS:
-            await safe_interaction_response(interaction, interaction.response.send_message,
+            await safe_interaction_response(interaction, interaction.followup.send,
                 "❌ That item is no longer available.", ephemeral=True)
             return
         user_id = interaction.user.id
-        # Use the date when this shop was opened (stored on the view), not "now" - so buying works even across midnight EST or from an open message
         date_est = getattr(self.view, "date_est", None) or _get_date_est()
-        if has_shop_item(user_id, item_id):
-            await safe_interaction_response(interaction, interaction.response.send_message,
+        # Run all sync DB checks in thread so event loop stays responsive
+        has_it = await asyncio.to_thread(has_shop_item, user_id, item_id)
+        if has_it:
+            await safe_interaction_response(interaction, interaction.followup.send,
                 f"❌ You already own **{DAILY_SHOP_ITEMS[item_id]['name']}**.", ephemeral=True)
             return
-        offerings = get_daily_shop_offerings(date_est, user_id)
+        offerings = await asyncio.to_thread(get_daily_shop_offerings, date_est, user_id)
         if item_id not in offerings:
-            await safe_interaction_response(interaction, interaction.response.send_message,
+            await safe_interaction_response(interaction, interaction.followup.send,
                 f"❌ **{DAILY_SHOP_ITEMS[item_id]['name']}** is not in today's shop.", ephemeral=True)
             return
-        purchase_count, last_date = get_user_daily_shop_purchases(user_id)
+        purchase_count, last_date = await asyncio.to_thread(get_user_daily_shop_purchases, user_id)
         if last_date != date_est:
             purchase_count = 0
-        max_purchases = get_effective_daily_shop_max_purchases(user_id)
+        max_purchases = await asyncio.to_thread(get_effective_daily_shop_max_purchases, user_id)
         if purchase_count >= max_purchases:
-            await safe_interaction_response(interaction, interaction.response.send_message,
+            await safe_interaction_response(interaction, interaction.followup.send,
                 f"❌ You've already bought **{max_purchases}** items today. Come back at midnight EST!", ephemeral=True)
             return
         info = DAILY_SHOP_ITEMS[item_id]
         cost = info["cost"]
-        tree_rings = get_user_tree_rings(user_id)
+        tree_rings = await asyncio.to_thread(get_user_tree_rings, user_id)
         if tree_rings < cost:
-            await safe_interaction_response(interaction, interaction.response.send_message,
+            await safe_interaction_response(interaction, interaction.followup.send,
                 f"❌ You need **{cost}** <:TreeRing:1474244868288282817> Tree Rings for **{info['name']}**, but you have **{tree_rings}**.", ephemeral=True)
             return
-        success = purchase_daily_shop_item(user_id, item_id, cost, date_est)
+        success = await asyncio.to_thread(purchase_daily_shop_item, user_id, item_id, cost, date_est)
         if not success:
-            await safe_interaction_response(interaction, interaction.response.send_message,
+            await safe_interaction_response(interaction, interaction.followup.send,
                 "❌ Purchase failed (you may already own this item). Try again.", ephemeral=True)
             return
-        await safe_interaction_response(interaction, interaction.response.defer, ephemeral=True)
-        new_offerings = get_daily_shop_offerings(date_est, user_id)
+        new_offerings = await asyncio.to_thread(get_daily_shop_offerings, date_est, user_id)
         if new_offerings:
-            new_embed, new_view = _build_daily_shop_embed_and_view(new_offerings, date_est, user_id)
+            new_embed, new_view = await asyncio.to_thread(_build_daily_shop_embed_and_view, new_offerings, date_est, user_id)
             try:
                 await interaction.message.edit(embed=new_embed, view=new_view)
             except Exception:
                 pass
         else:
             tree_ring_emoji = "<:TreeRing:1474244868288282817>"
-            tree_rings = get_user_tree_rings(user_id)
+            tree_rings = await asyncio.to_thread(get_user_tree_rings, user_id)
             done_embed = discord.Embed(
                 title="🛒 Daily Shop",
                 description=f"You've bought everything available for you today! You own all items currently on offer.\n\n{tree_ring_emoji} Your Tree Rings: **{tree_rings}**",
@@ -12761,9 +12776,10 @@ class DailyShopInventoryButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         try:
+            if not await safe_defer(interaction, ephemeral=True):
+                return
             user_id = interaction.user.id
-            inv = get_user_shop_inventory(user_id)
-            # If no items, send a simple single embed
+            inv = await asyncio.to_thread(get_user_shop_inventory, user_id)
             if not inv:
                 embed = discord.Embed(
                     title="🛒 Your Shop Inventory",
@@ -12776,7 +12792,7 @@ class DailyShopInventoryButton(discord.ui.Button):
                     inline=False,
                 )
                 await safe_interaction_response(
-                    interaction, interaction.response.send_message, embed=embed, ephemeral=True)
+                    interaction, interaction.followup.send, embed=embed, ephemeral=True)
                 return
 
             chunks = _format_shop_inventory_field(inv)
@@ -12793,14 +12809,14 @@ class DailyShopInventoryButton(discord.ui.Button):
 
             if len(embeds) == 1:
                 await safe_interaction_response(
-                    interaction, interaction.response.send_message, embed=embeds[0], ephemeral=True)
+                    interaction, interaction.followup.send, embed=embeds[0], ephemeral=True)
             else:
                 await safe_interaction_response(
-                    interaction, interaction.response.send_message, embeds=embeds, ephemeral=True)
+                    interaction, interaction.followup.send, embeds=embeds, ephemeral=True)
         except Exception as e:
             traceback.print_exc()
             print(f"Error in dailyshop Inventory button: {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 @bot.tree.command(name="dailyshop", description="Open the Daily Shop or view your inventory")
@@ -12998,8 +13014,8 @@ async def almanac(interaction: discord.Interaction, section: app_commands.Choice
         if not await safe_defer(interaction, ephemeral=True):
             return
         user_id = interaction.user.id
-        # Single DB read for almanac; view caches it so prev/next never hit DB
-        almanac_entries = get_user_almanac_entries(user_id)
+        # Single DB read in thread; view caches it so prev/next never hit DB
+        almanac_entries = await asyncio.to_thread(get_user_almanac_entries, user_id)
         section_map = {"flowers": "Flower", "fruits": "Fruit", "vegetables": "Vegetable"}
         choice = section.value if section else "flowers"
         section_cat = section_map.get(choice, "Flower")
@@ -13205,7 +13221,7 @@ async def gear(interaction: discord.Interaction):
         
         user_id = interaction.user.id
         view = BasketUpgradeView(user_id, interaction.guild)
-        embed = view.create_embed()
+        embed = await asyncio.to_thread(view.create_embed)
         
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
     except Exception as e:
@@ -13459,7 +13475,7 @@ async def orchard(interaction: discord.Interaction):
         
         user_id = interaction.user.id
         view = HarvestUpgradeView(user_id, interaction.guild)
-        embed = view.create_embed()
+        embed = await asyncio.to_thread(view.create_embed)
         
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
     except Exception as e:
@@ -13484,6 +13500,8 @@ class ImbueView(discord.ui.View):
         self.channel = channel  # For public announcement
         self.user_name = user_name
         self.cost = IMBUE_HOE_COST if tool_type == "hoe" else IMBUE_TRACTOR_COST
+        # Guard: only one Replace can post to #imbue/#rares (prevents double-click or duplicate delivery)
+        self._replace_done = False
         # First-ever roll: user had no imbuement — cannot "keep" nothing; hide only "Keep Current"
         if self.current_enchant is None:
             for child in list(self.children):
@@ -13491,8 +13509,8 @@ class ImbueView(discord.ui.View):
                     self.remove_item(child)
                     break
 
-    def _build_embed(self) -> discord.Embed:
-        """Build the ephemeral imbuement choice embed."""
+    def _build_embed(self, balance_override: float | None = None) -> discord.Embed:
+        """Build the ephemeral imbuement choice embed. balance_override avoids blocking DB call when called from async."""
         type_label = "GATHER" if self.tool_type == "hoe" else "HARVEST"
         rarity_color = RARITY_COLORS.get(self.rolled_enchant["rarity"], 0x808080)
         embed = discord.Embed(
@@ -13528,8 +13546,8 @@ class ImbueView(discord.ui.View):
             current_block = "**NONE**"
         embed.add_field(name="Current Imbuement", value=current_block, inline=False)
 
-        # Footer with balance and cost
-        balance = get_user_balance(self.user_id)
+        # Footer with balance and cost (use override when provided to avoid blocking)
+        balance = balance_override if balance_override is not None else get_user_balance(self.user_id)
         embed.set_footer(text=f"Balance: ${balance:,.2f}     |     Cost/Imbuement: ${self.cost:,.0f}")
         return embed
 
@@ -13554,33 +13572,46 @@ class ImbueView(discord.ui.View):
 
     @discord.ui.button(label="Replace", style=discord.ButtonStyle.success, emoji="\u2705")
     async def replace_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Defer FIRST so we never hit "This interaction failed" (3s limit)
+        if not await safe_defer(interaction, ephemeral=True):
+            return
         if interaction.user.id != self.user_id:
-            await safe_interaction_response(interaction, interaction.response.send_message,
+            await safe_interaction_response(interaction, interaction.followup.send,
                 "\u274c This isn't your imbuement menu!", ephemeral=True)
             return
 
-        # Save the new imbuement
-        if self.tool_type == "hoe":
-            set_user_hoe_attunement(self.user_id, self.rolled_enchant)
-        else:
-            set_user_tractor_attunement(self.user_id, self.rolled_enchant)
+        # Prevent duplicate announcement/rares from double-click or duplicate interaction
+        if getattr(self, "_replace_done", False):
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "This choice was already applied.", ephemeral=True)
+            return
+        self._replace_done = True
 
-        # Disable all buttons
+        # Save the new imbuement (run in thread so event loop stays responsive)
+        if self.tool_type == "hoe":
+            await asyncio.to_thread(set_user_hoe_attunement, self.user_id, self.rolled_enchant)
+        else:
+            await asyncio.to_thread(set_user_tractor_attunement, self.user_id, self.rolled_enchant)
+
+        # Disable all buttons so UI reflects done state
         for child in self.children:
             child.disabled = True
 
-        # Update the ephemeral message
+        # Update the message (use followup since we deferred)
         confirm_embed = discord.Embed(
             title="\u2705 Imbuement Replaced!",
             description=f"Your {self.tool_type} has been enchanted with **{self.rolled_enchant['name']}**!",
             color=discord.Color.green(),
         )
-        await safe_interaction_response(interaction, interaction.response.edit_message, embed=confirm_embed, view=self)
+        try:
+            await interaction.followup.edit_message(interaction.message.id, embed=confirm_embed, view=self)
+        except Exception as e:
+            print(f"Error editing imbue Replace message: {e}")
 
-        # Send public announcement
+        # Send public announcement once
         await self._send_public_announcement(self.rolled_enchant)
 
-        # Auto-log to #rares when user keeps a netherite+ imbue (Replace = keeping this new one)
+        # Auto-log to #rares when user keeps a netherite+ imbue (Replace = keeping this new one), once only
         guild = getattr(interaction, "guild", None)
         if guild and self.rolled_enchant.get("rarity") in IMBUE_RARES_RARITIES:
             asyncio.create_task(_post_rares_imbue(guild, interaction.user, self.rolled_enchant, self.tool_type))
@@ -13588,7 +13619,7 @@ class ImbueView(discord.ui.View):
         # Check for hidden achievement: High Reroller (NETHERITE, LUMINITE, CELESTIAL, or SECRET)
         high_rarities = {"NETHERITE", "LUMINITE", "CELESTIAL", "SECRET"}
         if self.rolled_enchant.get("rarity") in high_rarities:
-            if unlock_hidden_achievement(self.user_id, "high_reroller"):
+            if await asyncio.to_thread(unlock_hidden_achievement, self.user_id, "high_reroller"):
                 try:
                     await interaction.followup.send(
                         embed=discord.Embed(
@@ -13605,8 +13636,11 @@ class ImbueView(discord.ui.View):
 
     @discord.ui.button(label="Keep Current", style=discord.ButtonStyle.secondary, emoji="\U0001f6e1\ufe0f")
     async def keep_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Defer FIRST so we never hit "This interaction failed"
+        if not await safe_defer(interaction, ephemeral=True):
+            return
         if interaction.user.id != self.user_id:
-            await safe_interaction_response(interaction, interaction.response.send_message,
+            await safe_interaction_response(interaction, interaction.followup.send,
                 "\u274c This isn't your imbuement menu!", ephemeral=True)
             return
 
@@ -13619,37 +13653,45 @@ class ImbueView(discord.ui.View):
             description="You kept your current imbuement.",
             color=discord.Color.light_grey(),
         )
-        await safe_interaction_response(interaction, interaction.response.edit_message, embed=keep_embed, view=self)
+        try:
+            await interaction.followup.edit_message(interaction.message.id, embed=keep_embed, view=self)
+        except Exception as e:
+            print(f"Error editing imbue Keep message: {e}")
 
         self.stop()
 
     @discord.ui.button(label="Recast", style=discord.ButtonStyle.primary, emoji="\U0001f504")
     async def recast_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Defer FIRST so we never hit "This interaction failed"
+        if not await safe_defer(interaction, ephemeral=True):
+            return
         if interaction.user.id != self.user_id:
-            await safe_interaction_response(interaction, interaction.response.send_message,
+            await safe_interaction_response(interaction, interaction.followup.send,
                 "\u274c This isn't your imbuement menu!", ephemeral=True)
             return
 
-        # Atomic deduction: check + deduct in one DB call (no race condition)
-        success, new_balance = atomic_deduct_balance(self.user_id, self.cost)
+        # Atomic deduction in thread so event loop stays responsive
+        success, new_balance = await asyncio.to_thread(atomic_deduct_balance, self.user_id, self.cost)
         if not success:
-            await safe_interaction_response(interaction, interaction.response.send_message,
+            await safe_interaction_response(interaction, interaction.followup.send,
                 f"\u274c You can't afford another recast! You need **${self.cost:,.0f}** but only have **${new_balance:,.2f}**.",
                 ephemeral=True)
             return
 
         try:
-            # Roll new imbuement (exclude current so you can't roll the same one)
-            self.rolled_enchant = roll_attunement(self.tool_type, self.user_id, self.current_enchant)
-
-            # Update embed
-            embed = self._build_embed()
-            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+            # Roll new imbuement in thread (exclude current so you can't roll the same one)
+            self.rolled_enchant = await asyncio.to_thread(roll_attunement, self.tool_type, self.user_id, self.current_enchant)
+            # Use new_balance for footer so we don't block on get_user_balance
+            embed = self._build_embed(balance_override=new_balance)
+            try:
+                await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self)
+            except Exception as edit_e:
+                print(f"Error editing imbue Recast message: {edit_e}")
         except Exception as e:
             # Refund if we took money but failed to update the message
-            refund_balance(self.user_id, self.cost)
+            await asyncio.to_thread(refund_balance, self.user_id, self.cost)
             print(f"Error in recast_button (refunded ${self.cost:,.0f} to {self.user_id}): {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message,
+            await safe_interaction_response(interaction, interaction.followup.send,
                 "\u274c An error occurred and your money has been refunded. Please try again.", ephemeral=True)
 
     async def on_timeout(self):
@@ -13694,16 +13736,16 @@ async def imbue(interaction: discord.Interaction, tool: app_commands.Choice[str]
                 return
 
             try:
-                # Get current imbuement
+                # Get current imbuement (in thread so event loop stays responsive)
                 if tool_type == "hoe":
-                    current_enchant = get_user_hoe_attunement(user_id)
+                    current_enchant = await asyncio.to_thread(get_user_hoe_attunement, user_id)
                 else:
-                    current_enchant = get_user_tractor_attunement(user_id)
+                    current_enchant = await asyncio.to_thread(get_user_tractor_attunement, user_id)
 
-                # Roll a new imbuement (exclude current so you can't roll the same one)
-                rolled_enchant = roll_attunement(tool_type, user_id, current_enchant)
+                # Roll a new imbuement in thread (exclude current so you can't roll the same one)
+                rolled_enchant = await asyncio.to_thread(roll_attunement, tool_type, user_id, current_enchant)
 
-                # Create the view and embed
+                # Create the view and embed (use new_balance so _build_embed doesn't block on DB)
                 view = ImbueView(
                     user_id=user_id,
                     tool_type=tool_type,
@@ -13713,12 +13755,12 @@ async def imbue(interaction: discord.Interaction, tool: app_commands.Choice[str]
                     user_name=interaction.user.name,
                     timeout=60,
                 )
-                embed = view._build_embed()
+                embed = view._build_embed(balance_override=new_balance)
 
                 await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view, ephemeral=True)
             except Exception as inner_e:
-                # Refund if we took money but failed to show the imbue menu
-                refund_balance(user_id, cost)
+                # Refund if we took money but failed to show the imbue menu (in thread)
+                await asyncio.to_thread(refund_balance, user_id, cost)
                 print(f"Error in imbue command (refunded ${cost:,.0f} to {user_id}): {inner_e}")
                 await safe_interaction_response(interaction, interaction.followup.send,
                     "\u274c An error occurred and your money has been refunded. Please try again.", ephemeral=True)
@@ -14069,9 +14111,9 @@ async def hire(interaction: discord.Interaction):
             return
         
         user_id = interaction.user.id
-        sync_premium_tier_from_member(interaction.user)
+        await asyncio.to_thread(sync_premium_tier_from_member, interaction.user)
         view = HireView(user_id)
-        embed = view.create_embed(0)  # Start on page 0 (Gardener #1)
+        embed = await asyncio.to_thread(view.create_embed, 0)  # Start on page 0 (Gardener #1)
         view.update_buttons()
         
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
@@ -14254,9 +14296,8 @@ async def gpu(interaction: discord.Interaction):
             return
         
         user_id = interaction.user.id
-        
         view = GpuView(user_id)
-        embed = view.create_embed(0)  # Start on page 0 (GPU 1)
+        embed = await asyncio.to_thread(view.create_embed, 0)  # Start on page 0 (GPU 1)
         view.update_buttons()
         
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
@@ -15013,21 +15054,15 @@ async def reset(interaction: discord.Interaction, type: str):
             return
         
         if type == "cooldowns":
-            # Get all members in the guild
             guild = interaction.guild
             if not guild:
                 await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: Could not get guild information.", ephemeral=True)
                 return
-            
-            members = guild.members
-            reset_count = 0
-            
-            # Reset cooldowns for all members
-            for member in members:
-                if not member.bot:  # Skip bots
-                    reset_user_cooldowns(member.id)
-                    reset_count += 1
-            
+            user_ids = [m.id for m in guild.members if not m.bot]
+            # Run all resets in thread so event loop stays responsive
+            await asyncio.to_thread(lambda: [reset_user_cooldowns(uid) for uid in user_ids])
+            reset_count = len(user_ids)
+
             embed = discord.Embed(
                 title="✅ Cooldowns Reset",
                 description=f"Reset cooldowns for **{reset_count}** users.",
@@ -15037,12 +15072,11 @@ async def reset(interaction: discord.Interaction, type: str):
             print(f"Admin {interaction.user.name} reset cooldowns for {reset_count} users")
         
         elif type == "cryptoprices":
-            # Reset crypto prices to base prices
             base_prices = {coin["symbol"]: coin["base_price"] for coin in CRYPTO_COINS}
-            update_crypto_prices(base_prices)
-            
-            # Also reset price history
-            initialize_crypto_history()
+            def _reset_crypto():
+                update_crypto_prices(base_prices)
+                initialize_crypto_history()
+            await asyncio.to_thread(_reset_crypto)
             
             embed = discord.Embed(
                 title="✅ Crypto Prices Reset",
@@ -18056,31 +18090,35 @@ async def hourly_event_check():
                     wait_seconds = duration_seconds - 5
                     await asyncio.sleep(wait_seconds)
                     
-                    # Build event dict for end embed
-                    event = {
-                        "event_id": event_id,
-                        "event_type": "hourly",
-                        "event_name": event_info["name"],
-                        "start_time": start_time,
-                        "end_time": end_time,
-                        "effects": {"event_id": event_info["id"]}
-                    }
-                    
-                    # Send end embed BEFORE clearing so a crash during send doesn't lose the end embed (cleanup can retry)
-                    for guild in bot.guilds:
-                        try:
-                            await send_event_end_embed(guild, event)
-                            print(f"Sent end embed to #events channel in {guild.name}")
-                        except Exception as e:
-                            print(f"Error sending end embed to {guild.name}: {e}")
-                    clear_event(event_id)
-                    clear_expired_events()
-                    
-                    print(f"Sent end message for hourly event: {event_info['name']} (5 seconds remaining)")
-                    
-                    # Wait for remaining 5 seconds until event actually ends
-                    await asyncio.sleep(5)
-                    print(f"Ended hourly event: {event_info['name']}")
+                    # If event was ended early (e.g. by Blood Moon/Solar Eclipse), don't send end embed again
+                    still_active = get_active_event_by_type("hourly")
+                    if not still_active or still_active.get("event_id") != event_id:
+                        clear_event(event_id)
+                        clear_expired_events()
+                        print(f"Skipping hourly end embed - event was already ended (e.g. by celestial).")
+                    else:
+                        # Build event dict for end embed
+                        event = {
+                            "event_id": event_id,
+                            "event_type": "hourly",
+                            "event_name": event_info["name"],
+                            "start_time": start_time,
+                            "end_time": end_time,
+                            "effects": {"event_id": event_info["id"]}
+                        }
+                        # Send end embed BEFORE clearing so a crash during send doesn't lose the end embed (cleanup can retry)
+                        for guild in bot.guilds:
+                            try:
+                                await send_event_end_embed(guild, event)
+                                print(f"Sent end embed to #events channel in {guild.name}")
+                            except Exception as e:
+                                print(f"Error sending end embed to {guild.name}: {e}")
+                        clear_event(event_id)
+                        clear_expired_events()
+                        print(f"Sent end message for hourly event: {event_info['name']} (5 seconds remaining)")
+                        # Wait for remaining 5 seconds until event actually ends
+                        await asyncio.sleep(5)
+                        print(f"Ended hourly event: {event_info['name']}")
                 else:
                     # No new event this iteration: send end embeds for expired and clear
                     await _send_end_embeds_for_expired_events()
@@ -18176,31 +18214,35 @@ async def daily_event_check():
                     wait_seconds = duration_seconds - 5
                     await asyncio.sleep(wait_seconds)
                     
-                    # Build event dict for end embed
-                    event = {
-                        "event_id": event_id,
-                        "event_type": "daily",
-                        "event_name": event_info["name"],
-                        "start_time": start_time,
-                        "end_time": end_time,
-                        "effects": {"event_id": event_info["id"]}
-                    }
-                    
-                    # Send end embed BEFORE clearing so a crash during send doesn't lose the end embed (cleanup can retry)
-                    for guild in bot.guilds:
-                        try:
-                            await send_event_end_embed(guild, event)
-                            print(f"Sent end embed to #events channel in {guild.name}")
-                        except Exception as e:
-                            print(f"Error sending end embed to {guild.name}: {e}")
-                    clear_event(event_id)
-                    clear_expired_events()
-                    
-                    print(f"Sent end message for daily event: {event_info['name']} (5 seconds remaining)")
-                    
-                    # Wait for remaining 5 seconds until event actually ends
-                    await asyncio.sleep(5)
-                    print(f"Ended daily event: {event_info['name']}")
+                    # If event was ended early (e.g. by Blood Moon/Solar Eclipse), don't send end embed again
+                    still_active = get_active_event_by_type("daily")
+                    if not still_active or still_active.get("event_id") != event_id:
+                        clear_event(event_id)
+                        clear_expired_events()
+                        print(f"Skipping daily end embed - event was already ended (e.g. by celestial).")
+                    else:
+                        # Build event dict for end embed
+                        event = {
+                            "event_id": event_id,
+                            "event_type": "daily",
+                            "event_name": event_info["name"],
+                            "start_time": start_time,
+                            "end_time": end_time,
+                            "effects": {"event_id": event_info["id"]}
+                        }
+                        # Send end embed BEFORE clearing so a crash during send doesn't lose the end embed (cleanup can retry)
+                        for guild in bot.guilds:
+                            try:
+                                await send_event_end_embed(guild, event)
+                                print(f"Sent end embed to #events channel in {guild.name}")
+                            except Exception as e:
+                                print(f"Error sending end embed to {guild.name}: {e}")
+                        clear_event(event_id)
+                        clear_expired_events()
+                        print(f"Sent end message for daily event: {event_info['name']} (5 seconds remaining)")
+                        # Wait for remaining 5 seconds until event actually ends
+                        await asyncio.sleep(5)
+                        print(f"Ended daily event: {event_info['name']}")
                 else:
                     # No new event this iteration: send end embeds for expired and clear
                     await _send_end_embeds_for_expired_events()
