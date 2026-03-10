@@ -11925,18 +11925,18 @@ class BloomConfirmView(discord.ui.View):
             color=discord.Color.gold()
         )
         success_embed.add_field(name="🌲 Bloom Rank", value=f"**{old_rank}** → **{new_rank}**", inline=False)
+
+        multiplier = get_bloom_multiplier(user_id)
+        if tree_rings > 0:
+            tree_rings_value = f"**{tree_rings}** (+{(multiplier - 1.0) * 100:.1f}%)"
+        else:
+            tree_rings_value = f"**{tree_rings}**"
+
         success_embed.add_field(
-            name="<:TreeRing:1474244868288282817> Tree Rings (kept)",
-            value=f"**{tree_rings}** Tree Rings — you keep these through bloom!",
+            name="<:TreeRing:1474244868288282817> Tree Rings",
+            value=tree_rings_value,
             inline=False,
         )
-        if tree_rings > 0:
-            multiplier = get_bloom_multiplier(user_id)
-            success_embed.add_field(
-                name="💰 Money Boost (from Tree Rings)",
-                value=f"+{(multiplier - 1.0) * 100:.1f}% on all earnings *(from your kept Tree Rings)*",
-                inline=False,
-            )
         success_embed.add_field(
             name="🗺️ Reset, PLANTER X → PLANTER I",
             value="All unlocked areas have also been reset.",
