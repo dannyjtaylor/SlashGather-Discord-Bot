@@ -7602,6 +7602,7 @@ async def mongodb_keepalive_task():
 
 
 
+
 # on ready
 @bot.event
 async def on_ready():
@@ -10427,8 +10428,6 @@ async def gather(interaction: discord.Interaction):
                 value=f"**~**\n{interaction.user.name} - **{month_name.upper()}**",
                 inline=False,
             )
-            embed.add_field(name="\U0001f4b0 **TOTAL**", value=f"**{format_money(gather_result['value'])}**", inline=True)
-            embed.add_field(name="\U0001f4b5 **NEW BALANCE**", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
         else:
             desc_prefix = f"{rip_emoji} " if rip_emoji else ""
             embed = discord.Embed(
@@ -10511,8 +10510,11 @@ async def gather(interaction: discord.Interaction):
                 value=f"**~**\n{interaction.user.name} - **{month_name.upper()}**",
                 inline=False,
             )
-            embed.add_field(name="\U0001f4b0 **TOTAL**", value=f"**{format_money(gather_result['value'])}**", inline=True)
-            embed.add_field(name="\U0001f4b5 **NEW BALANCE**", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
+
+
+        # Always show TOTAL and NEW BALANCE, regardless of GAMER MULTI
+        embed.add_field(name="\U0001f4b0 **TOTAL**", value=f"**{format_money(gather_result['value'])}**", inline=True)
+        embed.add_field(name="\U0001f4b5 **NEW BALANCE**", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
 
         # === Send the response ASAP (with optional STEAL button) ===
         view = None
