@@ -10389,11 +10389,13 @@ async def gather(interaction: discord.Interaction):
             if total_count > 0:
                 item_boost_sources.append(("Black Shard", total_count))
 
+        # Resolve current hoe imbuement once for all embed variants
+        hoe_enc = gather_result.get("hoe_enchant") or (full_data.get("hoe_enchantment") if full_data else None)
+        hoe_name = hoe_enc.get("name", "Unknown") if hoe_enc else None
+        hoe_rarity = hoe_enc.get("rarity", "COMMON") if hoe_enc else None
+        hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]") if hoe_rarity else None
+
         if is_crit:
-            hoe_enc = gather_result.get('hoe_enchant')
-            hoe_name = hoe_enc.get("name", "Unknown") if hoe_enc else "Unknown"
-            hoe_rarity = hoe_enc.get("rarity", "COMMON") if hoe_enc else "COMMON"
-            hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]")
             pre_crit_value = gather_result['value'] / 2
             desc_prefix = f"{rip_emoji} " if rip_emoji else ""
             embed = discord.Embed(
@@ -10426,7 +10428,8 @@ async def gather(interaction: discord.Interaction):
                 embed.add_field(name="💧 **WATER STREAK MULTI**",
                     value=f"+{daily_bonus_percent:.2f}% - **+${gather_result['extra_money_from_daily']:,.2f}**", inline=False)
 
-            embed.add_field(name="\u2728 **IMBUEMENT**", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
+            if hoe_enc and hoe_name and hoe_rarity_display:
+                embed.add_field(name="\u2728 **IMBUEMENT**", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
             embed.add_field(name="\U0001f4a5 **CRITICAL MULTIPLIER**",
                 value=f"{format_money(pre_crit_value)} \u2192 **{format_money(gather_result['value'])}**", inline=False)
             if gather_result.get('extra_money_from_beta_tester', 0) > 0:
@@ -10497,7 +10500,6 @@ async def gather(interaction: discord.Interaction):
                 embed.add_field(name=f"**{(PREMIUM_DISPLAY.get(tier, 'Premium')).upper()}**",
                     value=f"+{premium_percent:.2f}% - **+${gather_result['extra_money_from_premium']:,.2f}**", inline=False)
 
-        # Temporary GAMER MULTI (+25% money) boost (now applied on top of either crit or normal embed)
         if gather_result.get("extra_money_from_gamer_multi", 0) > 0:
             gamer_multi_percent = (gather_result["gamer_multi_multiplier"] - 1.0) * 100
             embed.add_field(
@@ -10517,45 +10519,9 @@ async def gather(interaction: discord.Interaction):
                     inline=False
                 )
 
-            hoe_enc = gather_result.get('hoe_enchant')
-            if hoe_enc:
-                hoe_name = hoe_enc.get("name", "Unknown")
-                hoe_rarity = hoe_enc.get("rarity", "COMMON")
-                hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]")
-                embed.add_field(name="\u2728 **IMBUEMENT**", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
-
-            month_name = gather_result.get("month_name", "—")
-            embed.add_field(
-                name="\u200b",
-                value=f"**~**\n{interaction.user.name} - **{month_name.upper()}**",
-                inline=False,
-            )
-        # Temporary GAMER MULTI (+25% money) boost
-        if gather_result.get("extra_money_from_gamer_multi", 0) > 0:
-            gamer_multi_percent = (gather_result["gamer_multi_multiplier"] - 1.0) * 100
-            embed.add_field(
-                name="🎮 **GAMER MULTI**",
-                value=f"+{gamer_multi_percent:.2f}% - **+${gather_result['extra_money_from_gamer_multi']:,.2f}**",
-                inline=False,
-            )
-            if item_boost_sources:
-                extra_ns = gather_result.get("extra_money_from_nether_star", 0)
-                extra_bs = gather_result.get("extra_money_from_black_shard", 0)
-                total_extra = extra_ns + extra_bs
-                value_parts = [f"**+${total_extra:,.2f}**"] if total_extra > 0 else []
-                value_parts.append("\n".join(_format_item_boost_source(name, count) for name, count in item_boost_sources))
-                embed.add_field(
-                    name="📦 **ITEMS**",
-                    value="\n".join(value_parts),
-                    inline=False
-                )
-
-            hoe_enc = gather_result.get('hoe_enchant')
-            if hoe_enc:
-                hoe_name = hoe_enc.get("name", "Unknown")
-                hoe_rarity = hoe_enc.get("rarity", "COMMON")
-                hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]")
-                embed.add_field(name="\u2728 **IMBUEMENT**", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
+        # Always show the user's current hoe imbuement on /gather if present
+        if hoe_enc and hoe_name and hoe_rarity_display:
+            embed.add_field(name="\u2728 **IMBUEMENT**", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
 
             month_name = gather_result.get("month_name", "—")
             embed.add_field(
