@@ -10,6 +10,8 @@ from pymongo.server_api import ServerApi
 
 _client: Optional[MongoClient] = None
 _users_collection: Optional[Collection] = None
+# Lazily-initialized collections that share the same Mongo client
+_giveaways_collection: Optional[Collection] = None
 
 
 def _get_environment() -> str:
@@ -68,6 +70,23 @@ def _get_users_collection() -> Collection:
     )
     _users_collection = _client[db_name]["users"]
     return _users_collection
+
+
+def _get_giveaways_collection() -> Collection:
+    """Return the MongoDB collection used to store reaction-based giveaways."""
+    global _client, _giveaways_collection
+
+    # Ensure the Mongo client is initialized via the users collection helper
+    if _client is None:
+        _get_users_collection()
+
+    if _giveaways_collection is not None:
+        return _giveaways_collection
+
+    db_name = os.getenv("MONGODB_DB_NAME", "slashgather")
+    _giveaways_collection = _client[db_name]["giveaways"]
+    return _giveaways_collection
+
 
 
 def _ensure_user_document(user_id: int) -> None:
@@ -2091,6 +2110,83 @@ def add_shop_item_to_user(user_id: int, item_id: str, amount: int = 1) -> None:
     )
 
 
+def upsert_giveaway_record(
+    message_id: int,
+    channel_id: int,
+    guild_id: int,
+    end_at_ts: float,
+    prize_display: str,
+    prize_data: Dict,
+    num_winners: int,
+) -> None:
+    """
+    Create or update a persistent giveaway record so giveaways survive bot restarts.
+    Uses message_id as the primary key.
+    """
+    giveaways = _get_giveaways_collection()
+    giveaways.update_one(
+        {"_id": int(message_id)},
+        {
+            "$set": {
+                "channel_id": int(channel_id),
+                "guild_id": int(guild_id),
+                "end_at_ts": float(end_at_ts),
+                "prize_display": prize_display,
+                "prize_data": dict(prize_data or {}),
+                "num_winners": int(num_winners),
+                "resolved": False,
+                "updated_ts": time.time(),
+            },
+            "$setOnInsert": {
+                "created_ts": time.time(),
+            },
+        },
+        upsert=True,
+    )
+
+
+def mark_giveaway_resolved(message_id: int) -> None:
+    """Mark a giveaway as resolved so it will not be re-scheduled on restart."""
+    giveaways = _get_giveaways_collection()
+    giveaways.update_one(
+        {"_id": int(message_id)},
+        {
+            "$set": {
+                "resolved": True,
+                "resolved_ts": time.time(),
+            }
+        },
+    )
+
+
+def get_pending_giveaways() -> list[Dict]:
+    """
+    Return all giveaways that have not been marked resolved yet.
+    These are used on startup to re-schedule end tasks after a restart or deploy.
+    """
+    giveaways = _get_giveaways_collection()
+    cursor = giveaways.find({"resolved": False})
+    results: list[Dict] = []
+    for doc in cursor:
+        try:
+            results.append(
+                {
+                    "message_id": int(doc.get("_id")),
+                    "channel_id": int(doc.get("channel_id", 0)),
+                    "guild_id": int(doc.get("guild_id", 0)),
+                    "end_at_ts": float(doc.get("end_at_ts", 0.0)),
+                    "prize_display": doc.get("prize_display", ""),
+                    "prize_data": dict(doc.get("prize_data", {})),
+                    "num_winners": int(doc.get("num_winners", 1)),
+                }
+            )
+        except Exception:
+            # Skip malformed documents rather than letting a single bad record
+            # break recovery for all other giveaways.
+            continue
+    return results
+
+
 # Dayboost functions (24-hour temporary boosts from Nether Star/Black Shard)
 def add_dayboost(user_id: int, boost_type: str, duration_hours: float = 24.0) -> None:
     """Add a dayboost (temporary boost) to a user. boost_type should be 'nether_star' or 'black_shard'."""
@@ -3420,3 +3516,36 @@ def steal_apply_harvest(
         upsert=True,
     )
     return tree_rings
+
+
+# ---------------------------------------------------------------------------
+# JackPot pool
+# ---------------------------------------------------------------------------
+
+def get_jackpot_pool() -> dict:
+    """Return {"amount": float, "dodge_count": int} for the global jackpot pool."""
+    users = _get_users_collection()
+    doc = users.find_one({"_id": "jackpot_pool"})
+    if doc:
+        return {"amount": doc.get("amount", 0.0), "dodge_count": doc.get("dodge_count", 0)}
+    return {"amount": 0.0, "dodge_count": 0}
+
+
+def add_to_jackpot_pool(base_value: float) -> None:
+    """Atomically add base_value to the pool and increment dodge count."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": "jackpot_pool"},
+        {"$inc": {"amount": float(base_value), "dodge_count": 1}},
+        upsert=True,
+    )
+
+
+def claim_jackpot_pool() -> float:
+    """Claim the jackpot pool: return the amount and reset to zero."""
+    users = _get_users_collection()
+    doc = users.find_one_and_update(
+        {"_id": "jackpot_pool"},
+        {"$set": {"amount": 0.0, "dodge_count": 0}},
+    )
+    return doc.get("amount", 0.0) if doc else 0.0

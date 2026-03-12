@@ -159,6 +159,10 @@ from database import (
     wipe_guild_plants,
     wipe_guild_crypto,
     wipe_guild_all,
+    # Giveaway persistence
+    upsert_giveaway_record,
+    mark_giveaway_resolved,
+    get_pending_giveaways,
     _get_users_collection,
     get_user_achievement_level,
     set_user_achievement_level,
@@ -240,6 +244,9 @@ from database import (
     get_user_premium_tier,
     set_user_premium_tier,
     get_all_user_ids_with_premium_tier,
+    get_jackpot_pool,
+    add_to_jackpot_pool,
+    claim_jackpot_pool,
 )
 
 try:
@@ -278,6 +285,32 @@ intents.message_content = True
 intents.members = True
 intents.invites = True
 bot = commands.Bot(command_prefix='/', intents=intents)
+
+
+# ── Global error handler ────────────────────────────────────────────────────
+# Catches ANY unhandled exception in a slash command so the user never sees
+# Discord's generic "The application did not respond" / "This interaction failed".
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Last-resort handler – guarantees the interaction is acknowledged."""
+    # Unwrap the real error if wrapped
+    original = error.original if isinstance(error, app_commands.CommandInvokeError) else error
+
+    # Log full traceback for debugging
+    print(f"[GLOBAL ERROR] /{interaction.command.name if interaction.command else '?'} "
+          f"by {interaction.user} ({interaction.user.id}): {original}")
+    traceback.print_exception(type(original), original, original.__traceback__)
+
+    # Make sure Discord gets *some* response so the user doesn't see "interaction failed"
+    msg = "❌ Something went wrong. Please try again in a moment."
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(msg, ephemeral=True)
+        else:
+            await interaction.followup.send(msg, ephemeral=True)
+    except Exception:
+        pass  # Nothing more we can do – interaction may have fully expired
+
 
 # Global invite cache for tracking who invited whom
 _invite_cache = {}
@@ -725,6 +758,7 @@ RARITY_COLORS = {
     "LUMINITE":   0x7fdbda,  # light teal
     "CELESTIAL":  0x8a2be2,  # bright violet purple
     "SECRET":     0x000000,  # black
+    "JACKPOT":    0xFFD700,  # gold
 }
 
 # Custom emoji IDs from Discord CDN (format <:name:id> for display in messages)
@@ -737,8 +771,14 @@ RARITY_EMOJI = {
     "NETHERITE":   "<:IMBUE_N:1472431697642520576>",
     "LUMINITE":    "<:IMBUE_LUM:1477751680199164075>",
     "CELESTIAL":   "<:IMBUE_CE:1472431208859439295>",
-    "SECRET":      "<:IMBUE_SEC:1473395529554591848>"
+    "SECRET":      "<:IMBUE_SEC:1473395529554591848>",
+    "JACKPOT":     "<:IMBUE_JP:1481712787754319983>"
 }
+
+# JackPot system: every /gather and /harvest adds the raw item base_value to a global pool.
+# 1-in-2000 chance per manual gather/harvest to win the pool. Pool resets on win.
+JACKPOT_CHANCE = 0.0005  # 1/2000
+JACKPOT_EMOJI = "<:IMBUE_JP:1481712787754319983>"
 
 # Progress bar emojis for /gear, /orchard, /achievements (white = not filled, green = filled)
 PROGRESS_N = "<:PROGRESS_N:1477736801480474634>"  # white square
@@ -751,6 +791,7 @@ RIPENESS_IMBUE_TIER = {
     "Perfectly Ripe": "RARE", "Overripe": "UNCOMMON", "Spoiled": "COMMON",
     "Sproutling": "COMMON", "Budded": "COMMON", "Blooming": "UNCOMMON", "Full Bloom": "RARE", "Wilted": "COMMON",
     "Legendary": "LEGENDARY", "Netherite": "NETHERITE", "Luminite": "LUMINITE", "Celestial": "CELESTIAL", "Mikellion": "SECRET",
+    "JackPot": "JACKPOT",
 }
 
 def get_ripeness_imbue_emoji(ripeness_name: str) -> str:
@@ -1497,9 +1538,11 @@ def _pve_spawn_multiplier():
 SOLAR_ECLIPSE_TITLE = "A Solar Eclipse is happening!"
 SOLAR_ECLIPSE_DESCRIPTION = "A Solar Eclipse is happening!"
 SOLAR_ECLIPSE_FOOTER = "Wild animals and bosses are more common!"
+SOLAR_ECLIPSE_EVENT_NAME = "The Solar Eclipse"
 BLOOD_MOON_TITLE = "The Blood Moon is rising..."
 BLOOD_MOON_DESCRIPTION = "The Blood Moon is rising..."
 BLOOD_MOON_FOOTER = "Wild animals and bosses are more common!"
+BLOOD_MOON_EVENT_NAME = "The Blood Moon"
 SOLAR_ECLIPSE_COLOR = 0xFF8C00   # bright orange
 BLOOD_MOON_COLOR = 0xDC143C      # bright red (crimson, distinct from discord red)
 CELESTIAL_DAY_START_EST = (4, 30)   # 4:30 AM Eastern (Solar Eclipse start)
@@ -3055,6 +3098,11 @@ HIDDEN_ACHIEVEMENTS = {
         "description": "Defeat the Queen Bee",
         "boost": 0.025  # 2.5%
     },
+    "get_lucky": {
+        "name": "Get Lucky",
+        "description": "Forage for the JackPot",
+        "boost": 0.10  # 10%
+    },
     "the_roaring_knight_repelled": {
         "name": "Dess, Is That You?",
         "description": "Defeat The Roaring Knight",
@@ -3871,7 +3919,16 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     
     hourly_event = next((e for e in active_events if e["event_type"] == "hourly"), None)
     daily_event = next((e for e in active_events if e["event_type"] == "daily"), None)
-    
+
+    # === JACKPOT ROLL (manual player gathers only, not gardener) ===
+    is_jackpot = False
+    jackpot_pool_amount = 0.0
+    if apply_cooldown and random.random() < JACKPOT_CHANCE:
+        pool_amt = claim_jackpot_pool()
+        if pool_amt > 0:
+            is_jackpot = True
+            jackpot_pool_amount = pool_amt
+
     # Choose a random item, with event modifications
     items_to_choose = GATHERABLE_ITEMS.copy()
     weights = None
@@ -3910,8 +3967,15 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         item = random.choice(GATHERABLE_ITEMS)
     
     name = item["name"]
-    base_value = item["base_value"]
-    
+    raw_item_base = item["base_value"]
+
+    # Add raw base_value to jackpot pool for every manual gather (even if this IS the jackpot winner,
+    # we already claimed the pool above so this starts building the next one).
+    if apply_cooldown and not is_jackpot:
+        add_to_jackpot_pool(raw_item_base)
+
+    base_value = raw_item_base
+
     # Apply area multiplier (e.g. grove = 1.2x, marsh = 2x, etc.)
     base_value *= area_multiplier
     
@@ -4063,6 +4127,14 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
     base_final_value = final_value  # Base value after orchard/gear upgrades
 
+    # === JACKPOT OVERRIDE: pool amount replaces the normal base value ===
+    if is_jackpot:
+        name = "The JackPot"
+        item = {"name": "The JackPot", "category": "Flower", "base_value": 0}
+        ripeness = {"name": "JackPot", "multiplier": 1}
+        is_gmo = False
+        base_final_value = jackpot_pool_amount
+
     # Hoe imbuement: Prosperity (money bonus) and critical chance
     if full_data is not None:
         hoe_enchant = full_data.get("hoe_enchantment")
@@ -4185,6 +4257,8 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         "seasonal_multiplier": seasonal_multiplier,
         "seasonal_label": seasonal_label,
         "tree_ring_awarded": tree_ring_awarded,
+        "is_jackpot": is_jackpot,
+        "jackpot_pool_amount": jackpot_pool_amount,
     }
 
 async def perform_gather_for_user(user_id: int, apply_cooldown: bool = True, 
@@ -4282,6 +4356,7 @@ CUSTOM_ITEM_EMOJIS = {
     "Golden Apple": "<:goldenapple:1476645453415055657>",
     "Enchanted Golden Apple": "<a:enchantedgoldapple:1476645603931984014>",
     "Glowberry": "<:glowberry:1479154254576091136>",
+    "The JackPot": "<:IMBUE_JP:1481712787754319983>",
 }
 
 def get_item_display_emoji(item_name: str) -> str:
@@ -4355,6 +4430,7 @@ ITEM_DESCRIPTIONS = {
      "Glowberry": "Found in a lush cave, this berry can produce light!",
      "Fortnite Battle Pass 🌸": "You just WHAT out of your WHAT?",
      "Rainbow Eucalyptus 🌈": "A tree trunk painted with every color of the rainbow!",
+     "The JackPot": "Lucky, oh so lucky!",
 }
 
 #level of ripeness - FRUITS
@@ -7490,7 +7566,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.0.3"
+            name="running /gather on V1.0.4"
         )
     )
     try:
@@ -7510,6 +7586,49 @@ async def on_ready():
                     print(f"Guild sync failed for {guild.name}: {eg}")
     except Exception as e:
         print(f"Error syncing commands: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # Recover any giveaways that were active before a restart/deploy
+    try:
+        pending_giveaways = await asyncio.to_thread(get_pending_giveaways)
+        restored_count = 0
+        now_ts = time.time()
+        for g in pending_giveaways:
+            msg_id = g.get("message_id")
+            ch_id = g.get("channel_id")
+            guild_id = g.get("guild_id")
+            end_at_ts = g.get("end_at_ts", now_ts)
+            prize_display = g.get("prize_display", "")
+            prize_data = g.get("prize_data", {})
+            num_winners = g.get("num_winners", 1)
+
+            # Rebuild in-memory tracking so admin tooling (or future features)
+            # can see these, and schedule end tasks.
+            _active_giveaways[msg_id] = {
+                "channel_id": ch_id,
+                "guild_id": guild_id,
+                "end_at_ts": end_at_ts,
+                "prize_display": prize_display,
+                "prize_data": prize_data,
+                "num_winners": num_winners,
+            }
+            asyncio.create_task(
+                _giveaway_end_task(
+                    msg_id,
+                    ch_id,
+                    guild_id,
+                    end_at_ts,
+                    prize_display,
+                    prize_data,
+                    num_winners,
+                )
+            )
+            restored_count += 1
+        if restored_count:
+            print(f"Recovered {restored_count} active giveaway(s) from the database.")
+    except Exception as e:
+        print(f"Error while recovering giveaways on startup: {e}")
         import traceback
         traceback.print_exc()
 
@@ -7737,6 +7856,7 @@ _PLANT_RARES: dict[str, tuple[str, str]] = {
     "Luminite": ("LUMINITE", "LUMINITE"),
     "Celestial": ("CELESTIAL", "CELESTIAL"),
     "Mikellion": ("MIKELLION", "SECRET"),
+    "JackPot": ("JACKPOT", "JACKPOT"),
 }
 
 
@@ -8210,11 +8330,57 @@ class WildAnimalView(discord.ui.View):
         self.attackers: dict[int, int] = {}  # user_id -> hit count
         self.defeated = False
         self._lock = asyncio.Lock()
+        # For debounced embed updates (avoid hammering Discord when dozens spam the button)
+        self._dirty = False
+        self._last_hit_name: str | None = None
+        self._update_task: asyncio.Task | None = None
 
     def _hp_bar(self) -> str:
         filled = max(0, round((self.hp / self.max_hp) * 20))
         empty = 20 - filled
         return f"{'🟥' * filled}{'⬛' * empty}"
+
+    def _progress_embed(self) -> discord.Embed:
+        """Build the in-fight progress embed from current state."""
+        e = discord.Embed(
+            title=f"🚨 {self.animal['emoji']} Wild {self.animal['name']} Appeared! 🚨",
+            description=self.animal["description"],
+            color=self.animal["color"],
+        )
+        e.add_field(
+            name="HP",
+            value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}",
+            inline=False,
+        )
+        if self._last_hit_name:
+            e.add_field(
+                name="⚔️ Last Hit",
+                value=f"**{self._last_hit_name}**!",
+                inline=False,
+            )
+        e.set_footer(text="All commands are blocked until it's defeated")
+        return e
+
+    async def _debounced_update(self, message: discord.Message | None = None):
+        """Batch multiple hits into a single message edit after a short delay.
+
+        Hits always apply instantly to self.hp, but the embed is only edited
+        at most every PVE_EMBED_UPDATE_DEBOUNCE_SEC seconds to avoid visible lag
+        and rate-limit stalls when many users spam the button.
+        """
+        await asyncio.sleep(PVE_EMBED_UPDATE_DEBOUNCE_SEC)
+        async with self._lock:
+            if self.defeated or not self._dirty:
+                return
+            self._dirty = False
+        target = message or getattr(self, "message", None)
+        if not target:
+            return
+        try:
+            await target.edit(embed=self._progress_embed(), view=self)
+        except Exception:
+            # If this fails, we just drop the visual update; HP state is already correct.
+            pass
 
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -8266,19 +8432,12 @@ class WildAnimalView(discord.ui.View):
                 asyncio.create_task(
                     _pve_distribute_rewards(interaction, self.animal, dict(self.attackers), self.channel_id, self.area_multiplier, max_hp=self.max_hp))
                 return
-
-            progress_embed = discord.Embed(
-                title=f"🚨 {self.animal['emoji']} Wild {self.animal['name']} Appeared! 🚨",
-                description=self.animal["description"],
-                color=self.animal["color"])
-            progress_embed.add_field(
-                name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
-            progress_embed.add_field(
-                name="⚔️ Last Hit", value=f"**{interaction.user.display_name}**!", inline=False)
-            progress_embed.set_footer(text="All commands are blocked until it's defeated")
-
-            await safe_interaction_response(
-                interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+            # Non-lethal hit: mark view as dirty and schedule a debounced embed update.
+            self._last_hit_name = interaction.user.display_name
+            self._dirty = True
+            if self._update_task is None or self._update_task.done():
+                msg = getattr(interaction, "message", None)
+                self._update_task = asyncio.create_task(self._debounced_update(msg))
 
 
 # Reward display for Bullet Ant Swarm (used when swarm is fully defeated)
@@ -10074,10 +10233,45 @@ async def gather(interaction: discord.Interaction):
 
         # --- build embed (pure computation, no DB) ---
         is_crit = gather_result.get('is_critical_gather', False)
+        is_jackpot_gather = gather_result.get('is_jackpot', False)
         item_name = gather_result.get("name", "—")
         item_emoji = get_item_display_emoji(item_name)
         item_display = f"{item_name} {item_emoji}" if item_emoji and item_emoji not in item_name else item_name
         rip_emoji = get_ripeness_imbue_emoji(gather_result.get("ripeness", ""))
+
+        # === JACKPOT EMBED (completely replaces normal/crit embed) ===
+        if is_jackpot_gather:
+            embed = discord.Embed(
+                title=f"{JACKPOT_EMOJI} JACKPOT!",
+                description=(
+                    f"**{interaction.user.name}** hit **THE JACKPOT**!\n\n"
+                    f"The pool of **{format_money(gather_result.get('jackpot_pool_amount', 0))}** "
+                    f"in accumulated base values is yours!"
+                ),
+                color=discord.Color.from_str("#FF69B4")
+            )
+            embed.add_field(name="**POOL VALUE**", value=f"**{format_money(gather_result.get('jackpot_pool_amount', 0))}**", inline=True)
+            embed.add_field(name="**RIPENESS**", value="JackPot", inline=True)
+            embed.add_field(name="\U0001f4b0 Total Earned", value=f"**{format_money(gather_result['value'])}**", inline=True)
+            embed.add_field(name="\U0001f4b5 New Balance", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
+
+            # Send jackpot embed
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+
+            # Post to #rares
+            area_tag = "[" + channel_name.upper().replace("-", " ") + "]"
+            asyncio.create_task(_post_rares_plant(
+                interaction.guild, interaction.user, "GATHER",
+                "The JackPot", "Flower", gather_result["value"],
+                "JackPot", False, area_tag))
+
+            # Unlock hidden achievement
+            if unlock_hidden_achievement(user_id, "get_lucky"):
+                await send_hidden_achievement_notification(interaction, "get_lucky")
+
+            # Background: role assignment + achievements
+            asyncio.create_task(_gather_post_response(interaction, user_id, full_data, gather_result))
+            return
 
         # Daily shop / item boosts that affected this gather
         item_boost_sources = []
@@ -10119,9 +10313,9 @@ async def gather(interaction: discord.Interaction):
                     f"and got a **CRIT**!\n\n"
                     f"\U0001f4a5 **2X MONEY** \U0001f4a5"),
                 color=discord.Color.orange())
-            embed.add_field(name="Value", value=f"**{format_money(gather_result['base_value'])}**", inline=True)
-            embed.add_field(name="Ripeness", value=f"{rip_emoji} {gather_result['ripeness']}".strip(), inline=True)
-            embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
+            embed.add_field(name="**VALUE**", value=f"**{format_money(gather_result['base_value'])}**", inline=True)
+            embed.add_field(name="**RIPENESS**", value=f"{rip_emoji} {gather_result['ripeness']}".strip(), inline=True)
+            embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'NO'}", inline=False)
 
             bloom_count = full_data.get("bloom_count", 0)
             if bloom_count > 0 and gather_result.get('extra_money_from_bloom', 0) > 0:
@@ -10183,9 +10377,9 @@ async def gather(interaction: discord.Interaction):
                 title="You Gathered!",
                 description=f"{desc_prefix}You foraged for a(n) **{item_display}**!",
                 color=discord.Color.green())
-            embed.add_field(name="Value", value=f"**{format_money(gather_result['base_value'])}**", inline=True)
-            embed.add_field(name="Ripeness", value=f"{rip_emoji} {gather_result['ripeness']}".strip(), inline=True)
-            embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'No'}", inline=False)
+            embed.add_field(name="**VALUE**", value=f"**{format_money(gather_result['base_value'])}**", inline=True)
+            embed.add_field(name="**RIPENESS**", value=f"{rip_emoji} {gather_result['ripeness']}".strip(), inline=True)
+            embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'NO'}", inline=False)
 
             bloom_count = full_data.get("bloom_count", 0)
             if bloom_count > 0 and gather_result.get('extra_money_from_bloom', 0) > 0:
@@ -11294,9 +11488,26 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     seasonal_label = None
     has_bloomstone_harvest = (full_data.get("shop_inventory", {}).get("bloomstone", 0) >= 1) if (full_data is not None) else has_shop_item(user_id, "bloomstone")
 
-    for _ in range(total_items_to_harvest):
+    # === JACKPOT ROLL for harvest (manual harvests only) ===
+    harvest_is_jackpot = False
+    harvest_jackpot_amount = 0.0
+    if set_cooldown and random.random() < JACKPOT_CHANCE:
+        pool_amt = claim_jackpot_pool()
+        if pool_amt > 0:
+            harvest_is_jackpot = True
+            harvest_jackpot_amount = pool_amt
+
+    for _item_idx in range(total_items_to_harvest):
+        # === JACKPOT: first item in harvest becomes The JackPot ===
+        _this_item_is_jackpot = (harvest_is_jackpot and _item_idx == 0)
+
         item = random.choice(GATHERABLE_ITEMS)
         name = item["name"]
+
+        # Add raw base_value to jackpot pool (manual harvests, non-jackpot items)
+        if set_cooldown and not _this_item_is_jackpot:
+            add_to_jackpot_pool(item["base_value"])
+
         if item["category"] == "Fruit":
             ripeness_list = LEVEL_OF_RIPENESS_FRUITS
         elif item["category"] == "Vegetable":
@@ -11360,11 +11571,19 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
             if item_seasonal_label:
                 seasonal_label = item_seasonal_label
 
+        # === JACKPOT OVERRIDE: replace first item with The JackPot ===
+        if _this_item_is_jackpot:
+            name = "The JackPot"
+            item = {"name": "The JackPot", "category": "Flower", "base_value": 0}
+            ripeness = {"name": "JackPot", "multiplier": 1}
+            is_gmo = False
+            final_value = harvest_jackpot_amount  # pool amount IS the base
+
         base_value_before_boosts = final_value
         raw_item = base_value_before_boosts + (enchant_money_bonus if enchant_money_bonus else 0.0)
         total_raw += raw_item
         item_after_rank = raw_item * rank_perma_buff_mult
-        if item.get("category") == "Flower" and has_bloomstone_harvest:
+        if not _this_item_is_jackpot and item.get("category") == "Flower" and has_bloomstone_harvest:
             item_after_rank *= 3.0
         final_value = item_after_rank
 
@@ -11377,6 +11596,7 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
             "name": name, "value": final_value,
             "base_value": base_value_before_boosts,
             "ripeness": ripeness["name"], "is_gmo": is_gmo,
+            "is_jackpot": _this_item_is_jackpot,
         })
 
     # All money buffs apply to the SAME base (additive stacking). Base = sum of (raw item * rank * bloomstone).
@@ -11474,6 +11694,8 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         "extra_money_from_black_shard": extra_money_from_black_shard,
         "shadow_crystal_multiplier": shadow_crystal_mult,
         "extra_money_from_shadow_crystal": extra_money_from_shadow_crystal,
+        "is_jackpot": harvest_is_jackpot,
+        "jackpot_pool_amount": harvest_jackpot_amount,
     }
 
 async def perform_harvest_for_user(user_id: int, allow_chain: bool = True,
@@ -11747,7 +11969,20 @@ async def harvest(interaction: discord.Interaction):
         water_multiplier = result["water_multiplier"]
 
         # --- build embed (pure computation, no DB) ---
-        embed = discord.Embed(title="You Harvested!", color=discord.Color.green())
+        harvest_is_jackpot = result.get("is_jackpot", False)
+        if harvest_is_jackpot:
+            jp_pool_amt = result.get("jackpot_pool_amount", 0)
+            embed = discord.Embed(
+                title=f"{JACKPOT_EMOJI} JACKPOT HARVEST!",
+                description=(
+                    f"**{interaction.user.name}** hit **THE JACKPOT** while harvesting!\n\n"
+                    f"The pool of **{format_money(jp_pool_amt)}** "
+                    f"in accumulated base values is yours!"
+                ),
+                color=discord.Color.from_str("#FF69B4")
+            )
+        else:
+            embed = discord.Embed(title="You Harvested!", color=discord.Color.green())
 
         # (obsolete) (~35–50 chars per line; 20–30 items stay under Discord’s 1024 limit)
         # One line per item: emoji (ripeness) GMO? — no plant name text to stay under 1024
@@ -11854,9 +12089,9 @@ async def harvest(interaction: discord.Interaction):
 
         month_name = result.get("month_name", "")
         if month_name:
-            embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
-        embed.add_field(name="💰 Total Value", value=f"**{format_money(total_value)}**", inline=True)
-        embed.add_field(name="💵 New Balance", value=f"**{format_money(current_balance)}**", inline=True)
+            embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} - **{month_name.upper()}**", inline=False)
+        embed.add_field(name="💰 **TOTAL**", value=f"**{format_money(total_value)}**", inline=True)
+        embed.add_field(name="💵 **NEW BALANCE**", value=f"**{format_money(current_balance)}**", inline=True)
 
         # === Send the response ASAP (with optional STEAL button) ===
         view = None
@@ -11890,6 +12125,11 @@ async def harvest(interaction: discord.Interaction):
                     interaction.guild, interaction.user, "HARVEST",
                     item["name"], cat, item["value"], item["ripeness"], item.get("is_gmo", False),
                     area_tag))
+
+        # Unlock jackpot achievement if harvest hit jackpot
+        if harvest_is_jackpot:
+            if unlock_hidden_achievement(user_id, "get_lucky"):
+                await send_hidden_achievement_notification(interaction, "get_lucky")
 
         # === Background: role assignment + achievements (user already has the response) ===
         asyncio.create_task(_harvest_post_response(interaction, user_id, full_data, result))
@@ -13102,6 +13342,25 @@ async def treering(interaction: discord.Interaction):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
+# /jackpot command: shows current jackpot pool and dodge count
+@bot.tree.command(name="jackpot", description="Check the current JackPot pool!")
+async def jackpot_cmd(interaction: discord.Interaction):
+    try:
+        if not await safe_defer(interaction):
+            return
+        pool_data = await asyncio.to_thread(get_jackpot_pool)
+        amount = pool_data["amount"]
+        dodge_count = pool_data["dodge_count"]
+        message = (
+            f"The JackPot is {format_money(amount)}, "
+            f"and it has dodged {dodge_count:,} planters so far."
+        )
+        await safe_interaction_response(interaction, interaction.followup.send, content=message)
+    except Exception as e:
+        print(f"Error in jackpot command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
 # almanac command: sections (flowers/fruits/vegetables), pagination, ??? = 2x HIDDEN, completion % (excluding Mikellion)
 # 4 plants per page for all sections to avoid embed truncation
 ALMANAC_PLANTS_PER_PAGE_BY_SECTION = {"Flower": 4, "Fruit": 4, "Vegetable": 4}
@@ -13145,6 +13404,13 @@ class AlmanacView(discord.ui.View):
                     parts.append(f"{ALMANAC_HIDDEN_EMOJI}{ALMANAC_HIDDEN_EMOJI}")
             line = f"{emoji_str}**{item_name.upper()}** — \"{desc}\"\n  " + " | ".join(parts)
             lines.append(line)
+        # Show The JackPot on the last page of Flowers if discovered (doesn't count toward completion %)
+        jackpot_key = f"The JackPot{_ALMANAC_KEY_SEP}JackPot"
+        if self.section == "Flower" and self.page == self._max_page and jackpot_key in entries:
+            jp_emoji = get_item_display_emoji("The JackPot")
+            jp_desc = ITEM_DESCRIPTIONS.get("The JackPot", "Lucky, oh so lucky!")
+            lines.append(f"\n{jp_emoji} **THE JACKPOT** — \"{jp_desc}\"\n  **JACKPOT**")
+
         body = "\n\n".join(lines) if lines else "*No plants in this section.*"
         title = f"📚 {self.section}s"
         embed = discord.Embed(title=title, description=body[:4000], color=discord.Color.green())
@@ -13153,19 +13419,27 @@ class AlmanacView(discord.ui.View):
 
     @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, custom_id="almanac_prev")
     async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.defer(ephemeral=True)
-            return
-        self.page = max(0, self.page - 1)
-        await interaction.response.edit_message(embed=self._build_embed(), view=self)
+        try:
+            if interaction.user.id != self.user_id:
+                await safe_defer(interaction, ephemeral=True)
+                return
+            self.page = max(0, self.page - 1)
+            await interaction.response.edit_message(embed=self._build_embed(), view=self)
+        except Exception as e:
+            print(f"Error in almanac prev_page: {e}")
+            await safe_defer(interaction)
 
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary, custom_id="almanac_next")
     async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.defer(ephemeral=True)
-            return
-        self.page = min(self._max_page, self.page + 1)
-        await interaction.response.edit_message(embed=self._build_embed(), view=self)
+        try:
+            if interaction.user.id != self.user_id:
+                await safe_defer(interaction, ephemeral=True)
+                return
+            self.page = min(self._max_page, self.page + 1)
+            await interaction.response.edit_message(embed=self._build_embed(), view=self)
+        except Exception as e:
+            print(f"Error in almanac next_page: {e}")
+            await safe_defer(interaction)
 
 
 @bot.tree.command(name="almanac", description="View your almanac: plants and ripeness you've gathered (by section)")
@@ -13335,47 +13609,57 @@ class BasketUpgradeView(discord.ui.View):
             if interaction.user.id != self.user_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, f"❌ This is not your gear shop!", ephemeral=True)
                 return
-            
-            upgrades = get_user_basket_upgrades(self.user_id)
-            current_tier = upgrades[upgrade_type]
-            
-            if current_tier >= 10:
-                await safe_interaction_response(interaction, interaction.response.send_message, f"❌ You already have the maximum {upgrade_name} upgrade!", ephemeral=True)
+
+            # Defer FIRST so DB calls below don't race the 3-second timeout
+            if not await safe_defer(interaction, ephemeral=True):
                 return
-            
+
+            upgrades = await asyncio.to_thread(get_user_basket_upgrades, self.user_id)
+            current_tier = upgrades[upgrade_type]
+
+            if current_tier >= 10:
+                await interaction.followup.send(f"❌ You already have the maximum {upgrade_name} upgrade!", ephemeral=True)
+                return
+
             cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[current_tier])
-            balance = get_user_balance(self.user_id)
-            
+            balance = await asyncio.to_thread(get_user_balance, self.user_id)
+
             if balance < cost:
-                await safe_interaction_response(interaction, interaction.response.send_message,
-                    f"❌ You don't have enough money! You need **${cost:,.2f}** but only have **${balance:,.2f}**.", 
+                await interaction.followup.send(
+                    f"❌ You don't have enough money! You need **${cost:,.2f}** but only have **${balance:,.2f}**.",
                     ephemeral=True)
                 return
-            
+
             # Deduct money and upgrade
             new_balance = balance - cost
-            update_user_balance(self.user_id, new_balance)
-            set_user_basket_upgrade(self.user_id, upgrade_type, current_tier + 1)
-            
+            await asyncio.to_thread(update_user_balance, self.user_id, new_balance)
+            await asyncio.to_thread(set_user_basket_upgrade, self.user_id, upgrade_type, current_tier + 1)
+
             next_upgrade = upgrade_list[current_tier]
-            
+
             # Check for Maxed Out achievement (gear was the only upgrade path that did not call this)
-            achievement_unlocked = check_maxed_out_achievement(self.user_id)
-            
+            achievement_unlocked = await asyncio.to_thread(check_maxed_out_achievement, self.user_id)
+
             # Send quick confirmation and update the main embed
-            await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
-            
+            await interaction.followup.send(f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
+
             if achievement_unlocked:
                 await send_hidden_achievement_notification(interaction, "maxed_out")
-            
-            embed = self.create_embed()
+
+            embed = await asyncio.to_thread(self.create_embed)
             try:
                 await interaction.message.edit(embed=embed, view=self)
             except:
                 pass  # Message might have been deleted
         except Exception as e:
             print(f"Error in handle_purchase (gear): {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ An error occurred. Please try again.", ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ An error occurred. Please try again.", ephemeral=True)
+            except:
+                pass
 
 
 # Gear command
@@ -13589,47 +13873,57 @@ class HarvestUpgradeView(discord.ui.View):
             if interaction.user.id != self.user_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, f"❌ This is not your harvest shop!", ephemeral=True)
                 return
-            
-            upgrades = get_user_harvest_upgrades(self.user_id)
-            current_tier = upgrades[upgrade_type]
-            
-            if current_tier >= 10:
-                await safe_interaction_response(interaction, interaction.response.send_message, f"❌ You already have the maximum {upgrade_name} upgrade!", ephemeral=True)
+
+            # Defer FIRST so DB calls below don't race the 3-second timeout
+            if not await safe_defer(interaction, ephemeral=True):
                 return
-            
+
+            upgrades = await asyncio.to_thread(get_user_harvest_upgrades, self.user_id)
+            current_tier = upgrades[upgrade_type]
+
+            if current_tier >= 10:
+                await interaction.followup.send(f"❌ You already have the maximum {upgrade_name} upgrade!", ephemeral=True)
+                return
+
             cost = bloom_scaled_price(self.user_id, price_list[current_tier])
-            balance = get_user_balance(self.user_id)
-            
+            balance = await asyncio.to_thread(get_user_balance, self.user_id)
+
             if balance < cost:
-                await safe_interaction_response(interaction, interaction.response.send_message,
-                    f"❌ You don't have enough money! You need **${cost:,.2f}** but only have **${balance:,.2f}**.", 
+                await interaction.followup.send(
+                    f"❌ You don't have enough money! You need **${cost:,.2f}** but only have **${balance:,.2f}**.",
                     ephemeral=True)
                 return
-            
+
             # Deduct money and upgrade
             new_balance = balance - cost
-            update_user_balance(self.user_id, new_balance)
-            set_user_harvest_upgrade(self.user_id, upgrade_type, current_tier + 1)
-            
+            await asyncio.to_thread(update_user_balance, self.user_id, new_balance)
+            await asyncio.to_thread(set_user_harvest_upgrade, self.user_id, upgrade_type, current_tier + 1)
+
             next_upgrade = upgrade_list[current_tier]
-            
+
             # Check for Maxed Out achievement
-            achievement_unlocked = check_maxed_out_achievement(self.user_id)
-            
+            achievement_unlocked = await asyncio.to_thread(check_maxed_out_achievement, self.user_id)
+
             # Send quick confirmation and update the main embed
-            await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
-            
+            await interaction.followup.send(f"✅ Purchased **{next_upgrade['name']}**! Updated your shop below.", ephemeral=True)
+
             if achievement_unlocked:
                 await send_hidden_achievement_notification(interaction, "maxed_out")
-            
-            embed = self.create_embed()
+
+            embed = await asyncio.to_thread(self.create_embed)
             try:
                 await interaction.message.edit(embed=embed, view=self)
             except:
                 pass  # Message might have been deleted
         except Exception as e:
             print(f"Error in handle_purchase (harvest): {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ An error occurred. Please try again.", ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ An error occurred. Please try again.", ephemeral=True)
+            except:
+                pass
 
 
 # Orchard command
@@ -14125,35 +14419,53 @@ class HireView(discord.ui.View):
             if interaction.user.id != self.user_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your hiring center!", ephemeral=True)
                 return
-            
+
             if self.current_page > 0:
+                # Defer first, then do DB work off the event loop
+                if not await safe_defer(interaction):
+                    return
                 self.current_page -= 1
                 self.update_buttons()
-                embed = self.create_embed(self.current_page)
-                await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+                embed = await asyncio.to_thread(self.create_embed, self.current_page)
+                await interaction.message.edit(embed=embed, view=self)
             else:
                 await safe_defer(interaction)
         except Exception as e:
             print(f"Error in previous_button (hire): {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
-    
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ An error occurred. Please try again.", ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ An error occurred. Please try again.", ephemeral=True)
+            except:
+                pass
+
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary, row=0)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if interaction.user.id != self.user_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your hiring center!", ephemeral=True)
                 return
-            
+
             if self.current_page < self.total_pages - 1:
+                # Defer first, then do DB work off the event loop
+                if not await safe_defer(interaction):
+                    return
                 self.current_page += 1
                 self.update_buttons()
-                embed = self.create_embed(self.current_page)
-                await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+                embed = await asyncio.to_thread(self.create_embed, self.current_page)
+                await interaction.message.edit(embed=embed, view=self)
             else:
                 await safe_defer(interaction)
         except Exception as e:
             print(f"Error in next_button (hire): {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ An error occurred. Please try again.", ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ An error occurred. Please try again.", ephemeral=True)
+            except:
+                pass
     
     @discord.ui.button(label="Hire", style=discord.ButtonStyle.success, row=1)
     async def hire_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -14165,44 +14477,49 @@ class HireView(discord.ui.View):
             if slot_id is None or slot_id >= 6:
                 await safe_defer(interaction)
                 return
-            gardeners = get_user_gardeners(self.user_id)
+
+            # Defer FIRST so DB calls below don't race the 3-second timeout
+            if not await safe_defer(interaction, ephemeral=True):
+                return
+
+            gardeners = await asyncio.to_thread(get_user_gardeners, self.user_id)
             gardener_dict = {g["id"]: g for g in gardeners}
-            
+
             # Check if slot is already taken
             if slot_id in gardener_dict:
-                await safe_interaction_response(interaction, interaction.response.send_message, f"❌ Gardener #{slot_id} is already hired!", ephemeral=True)
+                await interaction.followup.send(f"❌ Gardener #{slot_id} is already hired!", ephemeral=True)
                 return
-            
+
             # Check if max gardeners reached
             if len(gardeners) >= 5:
-                await safe_interaction_response(interaction, interaction.response.send_message, "❌ You already have the maximum of 5 gardeners!", ephemeral=True)
+                await interaction.followup.send("❌ You already have the maximum of 5 gardeners!", ephemeral=True)
                 return
-            
+
             price = bloom_scaled_price(self.user_id, GARDENER_PRICES[slot_id - 1])
-            balance = get_user_balance(self.user_id)
-            
+            balance = await asyncio.to_thread(get_user_balance, self.user_id)
+
             if balance < price:
-                await safe_interaction_response(interaction, interaction.response.send_message,
+                await interaction.followup.send(
                     f"❌ You don't have enough money! You need **${price:,.2f}** but only have **${balance:,.2f}**.",
                     ephemeral=True)
                 return
-            
+
             # Hire the gardener
-            success = add_gardener(self.user_id, slot_id, price)
+            success = await asyncio.to_thread(add_gardener, self.user_id, slot_id, price)
             if not success:
-                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Failed to hire gardener. Please try again.", ephemeral=True)
+                await interaction.followup.send("❌ Failed to hire gardener. Please try again.", ephemeral=True)
                 return
-            
+
             # Check for Maxed Out achievement
-            achievement_unlocked = check_maxed_out_achievement(self.user_id)
-            
+            achievement_unlocked = await asyncio.to_thread(check_maxed_out_achievement, self.user_id)
+
             # Send confirmation and update embed
-            await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Hired **Gardener #{slot_id}** for ${price:,.2f}! They'll start gathering for you automatically.", ephemeral=True)
-            
+            await interaction.followup.send(f"✅ Hired **Gardener #{slot_id}** for ${price:,.2f}! They'll start gathering for you automatically.", ephemeral=True)
+
             if achievement_unlocked:
                 await send_hidden_achievement_notification(interaction, "maxed_out")
-            
-            embed = self.create_embed(self.current_page)
+
+            embed = await asyncio.to_thread(self.create_embed, self.current_page)
             self.update_buttons()
             try:
                 await interaction.message.edit(embed=embed, view=self)
@@ -14210,7 +14527,13 @@ class HireView(discord.ui.View):
                 pass  # Message might have been deleted
         except Exception as e:
             print(f"Error in hire_button: {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ An error occurred. Please try again.", ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ An error occurred. Please try again.", ephemeral=True)
+            except:
+                pass
     
     @discord.ui.button(label="Buy Tool", style=discord.ButtonStyle.secondary, row=1)
     async def buy_tool_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -14222,43 +14545,48 @@ class HireView(discord.ui.View):
             if slot_id is None or slot_id >= 6:
                 await safe_defer(interaction)
                 return
-            gardeners = get_user_gardeners(self.user_id)
+
+            # Defer FIRST so DB calls below don't race the 3-second timeout
+            if not await safe_defer(interaction, ephemeral=True):
+                return
+
+            gardeners = await asyncio.to_thread(get_user_gardeners, self.user_id)
             gardener_dict = {g["id"]: g for g in gardeners}
             gardener = gardener_dict.get(slot_id)
-            
+
             if not gardener:
-                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Hire this gardener first before buying their tool!", ephemeral=True)
+                await interaction.followup.send("❌ Hire this gardener first before buying their tool!", ephemeral=True)
                 return
-            
+
             if gardener.get("has_tool", False):
-                await safe_interaction_response(interaction, interaction.response.send_message, f"❌ This gardener already has their tool!", ephemeral=True)
+                await interaction.followup.send(f"❌ This gardener already has their tool!", ephemeral=True)
                 return
-            
+
             tool_info = GARDENER_TOOLS.get(slot_id, {"name": "Tool", "cost": 0})
             tool_cost = bloom_scaled_price(self.user_id, tool_info["cost"])
-            balance = get_user_balance(self.user_id)
-            
+            balance = await asyncio.to_thread(get_user_balance, self.user_id)
+
             if balance < tool_cost:
-                await safe_interaction_response(interaction, interaction.response.send_message,
+                await interaction.followup.send(
                     f"❌ You don't have enough money! The **{tool_info['name']}** costs **${tool_cost:,.2f}** but you only have **${balance:,.2f}**.", ephemeral=True)
                 return
-            
-            success = set_gardener_has_tool(self.user_id, slot_id, tool_cost)
+
+            success = await asyncio.to_thread(set_gardener_has_tool, self.user_id, slot_id, tool_cost)
             if not success:
-                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Failed to buy tool. Please try again.", ephemeral=True)
+                await interaction.followup.send("❌ Failed to buy tool. Please try again.", ephemeral=True)
                 return
-            
+
             # Check for Maxed Out achievement
-            achievement_unlocked = check_maxed_out_achievement(self.user_id)
-            
+            achievement_unlocked = await asyncio.to_thread(check_maxed_out_achievement, self.user_id)
+
             chance_pct = round(tool_info["chance"] * 100, 1)
-            await safe_interaction_response(interaction, interaction.response.send_message,
+            await interaction.followup.send(
                 f"✅ **{tool_info['name']}** purchased for ${tool_cost:,.2f}! This gardener's auto gather now has a **{chance_pct}%** chance to upgrade to a full harvest!", ephemeral=True)
-            
+
             if achievement_unlocked:
                 await send_hidden_achievement_notification(interaction, "maxed_out")
-            
-            embed = self.create_embed(self.current_page)
+
+            embed = await asyncio.to_thread(self.create_embed, self.current_page)
             self.update_buttons()
             try:
                 await interaction.message.edit(embed=embed, view=self)
@@ -14266,7 +14594,13 @@ class HireView(discord.ui.View):
                 pass
         except Exception as e:
             print(f"Error in buy_tool_button: {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ An error occurred. Please try again.", ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ An error occurred. Please try again.", ephemeral=True)
+            except:
+                pass
 
 
 # Hire command
@@ -14374,35 +14708,53 @@ class GpuView(discord.ui.View):
             if interaction.user.id != self.user_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your GPU shop!", ephemeral=True)
                 return
-            
+
             if self.current_page > 0:
+                # Defer first, then do DB work off the event loop
+                if not await safe_defer(interaction):
+                    return
                 self.current_page -= 1
                 self.update_buttons()
-                embed = self.create_embed(self.current_page)
-                await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+                embed = await asyncio.to_thread(self.create_embed, self.current_page)
+                await interaction.message.edit(embed=embed, view=self)
             else:
                 await safe_defer(interaction)
         except Exception as e:
             print(f"Error in previous_button (gpu): {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
-    
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ An error occurred. Please try again.", ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ An error occurred. Please try again.", ephemeral=True)
+            except:
+                pass
+
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary, row=0)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if interaction.user.id != self.user_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your GPU shop!", ephemeral=True)
                 return
-            
+
             if self.current_page < self.total_pages - 1:
+                # Defer first, then do DB work off the event loop
+                if not await safe_defer(interaction):
+                    return
                 self.current_page += 1
                 self.update_buttons()
-                embed = self.create_embed(self.current_page)
-                await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+                embed = await asyncio.to_thread(self.create_embed, self.current_page)
+                await interaction.message.edit(embed=embed, view=self)
             else:
                 await safe_defer(interaction)
         except Exception as e:
             print(f"Error in next_button (gpu): {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ An error occurred. Please try again.", ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ An error occurred. Please try again.", ephemeral=True)
+            except:
+                pass
     
     @discord.ui.button(label="Buy", style=discord.ButtonStyle.success, row=1)
     async def buy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -14410,40 +14762,44 @@ class GpuView(discord.ui.View):
             if interaction.user.id != self.user_id:
                 await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your GPU shop!", ephemeral=True)
                 return
-            
+
+            # Defer FIRST so DB calls below don't race the 3-second timeout
+            if not await safe_defer(interaction, ephemeral=True):
+                return
+
             gpu_info = GPU_SHOP[self.current_page]
             gpu_name = gpu_info["name"]
             price = bloom_scaled_price(self.user_id, gpu_info["price"])
-            balance = get_user_balance(self.user_id)
-            user_gpus = get_user_gpus(self.user_id)
-            
+            balance = await asyncio.to_thread(get_user_balance, self.user_id)
+            user_gpus = await asyncio.to_thread(get_user_gpus, self.user_id)
+
             # Check if already owned
             if gpu_name in user_gpus:
-                await safe_interaction_response(interaction, interaction.response.send_message, f"❌ You already own **{gpu_name}**!", ephemeral=True)
+                await interaction.followup.send(f"❌ You already own **{gpu_name}**!", ephemeral=True)
                 return
-            
+
             if balance < price:
-                await safe_interaction_response(interaction, interaction.response.send_message,
+                await interaction.followup.send(
                     f"❌ You don't have enough money! You need **${price:,.2f}** but only have **${balance:,.2f}**.",
                     ephemeral=True)
                 return
-            
+
             # Buy the GPU
-            success = add_gpu(self.user_id, gpu_name, price)
+            success = await asyncio.to_thread(add_gpu, self.user_id, gpu_name, price)
             if not success:
-                await safe_interaction_response(interaction, interaction.response.send_message, "❌ Failed to buy GPU. Please try again.", ephemeral=True)
+                await interaction.followup.send("❌ Failed to buy GPU. Please try again.", ephemeral=True)
                 return
-            
+
             # Check for Maxed Out achievement
-            achievement_unlocked = check_maxed_out_achievement(self.user_id)
-            
+            achievement_unlocked = await asyncio.to_thread(check_maxed_out_achievement, self.user_id)
+
             # Send confirmation and update embed
-            await safe_interaction_response(interaction, interaction.response.send_message, f"✅ Purchased **{gpu_name}** for ${price:,.2f}! It will boost your mining!", ephemeral=True)
-            
+            await interaction.followup.send(f"✅ Purchased **{gpu_name}** for ${price:,.2f}! It will boost your mining!", ephemeral=True)
+
             if achievement_unlocked:
                 await send_hidden_achievement_notification(interaction, "maxed_out")
-            
-            embed = self.create_embed(self.current_page)
+
+            embed = await asyncio.to_thread(self.create_embed, self.current_page)
             self.update_buttons()
             try:
                 await interaction.message.edit(embed=embed, view=self)
@@ -14451,7 +14807,13 @@ class GpuView(discord.ui.View):
                 pass  # Message might have been deleted
         except Exception as e:
             print(f"Error in buy_button (gpu): {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ An error occurred. Please try again.", ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ An error occurred. Please try again.", ephemeral=True)
+            except:
+                pass
 
 
 # GPU command
@@ -14678,7 +15040,7 @@ async def startcelestialevent(interaction: discord.Interaction, event: str, dura
         start_time = time.time()
         end_time = start_time + duration * 60
         event_id = f"{event}_{int(start_time)}"
-        title = SOLAR_ECLIPSE_TITLE if event == "solar_eclipse" else BLOOD_MOON_TITLE
+        title = SOLAR_ECLIPSE_EVENT_NAME if event == "solar_eclipse" else BLOOD_MOON_EVENT_NAME
 
         set_active_event(
             event_id=event_id,
@@ -15691,11 +16053,11 @@ async def setrank(
 ])
 async def market_admin(interaction: discord.Interaction, news: app_commands.Choice[str]):
     try:
-        if not interaction.user.guild_permissions.administrator:
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ You don't have permission to use this command.", ephemeral=True)
-            return
-        
         if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.followup.send("❌ You don't have permission to use this command.", ephemeral=True)
             return
         
         guild_id = interaction.guild.id
@@ -16083,7 +16445,7 @@ async def bot_pay(interaction: discord.Interaction, user: discord.Member, amount
 # ── /giveaway: Reaction-based giveaway in #giveaways (admin-only) ─────────
 # Edge cases: admin-only + #giveaways only; duration 1–10080 min; num_winners 1–50; only NETHER_STAR counts;
 # bot adds reaction first; if message deleted/channel gone at end we skip; no entrants → "no valid entries";
-# fewer entrants than num_winners → we pick all entrants; bot restart loses in-memory giveaways (no auto-resolve).
+# fewer entrants than num_winners → we pick all entrants; giveaways are persisted so bot restarts will still resolve them.
 _active_giveaways: dict[int, dict] = {}  # message_id -> {channel_id, guild_id, end_at_ts, prize_display, prize_data, num_winners}
 
 
@@ -16114,56 +16476,83 @@ async def _giveaway_end_task(
     num_winners: int,
 ):
     """Wait until giveaway ends, then resolve winners and post congrats."""
-    await asyncio.sleep(max(0, end_at_ts - time.time()))
-    _active_giveaways.pop(message_id, None)
-    channel = bot.get_channel(channel_id)
-    if not channel or not isinstance(channel, discord.TextChannel):
-        return
     try:
-        message = await channel.fetch_message(message_id)
-    except Exception:
-        return
-    # Find :PROGRESS_Y: reaction (giveaway entry)
-    entry_reaction = None
-    for r in message.reactions:
-        if getattr(r.emoji, "id", None) == PROGRESS_Y_PARTIAL.id or (isinstance(r.emoji, str) and "progress_y" in str(r.emoji).lower()):
-            entry_reaction = r
-            break
-    if not entry_reaction:
-        await channel.send("🫐 Giveaway ended with no valid entries (:PROGRESS_Y: reaction not found).")
-        return
-    entrants = []
-    async for u in entry_reaction.users():
-        if not u.bot:
-            entrants.append(u)
-    if not entrants:
-        await channel.send("🫐 Giveaway ended with no valid entries.")
-        return
-    winners = random.sample(entrants, min(num_winners, len(entrants)))
-    danny_mention = f"<@{GIVEAWAY_CLAIM_USER_ID}>"
-    is_random_shop = prize_data.get("type") == "shop_item_random"
-    for w in winners:
-        if is_random_shop:
-            item_id = random.choice(DAILY_SHOP_ITEM_IDS)
-            single_prize = {"type": "shop_item", "item_id": item_id}
-            item_display = DAILY_SHOP_ITEMS.get(item_id, {}).get("name", item_id)
+        await asyncio.sleep(max(0, end_at_ts - time.time()))
+        _active_giveaways.pop(message_id, None)
+        channel = bot.get_channel(channel_id)
+        if not channel or not isinstance(channel, discord.TextChannel):
+            return
+        try:
+            message = await channel.fetch_message(message_id)
+        except Exception:
+            return
+        # Find :PROGRESS_Y: reaction (giveaway entry)
+        entry_reaction = None
+        for r in message.reactions:
+            if getattr(r.emoji, "id", None) == PROGRESS_Y_PARTIAL.id or (isinstance(r.emoji, str) and "progress_y" in str(r.emoji).lower()):
+                entry_reaction = r
+                break
+        if not entry_reaction:
+            await channel.send("🫐 Giveaway ended with no valid entries (:PROGRESS_Y: reaction not found).")
+            mark_giveaway_resolved(message_id)
+            return
+        entrants = []
+        async for u in entry_reaction.users():
+            if not u.bot:
+                entrants.append(u)
+        if not entrants:
+            await channel.send("🫐 Giveaway ended with no valid entries.")
+            mark_giveaway_resolved(message_id)
+            return
+        winners = random.sample(entrants, min(num_winners, len(entrants)))
+        danny_mention = f"<@{GIVEAWAY_CLAIM_USER_ID}>"
+        is_random_shop = prize_data.get("type") == "shop_item_random"
+        for w in winners:
+            if is_random_shop:
+                # Safety: if for some reason the daily shop list is empty, avoid crashing the task.
+                if not DAILY_SHOP_ITEM_IDS:
+                    await channel.send(
+                        f"🫐 Giveaway ended, but no Daily Shop items are configured. "
+                        f"{w.mention} would have won a random item. Please contact @danny."
+                    )
+                    continue
+                item_id = random.choice(DAILY_SHOP_ITEM_IDS)
+                single_prize = {"type": "shop_item", "item_id": item_id}
+                item_display = DAILY_SHOP_ITEMS.get(item_id, {}).get("name", item_id)
+                try:
+                    await asyncio.to_thread(_apply_giveaway_prize, w.id, single_prize)
+                except Exception as e:
+                    print(f"[Giveaway] Error applying prize to {w.id}: {e}")
+                await channel.send(
+                    f"🎁 Congratulations {w.mention}! You won: **{item_display}**\n"
+                    f"Contact @danny to claim your prize!"
+                )
+            else:
+                try:
+                    await asyncio.to_thread(_apply_giveaway_prize, w.id, prize_data)
+                except Exception as e:
+                    print(f"[Giveaway] Error applying prize to {w.id}: {e}")
+                await channel.send(
+                    f"🎁 Congratulations {w.mention}! You won: **{prize_display}**\n"
+                    f"Contact @danny to claim your prize!"
+                )
+        # If we reached here without early return, mark this giveaway as resolved.
+        mark_giveaway_resolved(message_id)
+    except Exception as e:
+        # Make sure we never fail silently; log and, if possible, notify the channel.
+        print(f"[Giveaway] Fatal error resolving giveaway {message_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        channel = bot.get_channel(channel_id)
+        if channel and isinstance(channel, discord.TextChannel):
             try:
-                await asyncio.to_thread(_apply_giveaway_prize, w.id, single_prize)
-            except Exception as e:
-                print(f"[Giveaway] Error applying prize to {w.id}: {e}")
-            await channel.send(
-                f"🎁 Congratulations {w.mention}! You won: **{item_display}**\n"
-                f"Contact {danny_mention} to claim your prize!"
-            )
-        else:
-            try:
-                await asyncio.to_thread(_apply_giveaway_prize, w.id, prize_data)
-            except Exception as e:
-                print(f"[Giveaway] Error applying prize to {w.id}: {e}")
-            await channel.send(
-                f"🎁 Congratulations {w.mention}! You won: **{prize_display}**\n"
-                f"Contact {danny_mention} to claim your prize!"
-            )
+                await channel.send(
+                    "🫐 Giveaway ended, but an unexpected error occurred while selecting winners. "
+                    "Please contact @danny to resolve this manually."
+                )
+            except Exception:
+                # At this point there's nothing more we can safely do.
+                pass
 
 
 @bot.tree.command(name="giveaway", description="[ADMIN] Start a reaction-based giveaway in #giveaways (money, item, or imbue)")
@@ -16300,9 +16689,28 @@ async def giveaway(
             "prize_data": prize_data,
             "num_winners": num_winners,
         }
-        asyncio.create_task(_giveaway_end_task(
-            message.id, giveaways_ch.id, guild.id, end_at_ts, prize_display, prize_data, num_winners
-        ))
+        # Persist the giveaway so it can be recovered if the bot restarts mid-giveaway.
+        await asyncio.to_thread(
+            upsert_giveaway_record,
+            message.id,
+            giveaways_ch.id,
+            guild.id,
+            end_at_ts,
+            prize_display,
+            prize_data,
+            num_winners,
+        )
+        asyncio.create_task(
+            _giveaway_end_task(
+                message.id,
+                giveaways_ch.id,
+                guild.id,
+                end_at_ts,
+                prize_display,
+                prize_data,
+                num_winners,
+            )
+        )
         await safe_interaction_response(interaction, interaction.followup.send,
             f"✅ Giveaway started in #giveaways! Ends in **{int(duration_minutes)}** minutes. React with {PROGRESS_Y} to enter.", ephemeral=True)
         print(f"Admin {interaction.user.name} started /giveaway in #giveaways: {prize_display}, {num_winners} winner(s)")
@@ -16478,30 +16886,36 @@ class LeaderboardView(discord.ui.View):
     @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, disabled=True)
     async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            if not await safe_defer(interaction, ephemeral=False):
+            if not await safe_defer(interaction):
                 return
             if self.current_page > 0:
                 self.current_page -= 1
                 self.update_buttons()
                 embed = self.create_embed(self.current_page)
-                await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+                await interaction.message.edit(embed=embed, view=self)
         except Exception as e:
             print(f"Error in previous_button (leaderboard): {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
+            try:
+                await interaction.followup.send("❌ An error occurred. Please try again.", ephemeral=True)
+            except:
+                pass
 
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            if not await safe_defer(interaction, ephemeral=False):
+            if not await safe_defer(interaction):
                 return
             if self.current_page < self.total_pages - 1:
                 self.current_page += 1
                 self.update_buttons()
                 embed = self.create_embed(self.current_page)
-                await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+                await interaction.message.edit(embed=embed, view=self)
         except Exception as e:
             print(f"Error in next_button (leaderboard): {e}")
-            await safe_interaction_response(interaction, interaction.response.send_message, "❌ An error occurred. Please try again.", ephemeral=True)
+            try:
+                await interaction.followup.send("❌ An error occurred. Please try again.", ephemeral=True)
+            except:
+                pass
     
     def update_buttons(self):
         """Update button states based on current page."""
@@ -17694,8 +18108,8 @@ async def gardener_background_task():
                                                 if len(items_display) > 1024:
                                                     items_display = items_display[:1021] + "..."
                                                 embed.add_field(name="📦 Items Harvested", value=items_display, inline=False)
-                                                embed.add_field(name="💰 Total Value", value=f"**${total_value:,.2f}**", inline=True)
-                                                embed.add_field(name="💵 New Balance", value=f"**${current_balance:,.2f}**", inline=True)
+                                                embed.add_field(name="💰 **TOTAL**", value=f"**${total_value:,.2f}**", inline=True)
+                                                embed.add_field(name="💵 **NEW BALANCE**", value=f"**${current_balance:,.2f}**", inline=True)
                                                 await lawn_channel.send(embed=embed)
                                                 # Hidden achievement: One in a Mikellion (gardener harvest included Mikellion)
                                                 has_mikellion = any(item.get("ripeness") == "Mikellion" for item in harvest_result.get("gathered_items", []))
@@ -17737,9 +18151,9 @@ async def gardener_background_task():
                                                         description=f"{desc_prefix}Their gardener found a **{gather_result['name']}**!",
                                                         color=gather_color
                                                     )
-                                                    embed.add_field(name="Value", value=f"**${gather_result['base_value']:.2f}**", inline=True)
-                                                    embed.add_field(name="Ripeness", value=f"{rip_em} {gather_result['ripeness']}".strip(), inline=True)
-                                                    embed.add_field(name="GMO?", value="Yes ✨" if gather_result['is_gmo'] else "No", inline=False)
+                                                    embed.add_field(name="**VALUE**", value=f"**${gather_result['base_value']:.2f}**", inline=True)
+                                                    embed.add_field(name="**RIPENESS**", value=f"{rip_em} {gather_result['ripeness']}".strip(), inline=True)
+                                                    embed.add_field(name="GMO?", value="Yes ✨" if gather_result['is_gmo'] else "NO", inline=False)
                                                     await lawn_channel.send(embed=embed)
                                                     # Hidden achievement: One in a Mikellion (gardener gathered Mikellion)
                                                     if gather_result.get("ripeness") == "Mikellion" and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
@@ -17837,9 +18251,9 @@ async def secret_gardener_background_task():
                                                 description=f"{desc_prefix}The Secret Gardener found a **{gather_result['name']}**!",
                                                 color=discord.Color.purple()
                                             )
-                                            embed.add_field(name="Value", value=f"**${gather_result['base_value']:,.2f}**", inline=True)
-                                            embed.add_field(name="Ripeness", value=f"{rip_em} {gather_result['ripeness']}".strip(), inline=True)
-                                            embed.add_field(name="GMO?", value="Yes \u2728" if gather_result['is_gmo'] else "No", inline=False)
+                                            embed.add_field(name="**VALUE**", value=f"**${gather_result['base_value']:,.2f}**", inline=True)
+                                            embed.add_field(name="**RIPENESS**", value=f"{rip_em} {gather_result['ripeness']}".strip(), inline=True)
+                                            embed.add_field(name="GMO?", value="Yes \u2728" if gather_result['is_gmo'] else "NO", inline=False)
                                             await lawn_channel.send(embed=embed)
                                             # Hidden achievement: One in a Mikellion (secret gardener gathered Mikellion)
                                             if gather_result.get("ripeness") == "Mikellion" and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
@@ -18060,7 +18474,7 @@ async def send_event_end_embed(guild: discord.Guild, event: dict):
     # Celestial events: Solar Eclipse and Blood Moon (custom end embeds)
     if event["event_type"] == "solar_eclipse":
         embed = discord.Embed(
-            title=f"{SOLAR_ECLIPSE_TITLE} Event Ended",
+            title="Solar Eclipse Event Ended",
             description="Conditions are back to normal. Stay tuned for any future events...",
             color=SOLAR_ECLIPSE_COLOR
         )
@@ -18071,7 +18485,7 @@ async def send_event_end_embed(guild: discord.Guild, event: dict):
         return
     if event["event_type"] == "blood_moon":
         embed = discord.Embed(
-            title=f"{BLOOD_MOON_TITLE} Event Ended",
+            title="Blood Moon Event Ended",
             description="Conditions are back to normal. Stay tuned for any future events...",
             color=BLOOD_MOON_COLOR
         )
@@ -18529,7 +18943,7 @@ async def celestial_event_check():
                     set_active_event(
                         event_id=event_id,
                         event_type="solar_eclipse",
-                        event_name=SOLAR_ECLIPSE_TITLE,
+                        event_name=SOLAR_ECLIPSE_EVENT_NAME,
                         start_time=now_ts,
                         end_time=end_ts,
                         effects={"event_id": "solar_eclipse"}
@@ -18563,7 +18977,7 @@ async def celestial_event_check():
                     set_active_event(
                         event_id=event_id,
                         event_type="blood_moon",
-                        event_name=BLOOD_MOON_TITLE,
+                        event_name=BLOOD_MOON_EVENT_NAME,
                         start_time=now_ts,
                         end_time=end_ts,
                         effects={"event_id": "blood_moon"}
