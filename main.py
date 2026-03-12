@@ -5986,7 +5986,7 @@ async def _gathemon_award_winner_gathers(winner_id: int, loser_id: int, num_plan
         description=f"{header}{emoji_display}",
         color=discord.Color.gold(),
     )
-    reward_embed.add_field(name="💰 Total Earned", value=f"**{format_money(total_value)}**", inline=True)
+    reward_embed.add_field(name="💰 **TOTAL**", value=f"**{format_money(total_value)}**", inline=True)
     try:
         await channel.send(f"<@{winner_id}>", embed=reward_embed)
     except Exception as e:
@@ -9974,7 +9974,7 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
                 description=f"{header}{emoji_display}",
                 color=discord.Color.green())
             reward_embed.add_field(
-                name="💰 Total Earned", value=f"**{format_money(total_value)}**", inline=True)
+                name="💰 **TOTAL**", value=f"**{format_money(total_value)}**", inline=True)
             reward_embed.set_footer(text="Thanks for defending the gathering grounds!")
 
             # Send reward DM first so user sees rewards quickly
@@ -10252,8 +10252,8 @@ async def gather(interaction: discord.Interaction):
             )
             embed.add_field(name="**POOL VALUE**", value=f"**{format_money(gather_result.get('jackpot_pool_amount', 0))}**", inline=True)
             embed.add_field(name="**RIPENESS**", value="JackPot", inline=True)
-            embed.add_field(name="\U0001f4b0 Total Earned", value=f"**{format_money(gather_result['value'])}**", inline=True)
-            embed.add_field(name="\U0001f4b5 New Balance", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
+            embed.add_field(name="\U0001f4b0 **TOTAL**", value=f"**{format_money(gather_result['value'])}**", inline=True)
+            embed.add_field(name="\U0001f4b5 **NEW BALANCE**", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
 
             # Send jackpot embed
             await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
@@ -10369,8 +10369,8 @@ async def gather(interaction: discord.Interaction):
                 )
             month_name = gather_result.get("month_name", "—")
             embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
-            embed.add_field(name="\U0001f4b0 Total Earned", value=f"**{format_money(gather_result['value'])}**", inline=True)
-            embed.add_field(name="\U0001f4b5 New Balance", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
+            embed.add_field(name="\U0001f4b0 **TOTAL**", value=f"**{format_money(gather_result['value'])}**", inline=True)
+            embed.add_field(name="\U0001f4b5 **NEW BALANCE**", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
         else:
             desc_prefix = f"{rip_emoji} " if rip_emoji else ""
             embed = discord.Embed(
@@ -10441,8 +10441,8 @@ async def gather(interaction: discord.Interaction):
 
             month_name = gather_result.get("month_name", "—")
             embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
-            embed.add_field(name="\U0001f4b0 Total Earned", value=f"**{format_money(gather_result['value'])}**", inline=True)
-            embed.add_field(name="\U0001f4b5 New Balance", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
+            embed.add_field(name="\U0001f4b0 **TOTAL**", value=f"**{format_money(gather_result['value'])}**", inline=True)
+            embed.add_field(name="\U0001f4b5 **NEW BALANCE**", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
 
         # === Send the response ASAP (with optional STEAL button) ===
         view = None
@@ -12522,7 +12522,7 @@ async def unlock(interaction: discord.Interaction, area: app_commands.Choice[str
             color=discord.Color.green()
         )
         embed.add_field(name="📈 Area Multiplier", value=f"**{area_data['multiplier']}x**", inline=False)
-        embed.add_field(name="💵 New Balance", value=f"**${new_balance:,.2f}**", inline=False)
+        embed.add_field(name="💵 **NEW BALANCE**", value=f"**${new_balance:,.2f}**", inline=False)
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
         if result.get("should_notify_areas"):
             await send_achievement_notification(interaction, "areas_unlocked", result["areas_achievement_level"])
@@ -13352,8 +13352,8 @@ async def jackpot_cmd(interaction: discord.Interaction):
         amount = pool_data["amount"]
         dodge_count = pool_data["dodge_count"]
         message = (
-            f"The JackPot is {format_money(amount)}, "
-            f"and it has dodged {dodge_count:,} planters so far."
+            f"The JackPot is **{format_money(amount)}**, "
+            f"and it has dodged **{dodge_count:,}** planters so far."
         )
         await safe_interaction_response(interaction, interaction.followup.send, content=message)
     except Exception as e:
@@ -13498,9 +13498,9 @@ class BasketUpgradeView(discord.ui.View):
             next_multiplier = BASKET_UPGRADES[basket_tier]["multiplier"]
             next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[basket_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            basket_text = f"{bar_basket}\n**Current:** {current_basket} ({current_multiplier}x money)\n**Next:** {next_basket} ({next_multiplier}x money)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            basket_text = f"{bar_basket}\n**CURRENT:** {current_basket} ({current_multiplier}x money)\n**NEXT:** {next_basket} ({next_multiplier}x money)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
-            basket_text = f"{bar_basket}\n**Current:** {current_basket} ({current_multiplier}x money)"
+            basket_text = f"{bar_basket}\n**CURRENT:** {current_basket} ({current_multiplier}x money)"
         
         embed.add_field(
             name="🧺 PATH 1: BASKETS",
@@ -13518,9 +13518,9 @@ class BasketUpgradeView(discord.ui.View):
             next_reduction = SHOES_UPGRADES[shoes_tier]["reduction"]
             next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[shoes_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            shoes_text = f"{bar_shoes}\n**Current:** {current_shoes} (-{current_reduction}s cooldown)\n**Next:** {next_shoes} (-{next_reduction}s cooldown)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            shoes_text = f"{bar_shoes}\n**CURRENT:** {current_shoes} (-{current_reduction}s cooldown)\n**NEXT:** {next_shoes} (-{next_reduction}s cooldown)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
-            shoes_text = f"{bar_shoes}\n**Current:** {current_shoes} (-{current_reduction}s cooldown)"
+            shoes_text = f"{bar_shoes}\n**CURRENT:** {current_shoes} (-{current_reduction}s cooldown)"
         
         embed.add_field(
             name="👟 PATH 2: RUNNING SHOES",
@@ -13531,16 +13531,16 @@ class BasketUpgradeView(discord.ui.View):
         # Path 3: Gloves (Chain Chance)
         gloves_tier = upgrades["gloves"]
         current_gloves = "Bare Hands" if gloves_tier == 0 else GLOVES_UPGRADES[gloves_tier - 1]["name"]
-        current_chain = 0 if gloves_tier == 0 else GLOVES_UPGRADES[gloves_tier - 1]["chain_chance"] * 100
+        current_chain = 0 if gloves_tier == 0 else round(GLOVES_UPGRADES[gloves_tier - 1]["chain_chance"] * 100, 2)
         bar_gloves = _upgrade_bar(gloves_tier)
         if gloves_tier < 10:
             next_gloves = GLOVES_UPGRADES[gloves_tier]["name"]
-            next_chain = GLOVES_UPGRADES[gloves_tier]["chain_chance"] * 100
+            next_chain = round(GLOVES_UPGRADES[gloves_tier]["chain_chance"] * 100, 2)
             next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[gloves_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            gloves_text = f"{bar_gloves}\n**Current:** {current_gloves} ({current_chain}% chain chance)\n**Next:** {next_gloves} ({next_chain}% chain chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            gloves_text = f"{bar_gloves}\n**CURRENT:** {current_gloves} ({current_chain}% chain chance)\n**NEXT:** {next_gloves} ({next_chain}% chain chance)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
-            gloves_text = f"{bar_gloves}\n**Current:** {current_gloves} ({current_chain}% chain chance)"
+            gloves_text = f"{bar_gloves}\n**CURRENT:** {current_gloves} ({current_chain}% chain chance)"
         
         embed.add_field(
             name="🧤 PATH 3: GLOVES",
@@ -13558,9 +13558,9 @@ class BasketUpgradeView(discord.ui.View):
             next_gmo = round(SOIL_UPGRADES[soil_tier]["gmo_boost"] * 100, 1)
             next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[soil_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            soil_text = f"{bar_soil}\n**Current:** {current_soil} (+{current_gmo}% GMO chance)\n**Next:** {next_soil} (+{next_gmo}% GMO chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            soil_text = f"{bar_soil}\n**CURRENT:** {current_soil} (+{current_gmo}% GMO chance)\n**NEXT:** {next_soil} (+{next_gmo}% GMO chance)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
-            soil_text = f"{bar_soil}\n**Current:** {current_soil} (+{current_gmo}% GMO chance)"
+            soil_text = f"{bar_soil}\n**CURRENT:** {current_soil} (+{current_gmo}% GMO chance)"
         
         embed.add_field(
             name="🌱 PATH 4: SOIL",
@@ -13568,7 +13568,7 @@ class BasketUpgradeView(discord.ui.View):
             inline=False
         )
         
-        embed.set_footer(text="Click a button below to purchase an upgrade!")
+        embed.set_footer(text="Click the buttons below to purchase the upgrade you want!")
         
         return embed
     
@@ -13710,9 +13710,9 @@ class HarvestUpgradeView(discord.ui.View):
             next_extra = HARVEST_CAR_UPGRADES[car_tier]["extra_items"]
             next_cost = bloom_scaled_price(self.user_id, HARVEST_CAR_PRICES[car_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            car_text = f"{bar_car}\n**Current:** {current_car} (+{current_extra} extra items)\n**Next:** {next_car} (+{next_extra} extra items)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            car_text = f"{bar_car}\n**CURRENT:** {current_car} (+{current_extra} extra items)\n**NEXT:** {next_car} (+{next_extra} extra items)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
-            car_text = f"{bar_car}\n**Current:** {current_car} (+{current_extra} extra items)"
+            car_text = f"{bar_car}\n**CURRENT:** {current_car} (+{current_extra} extra items)"
         
         embed.add_field(
             name="🚗 PATH 1: VEHICLE",
@@ -13730,9 +13730,9 @@ class HarvestUpgradeView(discord.ui.View):
             next_chain = round(HARVEST_CHAIN_UPGRADES[chain_tier]["chain_chance"] * 100, 1)
             next_cost = bloom_scaled_price(self.user_id, HARVEST_CHAIN_PRICES[chain_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            chain_text = f"{bar_chain}\n**Current:** {current_season} ({current_chain}% chain chance)\n**Next:** {next_season} ({next_chain}% chain chance)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            chain_text = f"{bar_chain}\n**CURRENT:** {current_season} ({current_chain}% chain chance)\n**NEXT:** {next_season} ({next_chain}% chain chance)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
-            chain_text = f"{bar_chain}\n**Current:** {current_season} ({current_chain}% chain chance)"
+            chain_text = f"{bar_chain}\n**CURRENT:** {current_season} ({current_chain}% chain chance)"
         
         embed.add_field(
             name="🌾 PATH 2: YIELD",
@@ -13750,9 +13750,9 @@ class HarvestUpgradeView(discord.ui.View):
             next_multiplier = round(HARVEST_FERTILIZER_UPGRADES[fertilizer_tier]["multiplier"] * 100, 1)
             next_cost = bloom_scaled_price(self.user_id, HARVEST_FERTILIZER_PRICES[fertilizer_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            fertilizer_text = f"{bar_fertilizer}\n**Current:** {current_fertilizer} (+{current_multiplier}% money)\n**Next:** {next_fertilizer} (+{next_multiplier}% money)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            fertilizer_text = f"{bar_fertilizer}\n**CURRENT:** {current_fertilizer} (+{current_multiplier}% money)\n**NEXT:** {next_fertilizer} (+{next_multiplier}% money)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
-            fertilizer_text = f"{bar_fertilizer}\n**Current:** {current_fertilizer} (+{current_multiplier}% money)"
+            fertilizer_text = f"{bar_fertilizer}\n**CURRENT:** {current_fertilizer} (+{current_multiplier}% money)"
         
         embed.add_field(
             name="💩 PATH 3: FERTILIZER",
@@ -13805,7 +13805,7 @@ class HarvestUpgradeView(discord.ui.View):
                     current_reduction_text = f"-{hours}h"
             
             bar_cooldown = _upgrade_bar(cooldown_tier)
-            cooldown_text = f"{bar_cooldown}\n**Current:** {current_workers} ({current_reduction_text} cooldown)\n**Next:** {next_workers} ({reduction_text} cooldown)\n**Cost:** ${next_cost:,.2f} {can_afford}"
+            cooldown_text = f"{bar_cooldown}\n**CURRENT:** {current_workers} ({current_reduction_text} cooldown)\n**NEXT:** {next_workers} ({reduction_text} cooldown)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
             bar_cooldown = _upgrade_bar(cooldown_tier)
             if current_reduction < 60:
@@ -13824,7 +13824,7 @@ class HarvestUpgradeView(discord.ui.View):
                     current_reduction_text = f"-{hours}h {minutes}m"
                 else:
                     current_reduction_text = f"-{hours}h"
-            cooldown_text = f"{bar_cooldown}\n**Current:** {current_workers} ({current_reduction_text} cooldown)"
+            cooldown_text = f"{bar_cooldown}\n**CURRENT:** {current_workers} ({current_reduction_text} cooldown)"
         
         embed.add_field(
             name="⚡ PATH 4: COOLDOWN REDUCTION",
@@ -13832,7 +13832,7 @@ class HarvestUpgradeView(discord.ui.View):
             inline=False
         )
         
-        embed.set_footer(text="Click a button below to purchase an upgrade!")
+        embed.set_footer(text="Click the buttons below to purchase the upgrade you want!")
         
         return embed
     
@@ -18220,8 +18220,8 @@ async def secret_gardener_background_task():
                                                 lines.append(f"{prefix}{emoji} (**{item['ripeness']}**){gmo}")
                                             items_display = "\n".join(lines) or "No items"
                                             embed.add_field(name="\U0001f4e6 Items Harvested", value=items_display, inline=False)
-                                            embed.add_field(name="\U0001f4b0 Total Value", value=f"**${total_value:,.2f}**", inline=True)
-                                            embed.add_field(name="\U0001f4b5 New Balance", value=f"**${harvest_result['current_balance']:,.2f}**", inline=True)
+                                            embed.add_field(name="\U0001f4b0 **TOTAL**", value=f"**${total_value:,.2f}**", inline=True)
+                                            embed.add_field(name="\U0001f4b5 **NEW BALANCE**", value=f"**${harvest_result['current_balance']:,.2f}**", inline=True)
                                             await lawn_channel.send(embed=embed)
                                             # Hidden achievement: One in a Mikellion (secret gardener harvest included Mikellion)
                                             has_mikellion = any(item.get("ripeness") == "Mikellion" for item in harvest_result.get("gathered_items", []))
@@ -19467,7 +19467,7 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
                 update_user_crypto_holdings(user_id, symbol, -user_holding)
                 updated_holdings[symbol] = updated_holdings.get(symbol, 0.0) - user_holding
 
-                sold_items.append(f"{symbol}: {user_holding:.4f} (${sale_value:.2f})")
+                sold_items.append(f"**{symbol}**: {user_holding:.4f} (**${sale_value:.2f}**)")
 
         if base_sale_value == 0:
             return {
@@ -19522,11 +19522,11 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
 
         # Create success embed
         embed = discord.Embed(
-            title="💰 Sale Successful!",
+            title="💰 **SOLD!**",
             description=f"You sold all your cryptocurrency for **${total_sale_value:.2f}**!",
             color=discord.Color.green(),
         )
-        embed.add_field(name="Sold", value="\n".join(sold_items) if sold_items else "None", inline=False)
+        embed.add_field(name="**SOLD**", value="\n".join(sold_items) if sold_items else "None", inline=False)
 
         # Show boosts if applicable
         bloom_count = get_user_bloom_count(user_id)
@@ -19619,11 +19619,11 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
             )
 
         embed.add_field(
-            name="Remaining Holdings",
-            value=f"RTC: {updated_holdings['RTC']:.4f}\nTER: {updated_holdings['TER']:.4f}\nCNY: {updated_holdings['CNY']:.4f}",
+            name="**CRYPTO**",
+            value=f"**RTC**: {updated_holdings['RTC']:.4f}\n**TER**: {updated_holdings['TER']:.4f}\n**CNY**: {updated_holdings['CNY']:.4f}",
             inline=False,
         )
-        embed.add_field(name="New Balance", value=f"${new_balance:.2f}", inline=False)
+        embed.add_field(name="**NEW BALANCE**", value=f"**${new_balance:.2f}**", inline=False)
 
         return {"embed": embed}
 
@@ -19715,8 +19715,8 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
 
     # Create success embed
     embed = discord.Embed(
-        title="💰 Sale Successful!",
-        description=f"You sold **{amount:.4f} {coin}** for **${sale_value:.2f}**!",
+        title="💰 **SOLD!**",
+        description=f"You sold {amount:.4f} **{coin}** for **${sale_value:.2f}**!",
         color=discord.Color.green(),
     )
 
@@ -19812,11 +19812,11 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         )
 
     embed.add_field(
-        name="Remaining Holdings",
-        value=f"RTC: {updated_holdings['RTC']:.4f}\nTER: {updated_holdings['TER']:.4f}\nCNY: {updated_holdings['CNY']:.4f}",
+        name="**CRYPTO**",
+        value=f"**RTC**: {updated_holdings['RTC']:.4f}\n**TER**: {updated_holdings['TER']:.4f}\n**CNY**: {updated_holdings['CNY']:.4f}",
         inline=False,
     )
-    embed.add_field(name="New Balance", value=f"${new_balance:.2f}", inline=False)
+    embed.add_field(name="**NEW BALANCE**", value=f"**${new_balance:.2f}**", inline=False)
 
     return {"embed": embed}
 
@@ -20133,12 +20133,12 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
             
             # Create success embed
             embed = discord.Embed(
-                title="✅ Sale Successful!",
+                title="✅ **SOLD!**",
                 description=f"You sold **{amount:,} share(s)** of {ticker_info['emoji']} **{ticker_info['name']}** ({ticker}) at **${current_price:.2f}** each.",
                 color=discord.Color.green()
             )
-            embed.add_field(name="Revenue", value=f"**${total_value:.2f}**", inline=True)
-            embed.add_field(name="New Balance", value=f"**${new_balance:.2f}**", inline=True)
+            embed.add_field(name="**REVENUE**", value=f"**${total_value:.2f}**", inline=True)
+            embed.add_field(name="**NEW BALANCE**", value=f"**${new_balance:.2f}**", inline=True)
             embed.add_field(name="Remaining Shares", value=f"**{current_shares - amount:,}**", inline=False)
             
             # Update marketboard immediately
