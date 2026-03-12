@@ -7652,7 +7652,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.0.5"
+            name="running /gather on V1.0.5 :3"
         )
     )
     try:
