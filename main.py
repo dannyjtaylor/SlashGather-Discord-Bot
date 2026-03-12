@@ -6025,7 +6025,28 @@ async def _gathemon_award_winner_gathers(winner_id: int, loser_id: int, num_plan
     )
     reward_embed.add_field(name="💰 **TOTAL**", value=f"**{format_money(total_value)}**", inline=True)
     if newly_granted_multi:
-        reward_embed.set_footer(text=f"<@{winner_id}> now has +25% multiplier!")
+        # Show the winner's actual Discord name in the footer instead of a raw mention
+        winner_name = None
+        # Try to resolve from the channel's guild first (for nicknames/display names)
+        try:
+            guild = getattr(channel, "guild", None)
+            if guild is not None:
+                member = guild.get_member(winner_id)
+                if member is not None:
+                    winner_name = member.display_name or member.name
+        except Exception:
+            winner_name = None
+        # Fallback to the global bot cache
+        if winner_name is None:
+            try:
+                user = bot.get_user(winner_id)
+                if user is not None:
+                    winner_name = user.name
+            except Exception:
+                winner_name = None
+        if winner_name is None:
+            winner_name = f"User {winner_id}"
+        reward_embed.set_footer(text=f"{winner_name} now has +25% GAMER MULTI (+25% money) for 30 minutes!")
     try:
         await channel.send(f"<@{winner_id}>", embed=reward_embed)
     except Exception as e:
@@ -6467,7 +6488,26 @@ async def end_gathership_game(channel, game_id: str, winner_id: int, loser_id: i
         color=discord.Color.gold()
     )
     if newly_granted_multi:
-        embed.set_footer(text=f"{winner_mention} now has +25% multiplier!")
+        # Show the winner's actual Discord name in the footer instead of a raw mention
+        winner_name = None
+        try:
+            guild = getattr(channel, "guild", None)
+            if guild is not None:
+                member = guild.get_member(winner_id)
+                if member is not None:
+                    winner_name = member.display_name or member.name
+        except Exception:
+            winner_name = None
+        if winner_name is None:
+            try:
+                user = bot.get_user(winner_id)
+                if user is not None:
+                    winner_name = user.name
+            except Exception:
+                winner_name = None
+        if winner_name is None:
+            winner_name = f"User {winner_id}"
+        embed.set_footer(text=f"{winner_name} now has +25% GAMER MULTI (+25% money) for 30 minutes!")
     # embed.add_field(name="💰 Winner takes", value=format_money(total_pot), inline=True)
     await channel.send(embed=embed)
 
@@ -7686,9 +7726,13 @@ async def on_ready():
         import traceback
         traceback.print_exc()
 
-    # Start the leaderboard update task
-    bot.loop.create_task(update_all_leaderboards())
-    print("Started automatic leaderboard updates")
+    # NOTE: Automatic leaderboard updates are intentionally disabled.
+    # The previous background task caused leaderboard messages to be
+    # re-posted in channels, which is no longer desired.
+    # If automatic leaderboard updates are needed in the future, this
+    # call can be re-enabled with appropriate rate limiting and behavior.
+    # bot.loop.create_task(update_all_leaderboards())
+    # print("Started automatic leaderboard updates")
     
     
     # Start the marketboard update task
@@ -10237,17 +10281,15 @@ async def gather(interaction: discord.Interaction):
 
         area = GATHERING_AREAS[channel_name]
 
-        # Fetch member so primary_guild (GTHR tag) is populated from API if not in cache
+        # Use the interaction's user object directly for DB/role sync to avoid an extra API fetch
         member_for_gather = interaction.user
-        try:
-            if interaction.guild:
-                member_for_gather = await interaction.guild.fetch_member(interaction.user.id)
-        except Exception:
-            pass
 
-        # Sync GTHR tag from Discord API (library often omits primary_guild on Member)
+        # Sync GTHR tag from Discord API *in the background* so we don't block the command
+        # on a Discord HTTP call. This keeps multipliers reasonably fresh without adding latency.
         if interaction.guild:
-            await sync_gthr_tag_from_api(interaction.client, interaction.guild.id, user_id)
+            asyncio.create_task(
+                sync_gthr_tag_from_api(interaction.client, interaction.guild.id, user_id)
+            )
 
         # === ONE thread call: sync roles to DB + data fetch + area check + cooldown + gather + chain roll ===
         result = await asyncio.to_thread(
@@ -10403,31 +10445,6 @@ async def gather(interaction: discord.Interaction):
                 premium_percent = (gather_result['premium_tier_multiplier'] - 1.0) * 100
                 embed.add_field(name=f"**{(PREMIUM_DISPLAY.get(tier, 'Premium')).upper()}**",
                     value=f"+{premium_percent:.2f}% - **+${gather_result['extra_money_from_premium']:,.2f}**", inline=False)
-        # Temporary GAMER MULTI (+25% money) boost
-        if gather_result.get("extra_money_from_gamer_multi", 0) > 0:
-            gamer_multi_percent = (gather_result["gamer_multi_multiplier"] - 1.0) * 100
-            embed.add_field(
-                name="🎮 **GAMER MULTI**",
-                value=f"+{gamer_multi_percent:.2f}% - **+${gather_result['extra_money_from_gamer_multi']:,.2f}**",
-                inline=False,
-            )
-            if item_boost_sources:
-                extra_ns = gather_result.get("extra_money_from_nether_star", 0)
-                extra_bs = gather_result.get("extra_money_from_black_shard", 0)
-                total_extra = extra_ns + extra_bs
-                value_parts = [f"**+${total_extra:,.2f}**"] if total_extra > 0 else []
-                value_parts.append("\n".join(_format_item_boost_source(name, count) for name, count in item_boost_sources))
-                embed.add_field(
-                    name="📦 **ITEMS**",
-                    value="\n".join(value_parts),
-                    inline=False
-                )
-            month_name = gather_result.get("month_name", "—")
-            embed.add_field(
-                name="\u200b",
-                value=f"**~**\n{interaction.user.name} - **{month_name.upper()}**",
-                inline=False,
-            )
         else:
             desc_prefix = f"{rip_emoji} " if rip_emoji else ""
             embed = discord.Embed(
@@ -10477,6 +10494,40 @@ async def gather(interaction: discord.Interaction):
                 premium_percent = (gather_result['premium_tier_multiplier'] - 1.0) * 100
                 embed.add_field(name=f"**{(PREMIUM_DISPLAY.get(tier, 'Premium')).upper()}**",
                     value=f"+{premium_percent:.2f}% - **+${gather_result['extra_money_from_premium']:,.2f}**", inline=False)
+
+        # Temporary GAMER MULTI (+25% money) boost (now applied on top of either crit or normal embed)
+        if gather_result.get("extra_money_from_gamer_multi", 0) > 0:
+            gamer_multi_percent = (gather_result["gamer_multi_multiplier"] - 1.0) * 100
+            embed.add_field(
+                name="🎮 **GAMER MULTI**",
+                value=f"+{gamer_multi_percent:.2f}% - **+${gather_result['extra_money_from_gamer_multi']:,.2f}**",
+                inline=False,
+            )
+            if item_boost_sources:
+                extra_ns = gather_result.get("extra_money_from_nether_star", 0)
+                extra_bs = gather_result.get("extra_money_from_black_shard", 0)
+                total_extra = extra_ns + extra_bs
+                value_parts = [f"**+${total_extra:,.2f}**"] if total_extra > 0 else []
+                value_parts.append("\n".join(_format_item_boost_source(name, count) for name, count in item_boost_sources))
+                embed.add_field(
+                    name="📦 **ITEMS**",
+                    value="\n".join(value_parts),
+                    inline=False
+                )
+
+            hoe_enc = gather_result.get('hoe_enchant')
+            if hoe_enc:
+                hoe_name = hoe_enc.get("name", "Unknown")
+                hoe_rarity = hoe_enc.get("rarity", "COMMON")
+                hoe_rarity_display = RARITY_EMOJI.get(hoe_rarity, f"[{hoe_rarity}]")
+                embed.add_field(name="\u2728 **IMBUEMENT**", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
+
+            month_name = gather_result.get("month_name", "—")
+            embed.add_field(
+                name="\u200b",
+                value=f"**~**\n{interaction.user.name} - **{month_name.upper()}**",
+                inline=False,
+            )
         # Temporary GAMER MULTI (+25% money) boost
         if gather_result.get("extra_money_from_gamer_multi", 0) > 0:
             gamer_multi_percent = (gather_result["gamer_multi_multiplier"] - 1.0) * 100
@@ -12024,9 +12075,12 @@ async def harvest(interaction: discord.Interaction):
 
         area = GATHERING_AREAS[channel_name]
 
-        # Sync GTHR tag from Discord API before harvest (so multiplier is correct)
+        # Sync GTHR tag from Discord API in the background so we don't block /harvest
+        # on a Discord HTTP call. Multipliers will be updated shortly after.
         if interaction.guild:
-            await sync_gthr_tag_from_api(interaction.client, interaction.guild.id, user_id)
+            asyncio.create_task(
+                sync_gthr_tag_from_api(interaction.client, interaction.guild.id, user_id)
+            )
 
         # === ONE thread call: sync roles + data fetch + area check + cooldown + harvest + chain roll ===
         crit = await asyncio.to_thread(

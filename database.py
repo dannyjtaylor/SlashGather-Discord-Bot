@@ -800,6 +800,9 @@ def get_all_users_ranks() -> list[tuple[int, str]]:
     results = []
     for doc in cursor:
         user_id = doc.get("_id")
+        # Skip any non-numeric/system documents (e.g. jackpot pools or metadata docs)
+        if not isinstance(user_id, int):
+            continue
         bloom_count = int(doc.get("bloom_count", 0))
         rank = get_bloom_rank(user_id)
         results.append((user_id, rank))
