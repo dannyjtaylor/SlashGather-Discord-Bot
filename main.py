@@ -10478,6 +10478,7 @@ async def gather(interaction: discord.Interaction):
                 embed.add_field(name="💧 **WATER STREAK MULTI**",
                     value=f"+{daily_bonus_percent:.2f}% - **+${gather_result['extra_money_from_daily']:,.2f}**", inline=False)
 
+
             if gather_result.get('extra_money_from_beta_tester', 0) > 0:
                 beta_percent = (gather_result['beta_tester_multiplier'] - 1.0) * 100
                 embed.add_field(name="🧪 **BETA TESTER**",
