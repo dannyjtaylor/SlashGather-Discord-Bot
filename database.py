@@ -59,7 +59,7 @@ def _get_users_collection() -> Collection:
         server_api=ServerApi("1"),
         maxPoolSize=10,  # Maximum connections in the pool
         minPoolSize=2,   # Keep minimum connections ready for faster response
-        maxIdleTimeMS=45000,  # Close idle connections after 45 seconds
+        maxIdleTimeMS=300000,  # Close idle connections after 5 minutes (was 45s — too aggressive)
         connectTimeoutMS=5000,  # Fail fast if can't connect (5 seconds)
         serverSelectionTimeoutMS=5000,  # Fast server selection timeout
         socketTimeoutMS=20000,  # Socket timeout for operations (20 seconds)
@@ -368,6 +368,12 @@ def perform_batch_gather_update(user_id: int, results: list, apply_cooldown: boo
         upsert=True,
     )
     return tree_rings
+
+
+def ping_database() -> None:
+    """Lightweight keepalive ping to prevent idle connection eviction."""
+    users = _get_users_collection()
+    users.database.client.admin.command("ping")
 
 
 def init_database() -> None:

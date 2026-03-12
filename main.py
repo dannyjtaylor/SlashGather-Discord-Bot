@@ -74,6 +74,7 @@ is_production = environment.lower() == 'production'
 # Database helpers (MongoDB only)
 from database import (
     init_database,
+    ping_database,
     get_user_balance,
     update_user_balance,
     get_user_last_gather_time,
@@ -1928,7 +1929,7 @@ plantera_bulb_eligible_guilds: dict[int, float] = {}  # guild_id -> timestamp wh
 PLANTERA_BULB_CHANCE = 0.02
 PLANTERA_BULB_MAX_AGE_SEC = 86400  # 24h
 # #underground-jungle: 2x wild animal and boss spawn
-UNDERGROUND_JUNGLE_ANIMAL_SPAWN_MULT = 2.0
+UNDERGROUND_JUNGLE_ANIMAL_SPAWN_MULT = 5.0
 UNDERGROUND_JUNGLE_BOSS_SPAWN_MULT = 2.0
 
 # Channel name for auto-logging rare occurrences (e.g. Legendary/Netherite/Luminite/Celestial/Mikellion plants, netherite+ imbues)
@@ -6760,6 +6761,69 @@ class GathershipFireView(discord.ui.View):
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ Something went wrong.", ephemeral=True)
 
 
+def _coinflip_critical_path(user_id: int, bet: float, choice: str) -> dict:
+    """All DB work for /coinflip in ONE sync call (runs via to_thread)."""
+    # Cooldown check
+    last_loss_time = get_user_last_coinflip_loss_time(user_id)
+    if last_loss_time > 0:
+        now = time.time()
+        elapsed = now - last_loss_time
+        if elapsed < COINFLIP_LOSS_COOLDOWN:
+            return {"cooldown": True, "wait_secs": int(COINFLIP_LOSS_COOLDOWN - elapsed)}
+
+    current_balance = get_user_balance(user_id)
+    current_balance = normalize_money(current_balance)
+
+    if not can_afford_rounded(current_balance, bet):
+        return {"cant_afford": True, "balance": current_balance}
+
+    # Deduct bet
+    new_balance_after_bet = normalize_money(current_balance - bet)
+    update_user_balance(user_id, new_balance_after_bet)
+
+    # Flip
+    coin_result = random.choice(["heads", "tails"])
+    won = choice.lower() == coin_result
+
+    # Track stats
+    increment_user_coinflip_count(user_id)
+    current_streak = get_user_coinflip_win_streak(user_id)
+    achievements_unlocked = []
+
+    if won:
+        new_streak = current_streak + 1
+        set_user_coinflip_win_streak(user_id, new_streak)
+        new_streak_level = get_achievement_level_for_stat("coinflip_win_streak", new_streak)
+        current_streak_level = get_user_achievement_level(user_id, "coinflip_win_streak")
+        if new_streak_level > current_streak_level:
+            set_user_achievement_level(user_id, "coinflip_win_streak", new_streak_level)
+            achievements_unlocked.append(("coinflip_win_streak", new_streak_level))
+    else:
+        set_user_coinflip_win_streak(user_id, 0)
+        update_user_last_coinflip_loss_time(user_id, time.time())
+
+    coinflip_count = get_user_coinflip_count(user_id)
+    new_total_level = get_achievement_level_for_stat("coinflip_total", coinflip_count)
+    current_total_level = get_user_achievement_level(user_id, "coinflip_total")
+    if new_total_level > current_total_level:
+        set_user_achievement_level(user_id, "coinflip_total", new_total_level)
+        achievements_unlocked.append(("coinflip_total", new_total_level))
+
+    if won:
+        new_balance = normalize_money(new_balance_after_bet + (bet * 2))
+        update_user_balance(user_id, new_balance)
+    else:
+        new_balance = new_balance_after_bet
+
+    return {
+        "won": won,
+        "coin_result": coin_result,
+        "new_balance": new_balance,
+        "bet": bet,
+        "achievements_unlocked": achievements_unlocked,
+    }
+
+
 # command to add /coinflip, user bets on heads or tails, if they win they get double their bet, if they lose they lose their bet
 @bot.tree.command(name="coinflip", description="Bet on heads or tails!")
 @app_commands.choices(choice=[
@@ -6772,33 +6836,28 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
             return
         user_id = interaction.user.id
 
-        # 10-second cooldown after losing a coinflip — reply via followup (we already deferred)
-        last_loss_time = get_user_last_coinflip_loss_time(user_id)
-        if last_loss_time > 0:
-            now = time.time()
-            elapsed = now - last_loss_time
-            if elapsed < COINFLIP_LOSS_COOLDOWN:
-                wait_secs = int(COINFLIP_LOSS_COOLDOWN - elapsed)
-                await safe_interaction_response(interaction, interaction.response.send_message, f"⏳ Wait **{wait_secs}** second{'s' if wait_secs != 1 else ''} before flipping again.", ephemeral=True)
-                return
-
         # Validate bet amount is positive
         if bet <= 0:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ Bet amount must be greater than $0.00!", ephemeral=True)
             return
-        
+
         # Validate bet has at most 2 decimal places (no fractional cents)
         if not validate_money_precision(bet):
             await safe_interaction_response(interaction, interaction.followup.send, "❌ Bet amount must be in dollars and cents (maximum 2 decimal places)!", ephemeral=True)
             return
-        
+
         # Normalize bet to exactly 2 decimal places
         bet = normalize_money(bet)
-        
-        current_balance = get_user_balance(user_id)
-        current_balance = normalize_money(current_balance)
-        
-        if not can_afford_rounded(current_balance, bet):
+
+        # Run all DB work in a thread to avoid blocking the event loop
+        result = await asyncio.to_thread(_coinflip_critical_path, user_id, bet, choice)
+
+        if result.get("cooldown"):
+            wait_secs = result["wait_secs"]
+            await safe_interaction_response(interaction, interaction.followup.send, f"⏳ Wait **{wait_secs}** second{'s' if wait_secs != 1 else ''} before flipping again.", ephemeral=True)
+            return
+
+        if result.get("cant_afford"):
             await safe_interaction_response(
                 interaction,
                 interaction.followup.send,
@@ -6806,74 +6865,30 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
                 ephemeral=False,
             )
             return
-        
-        # Deduct bet first
-        new_balance_after_bet = normalize_money(current_balance - bet)
-        update_user_balance(user_id, new_balance_after_bet)
-        
-        # Flip the coin - randomly choose heads or tails (lowercase)
-        coin_result = random.choice(["heads", "tails"])
-        
-        # Check if they won (their choice matches the result, both lowercase)
-        won = choice.lower() == coin_result
-        
-        # Track coinflip stats
-        increment_user_coinflip_count(user_id)
-        current_streak = get_user_coinflip_win_streak(user_id)
-        
-        # Track achievements that will be unlocked
-        achievements_unlocked = []
-        
-        if won:
-            # They win - increment streak
-            new_streak = current_streak + 1
-            set_user_coinflip_win_streak(user_id, new_streak)
-            
-            # Check and update coinflip_win_streak achievement
-            new_streak_level = get_achievement_level_for_stat("coinflip_win_streak", new_streak)
-            current_streak_level = get_user_achievement_level(user_id, "coinflip_win_streak")
-            if new_streak_level > current_streak_level:
-                set_user_achievement_level(user_id, "coinflip_win_streak", new_streak_level)
-                achievements_unlocked.append(("coinflip_win_streak", new_streak_level))
-        else:
-            # They lose - reset streak to 0 and set 10-second cooldown
-            set_user_coinflip_win_streak(user_id, 0)
-            update_user_last_coinflip_loss_time(user_id, time.time())
 
-        # Check and update coinflip_total achievement
-        coinflip_count = get_user_coinflip_count(user_id)
-        new_total_level = get_achievement_level_for_stat("coinflip_total", coinflip_count)
-        current_total_level = get_user_achievement_level(user_id, "coinflip_total")
-        if new_total_level > current_total_level:
-            set_user_achievement_level(user_id, "coinflip_total", new_total_level)
-            achievements_unlocked.append(("coinflip_total", new_total_level))
-        
-        # Calculate new balance
+        won = result["won"]
+        coin_result = result["coin_result"]
+        new_balance = result["new_balance"]
+
         if won:
-            # They win - get double their bet back (bet was already deducted, so add 2*bet)
-            new_balance = normalize_money(new_balance_after_bet + (bet * 2))
-            update_user_balance(user_id, new_balance)
             message = (
                 f"You placed **{format_money(bet)}** on **{choice}**!\n"
                 f"The coin landed on **{coin_result}**! You doubled your bet!!\n"
                 f"Your new balance is **{format_money(new_balance)}**."
             )
         else:
-            # They lose - bet was already deducted
-            new_balance = new_balance_after_bet
-            # Get the opposite choice for display (lowercase)
             opposite = "tails" if choice.lower() == "heads" else "heads"
             message = (
                 f"You placed **{format_money(bet)}** on **{choice}**!\n"
                 f"Ouch {interaction.user.name}, the coin landed on **{opposite}**. You lost **{format_money(bet)}**.\n"
                 f"Your new balance is **{format_money(new_balance)}**."
             )
-        
+
         # Send the main coinflip result message first
         await safe_interaction_response(interaction, interaction.followup.send, message, ephemeral=False)
-        
+
         # Then send all achievement notifications as ephemeral (only visible to user)
-        for achievement_name, achievement_level in achievements_unlocked:
+        for achievement_name, achievement_level in result["achievements_unlocked"]:
             await send_achievement_notification(interaction, achievement_name, achievement_level)
             # Small delay to ensure proper ordering
             await asyncio.sleep(0.5)
@@ -7029,6 +7044,190 @@ def check_win_5x5(grid, middle_only: bool):
     return count > 0, count
 
 
+def _slots_get_session_start_balance(user_id: int) -> float:
+    """Synchronous helper to fetch the user's starting balance for a slots session."""
+    balance = get_user_balance(user_id)
+    return normalize_money(balance)
+
+
+def _slots_build_embed_state(
+    user_id: int,
+    bet_type: str | None,
+    grid,
+    locked_columns,
+    spins_this_session: int,
+    is_spinning: bool = False,
+    status_text: str = "",
+):
+    """
+    Synchronous helper that performs all DB work for the slots embed:
+    - Fetch balance
+    - Check Slot Token free spin
+
+    Returns (embed_kwargs_dict, balance, use_free_spin, date_est).
+    """
+    balance = get_user_balance(user_id)
+    balance = normalize_money(balance)
+    desc_parts = [f"Balance: **{format_money(balance)}**"]
+
+    # Show when Slot Token grants a free spin today (daily shop item)
+    date_est = _get_date_est()
+    use_free_spin = has_shop_item(user_id, "slot_token") and get_slot_token_free_spin_used_date_est(user_id) != date_est
+    if use_free_spin:
+        desc_parts.append("🎫 **You have a free spin today!** (Slot Token)")
+
+    def _session_status_line(current_balance: float) -> str:
+        net = round(current_balance - balance, 2)  # session start balance passed separately in the view
+        if spins_this_session == 0:
+            return "**EVEN:** $0"
+        if net > 0:
+            return f"**UP:** {format_money(net)}"
+        if net < 0:
+            return f"**DOWN:** {format_money(abs(net))}"
+        return "**BROKE EVEN:** $0"
+
+    if bet_type:
+        pct = 0.001 if bet_type == "0.1%" else 0.01
+        bet_amt = normalize_money(balance * pct)
+        desc_parts.append(f"**BET:** **{bet_type}** ({format_money(bet_amt)})")
+        desc_parts.append(_session_status_line(balance))
+        if bet_type == "0.1%":
+            desc_parts.append("Win: middle row only.")
+        else:
+            desc_parts.append("Win: any row, column, diagonal (X), or V.")
+    else:
+        desc_parts.append(_session_status_line(balance))
+
+    desc_parts.append("")
+    desc_parts.append(format_slot_grid(grid, locked_columns, highlight_middle_row=(bet_type == "0.1%")))
+
+    title = "🎰 SLOTS - SPINNING... 🎰" if is_spinning else "🎰 SLOTS 🎰"
+    color = discord.Color.gold() if not is_spinning else discord.Color.orange()
+
+    footer_text: str
+    if not is_spinning and spins_this_session == 0:
+        footer_text = "Pick 0.1% or 1%, then click SPIN! You can respin anytime."
+    elif is_spinning:
+        footer_text = status_text or "🎰 Spinning... 🎰"
+    else:
+        footer_text = "Click SPIN to play again!"
+
+    embed_kwargs = {
+        "title": title,
+        "description": "\n".join(desc_parts),
+        "color": color,
+        "footer_text": footer_text,
+        "balance": balance,
+        "use_free_spin": use_free_spin,
+        "date_est": date_est,
+    }
+    return embed_kwargs
+
+
+def _slots_spin_critical_path(
+    user_id: int,
+    bet_type: str,
+    current_grid,
+    locked_columns,
+    spins_this_session: int,
+):
+    """
+    Synchronous critical path for a slots spin.
+
+    Responsibilities:
+    - Fetch current balance
+    - Determine bet amount / free spin usage
+    - Validate affordability and deduct bet
+    - Generate final grid and compute winnings
+    - Update balance and slots-related achievements
+
+    Returns a dict with:
+        {
+            "error": Optional[str],
+            "grid": final_grid,
+            "locked_columns": set-of-ints,
+            "winnings": float,
+            "won": bool,
+            "line_count": int,
+            "use_free_spin": bool,
+            "date_est": date_est,
+        }
+    """
+    balance = get_user_balance(user_id)
+    balance = normalize_money(balance)
+    date_est = _get_date_est()
+
+    use_free_spin = has_shop_item(user_id, "slot_token") and get_slot_token_free_spin_used_date_est(user_id) != date_est
+
+    if use_free_spin:
+        bet = 0.0
+        effective_bet = max(0.01, normalize_money(balance * 0.001))
+    else:
+        pct = 0.001 if bet_type == "0.1%" else 0.01
+        bet = normalize_money(balance * pct)
+        effective_bet = bet
+        if bet <= 0 or not can_afford_rounded(balance, bet):
+            return {
+                "error": "insufficient_balance",
+                "balance": balance,
+            }
+        new_balance = normalize_money(balance - bet)
+        update_user_balance(user_id, new_balance)
+        balance = new_balance
+
+    middle_only = bet_type == "0.1%"
+    final_grid = generate_slot_grid(bet=effective_bet, balance=balance, middle_only=middle_only)
+
+    locked_columns = set(range(5))
+    won, line_count = check_win_5x5(final_grid, middle_only)
+
+    if use_free_spin:
+        set_slot_token_free_spin_used_date_est(user_id, date_est)
+
+    payout_mult = 3
+    winnings = effective_bet * payout_mult * line_count if won else 0
+    if won:
+        cap_mult = 15
+        if line_count > cap_mult:
+            winnings = effective_bet * payout_mult * cap_mult
+        curr = get_user_balance(user_id)
+        curr = normalize_money(curr)
+        new_bal = normalize_money(curr + winnings)
+        update_user_balance(user_id, new_bal)
+        balance = new_bal
+
+    # Slots achievements: spin count + win streak (hidden 777 = 3 wins in a row)
+    increment_user_slots_spin_count(user_id)
+    achievements_unlocked = []
+    if won:
+        current_streak = get_user_slots_win_streak(user_id)
+        new_streak = current_streak + 1
+        set_user_slots_win_streak(user_id, new_streak)
+        if new_streak >= 3 and unlock_hidden_achievement(user_id, "slots_three_in_a_row"):
+            achievements_unlocked.append(("hidden", "slots_three_in_a_row"))
+    else:
+        set_user_slots_win_streak(user_id, 0)
+    spin_count = get_user_slots_spin_count(user_id)
+    new_slots_level = get_achievement_level_for_stat("slots", spin_count)
+    current_slots_level = get_user_achievement_level(user_id, "slots")
+    if new_slots_level > current_slots_level:
+        set_user_achievement_level(user_id, "slots", new_slots_level)
+        achievements_unlocked.append(("slots", new_slots_level))
+
+    return {
+        "error": None,
+        "grid": final_grid,
+        "locked_columns": locked_columns,
+        "winnings": winnings,
+        "won": won,
+        "line_count": line_count,
+        "use_free_spin": use_free_spin,
+        "date_est": date_est,
+        "balance": balance,
+        "achievements_unlocked": achievements_unlocked,
+    }
+
+
 class SlotsView(discord.ui.View):
     def __init__(self, user_id: int, timeout: float = 300):
         super().__init__(timeout=timeout)
@@ -7040,8 +7239,12 @@ class SlotsView(discord.ui.View):
         self.spun = False
         self.locked_columns = set()
         self.final_grid = None
-        self.session_start_balance = normalize_money(get_user_balance(self.user_id))
+        self.session_start_balance = 0.0
         self.spins_this_session = 0
+
+    async def setup(self):
+        """Async initializer to fetch session_start_balance off the event loop."""
+        self.session_start_balance = await asyncio.to_thread(_slots_get_session_start_balance, self.user_id)
 
     def _middle_only(self):
         return self.bet_type == "0.1%"
@@ -7051,86 +7254,62 @@ class SlotsView(discord.ui.View):
         if len(self.children) >= 3:
             self.children[2].disabled = self.spinning or self.bet_type is None
 
-    def _session_status_line(self, current_balance: float) -> str:
-        """Return UP/DOWN/EVEN/BROKE EVEN line for display beneath bet. current_balance should be normalized."""
-        net = round(current_balance - self.session_start_balance, 2)
-        if self.spins_this_session == 0:
-            return "**EVEN:** $0"
-        if net > 0:
-            return f"**UP:** {format_money(net)}"
-        if net < 0:
-            return f"**DOWN:** {format_money(abs(net))}"
-        return "**BROKE EVEN:** $0"
-
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
             await safe_interaction_response(interaction, interaction.response.send_message, "❌ This is not your slots game!", ephemeral=True)
             return False
         return True
 
-    def update_embed(self, is_spinning=False, status_text=""):
-        title = "🎰 SLOTS - SPINNING... 🎰" if is_spinning else "🎰 SLOTS 🎰"
-        balance = get_user_balance(self.user_id)
-        balance = normalize_money(balance)
-        desc_parts = [f"Balance: **{format_money(balance)}**"]
-        # Show when Slot Token grants a free spin today (daily shop item)
-        date_est = _get_date_est()
-        if has_shop_item(self.user_id, "slot_token") and get_slot_token_free_spin_used_date_est(self.user_id) != date_est:
-            desc_parts.append("🎫 **You have a free spin today!** (Slot Token)")
-        if self.bet_type:
-            pct = 0.001 if self.bet_type == "0.1%" else 0.01
-            bet_amt = normalize_money(balance * pct)
-            desc_parts.append(f"**BET:** **{self.bet_type}** ({format_money(bet_amt)})")
-            desc_parts.append(self._session_status_line(balance))
-            if self.bet_type == "0.1%":
-                desc_parts.append("Win: middle row only.")
-            else:
-                desc_parts.append("Win: any row, column, diagonal (X), or V.")
-        else:
-            desc_parts.append(self._session_status_line(balance))
-        desc_parts.append("")
-        desc_parts.append(format_slot_grid(self.grid, self.locked_columns, highlight_middle_row=self._middle_only()))
-        embed = discord.Embed(
-            title=title,
-            description="\n".join(desc_parts),
-            color=discord.Color.gold() if not is_spinning else discord.Color.orange(),
+    async def update_embed(self, is_spinning: bool = False, status_text: str = ""):
+        """Async wrapper that builds the embed via to_thread to avoid blocking."""
+        embed_kwargs = await asyncio.to_thread(
+            _slots_build_embed_state,
+            self.user_id,
+            self.bet_type,
+            self.grid,
+            self.locked_columns,
+            self.spins_this_session,
+            is_spinning,
+            status_text,
         )
-        if not self.spun and not is_spinning:
-            embed.set_footer(text="Pick 0.1% or 1%, then click SPIN! You can respin anytime.")
-        elif is_spinning:
-            embed.set_footer(text=status_text or "🎰 Spinning... 🎰")
-        else:
-            embed.set_footer(text="Click SPIN to play again!")
+        embed = discord.Embed(
+            title=embed_kwargs["title"],
+            description=embed_kwargs["description"],
+            color=embed_kwargs["color"],
+        )
+        embed.set_footer(text=embed_kwargs["footer_text"])
         return embed
 
     async def animate_spin(self, interaction: discord.Interaction):
         for item in self.children:
             item.disabled = True
-        balance = get_user_balance(self.user_id)
-        balance = normalize_money(balance)
-        date_est = _get_date_est()
-        use_free_spin = has_shop_item(self.user_id, "slot_token") and get_slot_token_free_spin_used_date_est(self.user_id) != date_est
-        if use_free_spin:
-            self.bet = 0
-            effective_bet = max(0.01, normalize_money(balance * 0.001))
-        else:
-            pct = 0.001 if self.bet_type == "0.1%" else 0.01
-            self.bet = normalize_money(balance * pct)
-            effective_bet = self.bet
-            if self.bet <= 0 or not can_afford_rounded(balance, self.bet):
-                embed = self.update_embed()
-                embed.set_footer(text="❌ Not enough balance to spin.")
-                self.spinning = False
-                self._update_spin_button()
-                for c in self.children:
-                    c.disabled = False
-                await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
-                return
-            new_balance = normalize_money(balance - self.bet)
-            update_user_balance(self.user_id, new_balance)
-        middle_only = self._middle_only()
-        self.final_grid = generate_slot_grid(bet=effective_bet, balance=balance, middle_only=middle_only)
-        embed = self.update_embed(is_spinning=True, status_text="🎰 All columns spinning... 🎰")
+
+        # Run the critical slots logic off the event loop
+        result = await asyncio.to_thread(
+            _slots_spin_critical_path,
+            self.user_id,
+            self.bet_type,
+            self.grid,
+            self.locked_columns,
+            self.spins_this_session,
+        )
+
+        if result.get("error") == "insufficient_balance":
+            # Not enough balance to spin — show updated embed with error footer
+            self.spinning = False
+            self._update_spin_button()
+            for c in self.children:
+                c.disabled = False
+            embed = await self.update_embed()
+            embed.set_footer(text="❌ Not enough balance to spin.")
+            await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
+            return
+
+        self.final_grid = result["grid"]
+        self.grid = [row[:] for row in self.final_grid]
+        self.locked_columns = result["locked_columns"]
+
+        embed = await self.update_embed(is_spinning=True, status_text="🎰 All columns spinning... 🎰")
         await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
         spin_frames = 4
         frame_interval = 0.07
@@ -7139,7 +7318,7 @@ class SlotsView(discord.ui.View):
             for r in range(5):
                 for c in range(5):
                     self.grid[r][c] = generate_slot_emoji()
-            embed = self.update_embed(is_spinning=True, status_text="🎰 Spinning... 🎰")
+            embed = await self.update_embed(is_spinning=True, status_text="🎰 Spinning... 🎰")
             await interaction.message.edit(embed=embed, view=self)
             if frame < spin_frames - 1:
                 next_at = spin_start + (frame + 1) * frame_interval
@@ -7147,57 +7326,29 @@ class SlotsView(discord.ui.View):
                 if wait > 0:
                     await asyncio.sleep(wait)
         self.grid = [row[:] for row in self.final_grid]
-        self.locked_columns = set(range(5))
-        won, line_count = check_win_5x5(self.grid, middle_only)
+        self.locked_columns = result["locked_columns"]
+        won = result["won"]
+        line_count = result["line_count"]
         self.spinning = False
         self.spun = True
-        if use_free_spin:
-            set_slot_token_free_spin_used_date_est(self.user_id, date_est)
-        payout_mult = 3
-        winnings = effective_bet * payout_mult * line_count if won else 0
-        if won:
-            cap_mult = 15
-            if line_count > cap_mult:
-                winnings = effective_bet * payout_mult * cap_mult
-            curr = get_user_balance(self.user_id)
-            curr = normalize_money(curr)
-            new_bal = normalize_money(curr + winnings)
-            update_user_balance(self.user_id, new_bal)
-        curr_balance = get_user_balance(self.user_id)
-        curr_balance = normalize_money(curr_balance)
+        curr_balance = result["balance"]
         self.spins_this_session += 1
 
-        # Slots achievements: spin count + win streak (hidden 777 = 3 wins in a row)
-        increment_user_slots_spin_count(self.user_id)
-        achievements_unlocked = []
-        if won:
-            current_streak = get_user_slots_win_streak(self.user_id)
-            new_streak = current_streak + 1
-            set_user_slots_win_streak(self.user_id, new_streak)
-            if new_streak >= 3 and unlock_hidden_achievement(self.user_id, "slots_three_in_a_row"):
-                achievements_unlocked.append(("hidden", "slots_three_in_a_row"))
-        else:
-            set_user_slots_win_streak(self.user_id, 0)
-        spin_count = get_user_slots_spin_count(self.user_id)
-        new_slots_level = get_achievement_level_for_stat("slots", spin_count)
-        current_slots_level = get_user_achievement_level(self.user_id, "slots")
-        if new_slots_level > current_slots_level:
-            set_user_achievement_level(self.user_id, "slots", new_slots_level)
-            achievements_unlocked.append(("slots", new_slots_level))
-
         title = "🎰 SLOTS - RESULT 🎰"
-        bet_text = "**FREE SPIN** (Slot Token)" if use_free_spin else f"**{format_money(self.bet)}** ({self.bet_type})"
-        session_line = self._session_status_line(curr_balance)
+        bet_text = "**FREE SPIN** (Slot Token)" if result.get("use_free_spin") else f"**{format_money(self.bet)}** ({self.bet_type})"
+        session_delta = curr_balance - self.session_start_balance
+        session_prefix = "UP" if session_delta > 0 else "DOWN" if session_delta < 0 else "EVEN"
+        session_line = f"**{session_prefix}:** {format_money(abs(session_delta)) if session_delta < 0 else format_money(session_delta)}"
         result_embed = discord.Embed(
             title=title,
-            description=f"**BET:** {bet_text}\n{session_line}\n\n{format_slot_grid(self.grid, self.locked_columns, highlight_middle_row=middle_only)}",
+            description=f"**BET:** {bet_text}\n{session_line}\n\n{format_slot_grid(self.grid, self.locked_columns, highlight_middle_row=self._middle_only())}",
             color=discord.Color.green() if won else discord.Color.red(),
         )
         if won:
             result_embed.add_field(
                 name="🎉 YOU WON! 🎉",
                 value=(
-                    f"**{line_count}** line(s)! You won **{format_money(winnings)}**!\n"
+                    f"**{line_count}** line(s)! You won **{format_money(result['winnings'])}**!\n"
                     f"Balance: **{format_money(curr_balance)}**."
                 ),
                 inline=False,
@@ -7205,7 +7356,7 @@ class SlotsView(discord.ui.View):
         else:
             lost_text = (
                 "Free spin used — no winnings this time."
-                if use_free_spin
+                if result.get("use_free_spin")
                 else f"You lost **{format_money(self.bet)}**."
             )
             result_embed.add_field(
@@ -7223,7 +7374,7 @@ class SlotsView(discord.ui.View):
                 c.disabled = False
         await interaction.message.edit(embed=result_embed, view=self)
 
-        for item in achievements_unlocked:
+        for item in result["achievements_unlocked"]:
             if item[0] == "hidden":
                 await send_hidden_achievement_notification(interaction, item[1])
             else:
@@ -7240,7 +7391,7 @@ class SlotsView(discord.ui.View):
                 return
             self.bet_type = "0.1%"
             self._update_spin_button()
-            embed = self.update_embed()
+            embed = await self.update_embed()
             await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
         except Exception as e:
             print(f"Error in bet_01pct: {e}")
@@ -7256,7 +7407,7 @@ class SlotsView(discord.ui.View):
                 return
             self.bet_type = "1%"
             self._update_spin_button()
-            embed = self.update_embed()
+            embed = await self.update_embed()
             await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
         except Exception as e:
             print(f"Error in bet_1pct: {e}")
@@ -7296,15 +7447,17 @@ async def slots(interaction: discord.Interaction):
                 "❌ Slots can only be played in **#slots-1**, **#slots-2**, **#slots-3**, **#slots-4**, or **#slots-5**!", ephemeral=True)
             return
         user_id = interaction.user.id
-        is_roulette_cooldown, roulette_time_left = check_roulette_elimination_cooldown(user_id)
+        # Run roulette cooldown check off the event loop
+        is_roulette_cooldown, roulette_time_left = await asyncio.to_thread(check_roulette_elimination_cooldown, user_id)
         if is_roulette_cooldown:
             minutes_left = roulette_time_left // 60
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"Sorry, {interaction.user.name}, you're dead. You cannot play slots for {minutes_left} minute(s)", ephemeral=True)
             return
         view = SlotsView(user_id)
+        await view.setup()
         view._update_spin_button()
-        embed = view.update_embed()
+        embed = await view.update_embed()
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
     except Exception as e:
         print(f"Error in slots command: {e}")
@@ -7318,8 +7471,19 @@ async def slots(interaction: discord.Interaction):
 #         user_balances[user_id] = 100.00
 #     return user_balances[user_id]
 
+async def mongodb_keepalive_task():
+    """Ping MongoDB every 30 seconds to keep connection pool warm and prevent stale-connection timeouts."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await asyncio.to_thread(ping_database)
+        except Exception as e:
+            print(f"MongoDB keepalive ping failed: {e}")
+        await asyncio.sleep(30)
+
+
 # on ready
-@bot.event 
+@bot.event
 async def on_ready():
     print(f"Slash Gather, {bot.user.name}")
     #set bot status
@@ -7398,7 +7562,9 @@ async def on_ready():
     print("Started celestial event check (Solar Eclipse / Blood Moon)")
     bot.loop.create_task(irrigation_auto_water_task())
     print("Started irrigation auto-water task")
-    
+    bot.loop.create_task(mongodb_keepalive_task())
+    print("Started MongoDB keepalive task")
+
     # Cache invites for invite tracking (needs "Manage Server" permission)
     global _invite_cache
     _invite_cache = {}
@@ -17272,10 +17438,10 @@ async def fetch_real_crypto_prices() -> dict[str, float] | None:
 async def update_crypto_prices_market():
     """Update cryptocurrency prices with real-world prices from CoinGecko API."""
     # Initialize history if needed
-    initialize_crypto_history()
+    await asyncio.to_thread(initialize_crypto_history)
     
     # Get current prices as fallback
-    current_prices = get_crypto_prices()
+    current_prices = await asyncio.to_thread(get_crypto_prices)
     
     # Fetch real-world prices
     real_prices = await fetch_real_crypto_prices()
@@ -17311,8 +17477,8 @@ async def update_crypto_prices_market():
         if len(price_history) > 6:
             price_history.pop(0)
     
-    # Update prices in database
-    update_crypto_prices(prices)
+    # Update prices in database (off the event loop)
+    await asyncio.to_thread(update_crypto_prices, prices)
     logging.info(f"Updated crypto prices in database: {prices}")
     return prices
 
@@ -17355,11 +17521,9 @@ async def update_coinbase_message(guild: discord.Guild):
         return  # Channel doesn't exist, skip
     
     try:
-        # Initialize crypto history if needed
-        initialize_crypto_history()
-        
-        # Get current prices
-        prices = get_crypto_prices()
+        # Initialize crypto history and get current prices off the event loop
+        await asyncio.to_thread(initialize_crypto_history)
+        prices = await asyncio.to_thread(get_crypto_prices)
         
         # Create embed
         embed = discord.Embed(
@@ -17461,7 +17625,7 @@ async def gardener_background_task():
                     for guild in bot.guilds:
                         member = guild.get_member(user_id)
                         if member is not None:
-                            sync_premium_tier_from_member(member)
+                            await asyncio.to_thread(sync_premium_tier_from_member, member)
                             break
                 db_gardeners = await asyncio.to_thread(get_user_gardeners, user_id)
                 premium_gardeners = get_premium_virtual_gardeners(user_id)
@@ -18621,63 +18785,60 @@ class MiningView(discord.ui.View):
                     # Session has expired - return early (timer task will handle the rest)
                     return
             
-            # Randomly select a coin to mine
-            coin = random.choice(CRYPTO_COINS)
-            symbol = coin["symbol"]
-            base_price = coin["base_price"]
-            
-            # Calculate mining amount based on coin's base price (proportional to old 200.0 base)
-            # Target: $50-60 per session average (assuming up to 60 clicks per 60s session, 1 per second)
-            # This means ~$0.83-$1.00 per click average, so $0.60-$1.40 range with RNG
-            # At $200 base: $0.60-$1.40 = 0.003-0.007 coins = 30-70 thousandths
-            # New system: scale by price ratio (200.0 / base_price)
-            price_ratio = 200.0 / base_price
-            # Reduced range: 30-70 thousandths (0.003-0.007) at $200 base
-            # Scaled range: multiply by price_ratio
-            min_thousandths = int(30 * price_ratio)
-            max_thousandths = int(70 * price_ratio)
-            # Ensure at least 1 thousandth
-            min_thousandths = max(1, min_thousandths)
-            max_thousandths = max(min_thousandths, max_thousandths)
-            random_thousandths = random.randint(min_thousandths, max_thousandths)
-            base_amount = round(random_thousandths / 10000, 4)
-            
-            # Apply GPU percent boost (e.g., 5% = 0.05, so multiply by 1.05)
-            # Ensure gpu_percent_boost is a number (convert to float if needed)
-            gpu_boost = float(self.gpu_percent_boost) if self.gpu_percent_boost else 0.0
-            percent_multiplier = 1.0 + (gpu_boost / 100.0)
-            amount = round(base_amount * percent_multiplier, 4)
-            # Best Buy Geek Squad: every click counts as two
-            if has_shop_item(interaction.user.id, "best_buy_geek_squad"):
-                amount *= 2
-            # Add crypto to user's holdings (NO BOOSTS APPLIED DURING MINING)
-            update_user_crypto_holdings(interaction.user.id, symbol, amount)
-            
-            # Check for hidden achievement: Blockchain (have at least 1.00 of any cryptocoin)
-            # Check all holdings after this update
-            crypto_holdings = get_user_crypto_holdings(interaction.user.id)
-            has_blockchain = False
-            for coin_symbol, coin_amount in crypto_holdings.items():
-                if coin_amount >= 1.0:
-                    has_blockchain = True
-                    break
-            
-            if has_blockchain and unlock_hidden_achievement(interaction.user.id, "blockchain"):
-                # Achievement unlocked - we'll show it in the timeout message
-                self.blockchain_achievement_unlocked = True
-            else:
-                self.blockchain_achievement_unlocked = False
-            
-            # Update session tracking
+            # Run all DB and price work off the event loop
+            def _mine_critical_path(user_id: int, gpu_percent_boost: float):
+                # Randomly select a coin to mine
+                coin = random.choice(CRYPTO_COINS)
+                symbol = coin["symbol"]
+                base_price = coin["base_price"]
+
+                # Calculate mining amount based on coin's base price (proportional to old 200.0 base)
+                price_ratio = 200.0 / base_price
+                min_thousandths = int(30 * price_ratio)
+                max_thousandths = int(70 * price_ratio)
+                min_thousandths = max(1, min_thousandths)
+                max_thousandths = max(min_thousandths, max_thousandths)
+                random_thousandths = random.randint(min_thousandths, max_thousandths)
+                base_amount = round(random_thousandths / 10000, 4)
+
+                gpu_boost = float(gpu_percent_boost) if gpu_percent_boost else 0.0
+                percent_multiplier = 1.0 + (gpu_boost / 100.0)
+                amount = round(base_amount * percent_multiplier, 4)
+
+                if has_shop_item(user_id, "best_buy_geek_squad"):
+                    amount *= 2
+
+                update_user_crypto_holdings(user_id, symbol, amount)
+
+                crypto_holdings = get_user_crypto_holdings(user_id)
+                has_blockchain = any(coin_amount >= 1.0 for coin_amount in crypto_holdings.values())
+                blockchain_unlocked = False
+                if has_blockchain and unlock_hidden_achievement(user_id, "blockchain"):
+                    blockchain_unlocked = True
+
+                prices = get_crypto_prices()
+                coin_price = prices.get(symbol, base_price)
+                mine_value = amount * coin_price
+
+                return {
+                    "symbol": symbol,
+                    "amount": amount,
+                    "mine_value": mine_value,
+                    "blockchain_unlocked": blockchain_unlocked,
+                }
+
+            result = await asyncio.to_thread(_mine_critical_path, interaction.user.id, self.gpu_percent_boost)
+
+            symbol = result["symbol"]
+            amount = result["amount"]
+            mine_value = result["mine_value"]
+            self.blockchain_achievement_unlocked = result["blockchain_unlocked"]
+
+            # Update session tracking (in-memory only)
             self.total_mines += 1
             if symbol not in self.session_mined:
                 self.session_mined[symbol] = 0.0
             self.session_mined[symbol] += amount
-            
-            # Calculate value of this mine (base value only, no boosts)
-            prices = get_crypto_prices()
-            coin_price = prices.get(symbol, base_price)
-            mine_value = amount * coin_price
             self.session_value += mine_value
             
             # Check timeout again after processing (in case processing took time)
