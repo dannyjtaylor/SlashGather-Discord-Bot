@@ -7,6 +7,14 @@ set -e
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$REPO_DIR"
 
+# Optional toggle file so the bot can disable this cron-driven auto-update.
+# If this file exists, the script exits immediately without pulling or restarting.
+CRON_DISABLE_FILE="${CRON_DISABLE_FILE:-$REPO_DIR/.pull_cron_disabled}"
+if [ -f "$CRON_DISABLE_FILE" ]; then
+  echo "Auto-update cron is currently DISABLED (flag file: $CRON_DISABLE_FILE). Exiting without changes."
+  exit 0
+fi
+
 # Default branch to track (override with env if you use another branch)
 BRANCH="${DEPLOY_BRANCH:-main}"
 

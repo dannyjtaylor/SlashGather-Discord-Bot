@@ -321,6 +321,37 @@ _imbue_locks: dict[int, asyncio.Lock] = {}
 # Per-user locks so only one of gather/harvest post-response sends a rank-up embed for the same user
 _planter_role_locks: dict[int, asyncio.Lock] = {}
 
+# Per-user temporary GAMER MULTI (+25% money gain for 30 minutes after certain game wins)
+GAMER_MULTI_DURATION_SEC = 30 * 60  # 30 minutes
+_gamer_multi_expires: dict[int, float] = {}
+
+
+def has_gamer_multi(user_id: int) -> bool:
+    """Return True if the user currently has an active GAMER MULTI."""
+    now = time.time()
+    expiry = _gamer_multi_expires.get(user_id, 0)
+    if expiry <= 0:
+        return False
+    if now >= expiry:
+        # Expired – clean up
+        _gamer_multi_expires.pop(user_id, None)
+        return False
+    return True
+
+
+def grant_gamer_multi(user_id: int) -> bool:
+    """
+    Grant GAMER MULTI to the user for 30 minutes.
+
+    Returns True if this call newly granted the multi (so victory embeds can
+    show the footer), or False if the user already had an active GAMER MULTI.
+    """
+    now = time.time()
+    if has_gamer_multi(user_id):
+        return False
+    _gamer_multi_expires[user_id] = now + GAMER_MULTI_DURATION_SEC
+    return True
+
 # Helper function to safely handle interaction responses and prevent "interaction failed" messages
 async def safe_interaction_response(interaction: discord.Interaction, 
                                    response_func, 
@@ -4183,6 +4214,7 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     palace_mult = get_palace_treasure_money_multiplier(user_id)
     edward_mult = get_edward_splash_money_multiplier(user_id)
     eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
+    gamer_multi_mult = 1.25 if has_gamer_multi(user_id) else 1.0
     extra_money_from_daily = base_for_buffs * (daily_bonus_multiplier - 1.0) if daily_bonus_multiplier > 1.0 else 0.0
     extra_money_from_beta_tester = base_for_buffs * (beta_tester_mult - 1.0) if beta_tester_mult > 1.0 else 0.0
     extra_money_from_server_booster = base_for_buffs * (server_booster_mult - 1.0) if server_booster_mult > 1.0 else 0.0
@@ -4201,7 +4233,8 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         alchemist_extra = base_for_buffs * 0.05
     elif full_data is None and has_shop_item(user_id, "alchemists_pocketwatch"):
         alchemist_extra = base_for_buffs * 0.05
-    final_value = base_for_buffs + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_server_tag + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra + extra_money_from_scarecrow + extra_money_from_bloomstone
+    extra_money_from_gamer_multi = base_for_buffs * (gamer_multi_mult - 1.0) if gamer_multi_mult > 1.0 else 0.0
+    final_value = base_for_buffs + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_server_tag + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra + extra_money_from_scarecrow + extra_money_from_bloomstone + extra_money_from_gamer_multi
 
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
@@ -4254,6 +4287,8 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         "extra_money_from_black_shard": extra_money_from_black_shard,
         "shadow_crystal_multiplier": shadow_crystal_mult,
         "extra_money_from_shadow_crystal": extra_money_from_shadow_crystal,
+        "gamer_multi_multiplier": gamer_multi_mult,
+        "extra_money_from_gamer_multi": extra_money_from_gamer_multi,
         "seasonal_multiplier": seasonal_multiplier,
         "seasonal_label": seasonal_label,
         "tree_ring_awarded": tree_ring_awarded,
@@ -5975,6 +6010,8 @@ async def _gathemon_award_winner_gathers(winner_id: int, loser_id: int, num_plan
         return
     # Run all gathers first so plants, statistics, and money are awarded instantly
     results, total_value = await asyncio.to_thread(_gathemon_winner_gathers_sync, winner_id, num_plants)
+    # Grant GAMER MULTI (+25% money) for 30 minutes to the winner (if they don't already have it)
+    newly_granted_multi = grant_gamer_multi(winner_id)
     plant_emojis = [get_item_display_emoji(r["name"]) for r in results]
     emoji_display = " ".join(plant_emojis)
     header = f"<@{winner_id}> beat <@{loser_id}> in a **GathéMon** battle for **{num_plants}** plant{'s' if num_plants != 1 else ''}!\n\n"
@@ -5987,6 +6024,8 @@ async def _gathemon_award_winner_gathers(winner_id: int, loser_id: int, num_plan
         color=discord.Color.gold(),
     )
     reward_embed.add_field(name="💰 **TOTAL**", value=f"**{format_money(total_value)}**", inline=True)
+    if newly_granted_multi:
+        reward_embed.set_footer(text=f"<@{winner_id}> now has +25% multiplier!")
     try:
         await channel.send(f"<@{winner_id}>", embed=reward_embed)
     except Exception as e:
@@ -6420,11 +6459,15 @@ async def end_gathership_game(channel, game_id: str, winner_id: int, loser_id: i
     del active_gathership_games[game_id]
     winner_mention = f"<@{winner_id}>"
     loser_mention = f"<@{loser_id}>"
+    # Grant GAMER MULTI (+25% money) for 30 minutes to the Mayflower winner (if they don't already have it)
+    newly_granted_multi = grant_gamer_multi(winner_id)
     embed = discord.Embed(
         title="🏆 MAYFLOWER — GAME OVER 🏆",
         description=f"{winner_mention} sank all of {loser_mention}'s ships and wins **{format_money(total_pot)}**!",
         color=discord.Color.gold()
     )
+    if newly_granted_multi:
+        embed.set_footer(text=f"{winner_mention} now has +25% multiplier!")
     # embed.add_field(name="💰 Winner takes", value=format_money(total_pot), inline=True)
     await channel.send(embed=embed)
 
@@ -9848,7 +9891,9 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
         palace_mult = get_palace_treasure_money_multiplier(user_id)
         edward_mult = get_edward_splash_money_multiplier(user_id)
         eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
-        fv = base_for_buffs * (1.0 + (beta_mult - 1.0) + (sb_mult - 1.0) + (tag_mult - 1.0) + (prem_mult - 1.0) + (nether_mult - 1.0) + (shadow_crystal_mult - 1.0) + (palace_mult - 1.0) + (edward_mult - 1.0) + (eclipse_mult - 1.0))
+        gamer_active = has_gamer_multi(user_id)
+        gamer_multi_mult = 1.25 if gamer_active else 1.0
+        fv = base_for_buffs * (1.0 + (beta_mult - 1.0) + (sb_mult - 1.0) + (tag_mult - 1.0) + (prem_mult - 1.0) + (nether_mult - 1.0) + (shadow_crystal_mult - 1.0) + (palace_mult - 1.0) + (edward_mult - 1.0) + (eclipse_mult - 1.0) + (gamer_multi_mult - 1.0))
         total_balance += fv
         name = item["name"]
         items_inc[name] = items_inc.get(name, 0) + 1
@@ -10356,6 +10401,14 @@ async def gather(interaction: discord.Interaction):
                 premium_percent = (gather_result['premium_tier_multiplier'] - 1.0) * 100
                 embed.add_field(name=f"**{(PREMIUM_DISPLAY.get(tier, 'Premium')).upper()}**",
                     value=f"+{premium_percent:.2f}% - **+${gather_result['extra_money_from_premium']:,.2f}**", inline=False)
+        # Temporary GAMER MULTI (+25% money) boost
+        if gather_result.get("extra_money_from_gamer_multi", 0) > 0:
+            gamer_multi_percent = (gather_result["gamer_multi_multiplier"] - 1.0) * 100
+            embed.add_field(
+                name="🎮 **GAMER MULTI**",
+                value=f"+{gamer_multi_percent:.2f}% - **+${gather_result['extra_money_from_gamer_multi']:,.2f}**",
+                inline=False,
+            )
             if item_boost_sources:
                 extra_ns = gather_result.get("extra_money_from_nether_star", 0)
                 extra_bs = gather_result.get("extra_money_from_black_shard", 0)
@@ -10368,7 +10421,11 @@ async def gather(interaction: discord.Interaction):
                     inline=False
                 )
             month_name = gather_result.get("month_name", "—")
-            embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
+            embed.add_field(
+                name="\u200b",
+                value=f"**~**\n{interaction.user.name} - **{month_name.upper()}**",
+                inline=False,
+            )
             embed.add_field(name="\U0001f4b0 **TOTAL**", value=f"**{format_money(gather_result['value'])}**", inline=True)
             embed.add_field(name="\U0001f4b5 **NEW BALANCE**", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
         else:
@@ -10420,6 +10477,14 @@ async def gather(interaction: discord.Interaction):
                 premium_percent = (gather_result['premium_tier_multiplier'] - 1.0) * 100
                 embed.add_field(name=f"**{(PREMIUM_DISPLAY.get(tier, 'Premium')).upper()}**",
                     value=f"+{premium_percent:.2f}% - **+${gather_result['extra_money_from_premium']:,.2f}**", inline=False)
+        # Temporary GAMER MULTI (+25% money) boost
+        if gather_result.get("extra_money_from_gamer_multi", 0) > 0:
+            gamer_multi_percent = (gather_result["gamer_multi_multiplier"] - 1.0) * 100
+            embed.add_field(
+                name="🎮 **GAMER MULTI**",
+                value=f"+{gamer_multi_percent:.2f}% - **+${gather_result['extra_money_from_gamer_multi']:,.2f}**",
+                inline=False,
+            )
             if item_boost_sources:
                 extra_ns = gather_result.get("extra_money_from_nether_star", 0)
                 extra_bs = gather_result.get("extra_money_from_black_shard", 0)
@@ -10440,7 +10505,11 @@ async def gather(interaction: discord.Interaction):
                 embed.add_field(name="\u2728 **IMBUEMENT**", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
 
             month_name = gather_result.get("month_name", "—")
-            embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} in {month_name}", inline=False)
+            embed.add_field(
+                name="\u200b",
+                value=f"**~**\n{interaction.user.name} - **{month_name.upper()}**",
+                inline=False,
+            )
             embed.add_field(name="\U0001f4b0 **TOTAL**", value=f"**{format_money(gather_result['value'])}**", inline=True)
             embed.add_field(name="\U0001f4b5 **NEW BALANCE**", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
 
@@ -10910,6 +10979,19 @@ async def stats(interaction: discord.Interaction):
         profile_lines.append(f"<:TreeRing:1474244868288282817> **TREE RINGS:** {tree_rings}")
         profile_lines.append(f"**🔗 CHAIN CHANCE —** Gather: {gather_chain * 100:.1f}%, Harvest: {harvest_chain * 100:.1f}%")
         profile_lines.append(f"**💧 Water Streak:** {water_streak} {day_text} (+{water_streak_pct:.1f}%)")
+        # Show remaining time on temporary GAMER MULTI, if active
+        if has_gamer_multi(user_id):
+            now_ts = time.time()
+            expiry_ts = _gamer_multi_expires.get(user_id, 0)
+            remaining_sec = max(0, int(expiry_ts - now_ts))
+            if remaining_sec > 0:
+                mins = remaining_sec // 60
+                secs = remaining_sec % 60
+                if mins > 0:
+                    remaining_str = f"{mins}m {secs}s"
+                else:
+                    remaining_str = f"{secs}s"
+                profile_lines.append(f"**🎮 GAMER MULTI:** +25% for {remaining_str}")
         if items_needed == 0:
             profile_lines.append(f"**📈 Rank Status: {next_rank} — You've Reached PLANTER X!**")
         else:
@@ -11035,6 +11117,7 @@ async def stats(interaction: discord.Interaction):
         palace_mult = get_palace_treasure_money_multiplier(user_id)
         edward_mult = get_edward_splash_money_multiplier(user_id)
         eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
+        gamer_active = has_gamer_multi(user_id)
         premium_tier = get_user_premium_tier(user_id)
         shop_inv = full_data.get("shop_inventory", {}) or get_user_shop_inventory(user_id)
         has_scarecrow = shop_inv.get("scarecrow", 0) >= 1 or has_shop_item(user_id, "scarecrow")
@@ -11100,10 +11183,15 @@ async def stats(interaction: discord.Interaction):
             mult_lines.append("**Alchemist's Pocketwatch —** +5%")
         if has_msi:
             mult_lines.append("**MSI Afterburner —** +20%")
+        if gamer_active:
+            # GAMER MULTI is a flat +25% temporary money boost from recent game wins.
+            mult_lines.append("**🎮 GAMER MULTI —** +25%")
         additive_total = 1.0 + (bloom_mult - 1.0) + (water_mult - 1.0) + (achievement_mult - 1.0) + (daily_mult - 1.0)
         additive_total += (beta_mult - 1.0) + (server_booster_mult - 1.0) + (server_tag_mult - 1.0) + (premium_mult - 1.0)
         additive_total += (nether_star_mult - 1.0) + (black_shard_mult - 1.0) + (shadow_crystal_mult - 1.0)
         additive_total += (palace_mult - 1.0) + (edward_mult - 1.0) + (eclipse_mult - 1.0)
+        if gamer_active:
+            additive_total += 0.25
         # Imbue prosperity (Gather + Harvest) counts toward combined %
         imbue_gather_prosperity = (hoe_attunement.get("money_bonus", 0) or 0) if hoe_attunement else 0
         imbue_harvest_prosperity = (tractor_attunement.get("money_bonus", 0) or 0) if tractor_attunement else 0
@@ -11629,9 +11717,11 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     extra_palace = base_for_buffs * (palace_mult - 1.0) if palace_mult > 1.0 else 0.0
     extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
     extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
+    gamer_multi_mult = 1.25 if has_gamer_multi(user_id) else 1.0
+    extra_gamer_multi = base_for_buffs * (gamer_multi_mult - 1.0) if gamer_multi_mult > 1.0 else 0.0
     work_lunch_extra = base_for_buffs * 0.10 if (not set_cooldown and has_shop_item(user_id, "work_lunch")) else 0.0
     overtime_extra = base_for_buffs * 1.0 if (not set_cooldown and has_shop_item(user_id, "overtime_approval") and random.random() < 0.10) else 0.0
-    total_value = base_for_buffs + extra_money_from_fuzzy_dice + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_server_tag + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra
+    total_value = base_for_buffs + extra_money_from_fuzzy_dice + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_server_tag + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + extra_gamer_multi
     current_balance = current_balance + total_value
 
     # ----- single batch write: items + ripeness + balance + counts + tree rings + cooldown + almanac -----
@@ -11694,6 +11784,8 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         "extra_money_from_black_shard": extra_money_from_black_shard,
         "shadow_crystal_multiplier": shadow_crystal_mult,
         "extra_money_from_shadow_crystal": extra_money_from_shadow_crystal,
+        "gamer_multi_multiplier": gamer_multi_mult,
+        "extra_money_from_gamer_multi": extra_gamer_multi,
         "is_jackpot": harvest_is_jackpot,
         "jackpot_pool_amount": harvest_jackpot_amount,
     }
@@ -12045,6 +12137,14 @@ async def harvest(interaction: discord.Interaction):
             premium_percent = (result['premium_tier_multiplier'] - 1.0) * 100
             embed.add_field(name=f"**{(PREMIUM_DISPLAY.get(tier, 'Premium')).upper()}**",
                 value=f"+{premium_percent:.2f}% - **+${result['extra_money_from_premium']:,.2f}**", inline=False)
+        # Temporary GAMER MULTI (+25% money) boost
+        if result.get("extra_money_from_gamer_multi", 0) > 0:
+            gamer_multi_percent = (result["gamer_multi_multiplier"] - 1.0) * 100
+            embed.add_field(
+                name="🎮 **GAMER MULTI**",
+                value=f"+{gamer_multi_percent:.2f}% - **+${result['extra_money_from_gamer_multi']:,.2f}**",
+                inline=False,
+            )
         # Daily shop / item boosts that affected this harvest
         item_boost_sources = []
         shop_inv = full_data.get("shop_inventory", {}) if full_data else {}
@@ -13352,7 +13452,7 @@ async def jackpot_cmd(interaction: discord.Interaction):
         amount = pool_data["amount"]
         dodge_count = pool_data["dodge_count"]
         message = (
-            f"The JackPot is **{format_money(amount)}**, "
+            f"The JackPot's base value is **{format_money(amount)}**, "
             f"and it has dodged **{dodge_count:,}** planters so far."
         )
         await safe_interaction_response(interaction, interaction.followup.send, content=message)
@@ -15658,6 +15758,143 @@ async def rollback(interaction: discord.Interaction):
         print(f"Admin {interaction.user.name} ran /rollback")
     except Exception as e:
         print(f"Error in rollback command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+@bot.tree.command(name="cron", description="[ADMIN] Enable, disable, or check status of the auto-update cron job")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    action="Enable, disable, or check status of the cron that runs pull-and-restart.sh"
+)
+@app_commands.choices(action=[
+    app_commands.Choice(name="Enable", value="enable"),
+    app_commands.Choice(name="Disable", value="disable"),
+    app_commands.Choice(name="Status", value="status"),
+])
+async def cron(interaction: discord.Interaction, action: app_commands.Choice[str]):
+    """
+    [ADMIN] Toggle or inspect the cron job that checks for new git commits every minute
+    and runs scripts/pull-and-restart.sh on the host.
+
+    This does NOT edit crontab; instead, it controls a flag file in the repo root
+    that the cron script checks before doing anything.
+    """
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        # Require server admin and #hidden channel, same as other dangerous admin commands.
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(
+                interaction,
+                interaction.followup.send,
+                "❌ **Error**: You need administrator permissions to use this command.",
+                ephemeral=True,
+            )
+            return
+
+        if not hasattr(interaction.channel, "name") or interaction.channel.name != "hidden":
+            await safe_interaction_response(
+                interaction,
+                interaction.followup.send,
+                "❌ This command can only be used in the #hidden channel.",
+                ephemeral=True,
+            )
+            return
+
+        repo_dir = os.path.dirname(os.path.abspath(__file__))
+        flag_path = os.path.join(repo_dir, ".pull_cron_disabled")
+
+        value = (action.value or "").lower()
+
+        if value == "status":
+            enabled = not os.path.exists(flag_path)
+            status_str = "ENABLED ✅" if enabled else "DISABLED ⛔"
+            detail = (
+                "The cron job that checks for new commits and runs `scripts/pull-and-restart.sh` "
+                "is currently **enabled**.\n\n"
+                "Your server's crontab still controls *whether* the script runs; this command just "
+                "controls whether the script does any work when it is invoked."
+                if enabled
+                else
+                "The cron job that checks for new commits and runs `scripts/pull-and-restart.sh` "
+                "is currently **disabled via flag file**.\n\n"
+                "The cron entry may still be firing every minute, but the script exits immediately "
+                "because the disable flag exists."
+            )
+            embed = discord.Embed(
+                title=f"🕒 Auto-Update Cron Status: {status_str}",
+                description=detail,
+                color=discord.Color.green() if enabled else discord.Color.red(),
+            )
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+            return
+
+        if value == "disable":
+            # Create the flag file if it doesn't exist
+            try:
+                with open(flag_path, "w", encoding="utf-8") as f:
+                    f.write("Auto-update cron disabled via /cron command.\n")
+            except Exception as write_err:
+                print(f"Error writing cron disable flag: {write_err}")
+                await safe_interaction_response(
+                    interaction,
+                    interaction.followup.send,
+                    "❌ Failed to write the cron disable flag file on the host.",
+                    ephemeral=True,
+                )
+                return
+
+            embed = discord.Embed(
+                title="⛔ Auto-Update Cron Disabled",
+                description=(
+                    "The next time your system cron runs `scripts/pull-and-restart.sh`, "
+                    "the script will see the disable flag and immediately exit without pulling "
+                    "or restarting the bot.\n\n"
+                    f"Flag file: `{os.path.basename(flag_path)}` in the repo root."
+                ),
+                color=discord.Color.red(),
+            )
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+            print(f"Admin {interaction.user.name} disabled auto-update cron (created {flag_path})")
+            return
+
+        if value == "enable":
+            # Remove the flag file if present
+            try:
+                if os.path.exists(flag_path):
+                    os.remove(flag_path)
+            except Exception as rm_err:
+                print(f"Error removing cron disable flag: {rm_err}")
+                await safe_interaction_response(
+                    interaction,
+                    interaction.followup.send,
+                    "❌ Failed to remove the cron disable flag file on the host.",
+                    ephemeral=True,
+                )
+                return
+
+            embed = discord.Embed(
+                title="✅ Auto-Update Cron Enabled",
+                description=(
+                    "The next time your system cron runs `scripts/pull-and-restart.sh`, "
+                    "it will run normally and pull/restart if there are new commits."
+                ),
+                color=discord.Color.green(),
+            )
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+            print(f"Admin {interaction.user.name} enabled auto-update cron (removed {flag_path} if it existed)")
+            return
+
+        # Fallback: should not happen because of choices, but handle just in case.
+        await safe_interaction_response(
+            interaction,
+            interaction.followup.send,
+            "❌ Invalid action. Use one of: Enable, Disable, or Status.",
+            ephemeral=True,
+        )
+    except Exception as e:
+        print(f"Error in cron command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
@@ -19503,6 +19740,7 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         shadow_crystal_mult = get_shadow_crystal_money_multiplier(user_id)
         edward_mult = get_edward_splash_money_multiplier(user_id)
         eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
+        gamer_multi_mult = 1.25 if has_gamer_multi(user_id) else 1.0
         extra_beta = base_for_buffs * (beta_mult - 1.0) if beta_mult > 1.0 else 0.0
         extra_booster = base_for_buffs * (sb_mult - 1.0) if sb_mult > 1.0 else 0.0
         extra_tag = base_for_buffs * (tag_mult - 1.0) if tag_mult > 1.0 else 0.0
@@ -19513,7 +19751,8 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
         extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
         extra_msi = base_for_buffs * 0.20 if has_shop_item(user_id, "msi_afterburner") else 0.0
-        total_sale_value = base_for_buffs + extra_beta + extra_booster + extra_tag + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi
+        extra_gamer_multi = base_for_buffs * (gamer_multi_mult - 1.0) if gamer_multi_mult > 1.0 else 0.0
+        total_sale_value = base_for_buffs + extra_beta + extra_booster + extra_tag + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi + extra_gamer_multi
 
         # Add money to balance (with boosts)
         current_balance = get_user_balance(user_id)
@@ -19589,6 +19828,13 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
             embed.add_field(
                 name=f"**{(PREMIUM_DISPLAY.get(premium_tier, 'Premium')).upper()}**",
                 value=f"+{premium_percent:.2f}% - **+${extra_premium:.2f}**",
+                inline=False,
+            )
+        if extra_gamer_multi > 0:
+            gamer_percent = (gamer_multi_mult - 1.0) * 100
+            embed.add_field(
+                name="🎮 **GAMER MULTI**",
+                value=f"+{gamer_percent:.2f}% - **+${extra_gamer_multi:.2f}**",
                 inline=False,
             )
 
