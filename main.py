@@ -7601,6 +7601,7 @@ async def mongodb_keepalive_task():
         await asyncio.sleep(30)
 
 
+
 # on ready
 @bot.event
 async def on_ready():
