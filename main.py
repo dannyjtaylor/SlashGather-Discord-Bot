@@ -7401,6 +7401,7 @@ class SlotsView(discord.ui.View):
         self.session_start_balance = 0.0
         self.spins_this_session = 0
 
+
     async def setup(self):
         """Async initializer to fetch session_start_balance off the event loop."""
         self.session_start_balance = await asyncio.to_thread(_slots_get_session_start_balance, self.user_id)
