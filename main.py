@@ -7822,8 +7822,9 @@ async def _gather_post_response(interaction: discord.Interaction, user_id: int,
             return planter_up, gatherer_up
 
         planter_up, gatherer_up = await asyncio.to_thread(_check_achievements)
-        # Planter achievement: only send when we just showed the rank-up (new_role), so rank-up always displays first
-        if new_role and new_role in PLANTER_RANK_ORDER:
+        # Planter achievement: only send when we just showed the rank-up (new_role), so rank-up always displays first.
+        # Skip for users who have already bloomed—they earned these ranks in a previous cycle.
+        if new_role and new_role in PLANTER_RANK_ORDER and full_data.get("bloom_count", 0) == 0:
             level = PLANTER_RANK_ORDER[new_role]
             cur_planter_ach = planter_up if planter_up else (await asyncio.to_thread(get_user_achievement_level, user_id, "planter"))
             if cur_planter_ach >= level:
@@ -11458,8 +11459,9 @@ async def _harvest_post_response(interaction: discord.Interaction, user_id: int,
             return planter_up, harvesting_up
 
         planter_up, harvesting_up = await asyncio.to_thread(_check_achievements)
-        # Planter achievement: only send when we just showed the rank-up (new_role), so rank-up always displays first
-        if new_role and new_role in PLANTER_RANK_ORDER:
+        # Planter achievement: only send when we just showed the rank-up (new_role), so rank-up always displays first.
+        # Skip for users who have already bloomed—they earned these ranks in a previous cycle.
+        if new_role and new_role in PLANTER_RANK_ORDER and full_data.get("bloom_count", 0) == 0:
             level = PLANTER_RANK_ORDER[new_role]
             cur_planter_ach = planter_up if planter_up else (await asyncio.to_thread(get_user_achievement_level, user_id, "planter"))
             if cur_planter_ach >= level:
@@ -15973,15 +15975,29 @@ async def _giveaway_end_task(
         return
     winners = random.sample(entrants, min(num_winners, len(entrants)))
     danny_mention = f"<@{GIVEAWAY_CLAIM_USER_ID}>"
+    is_random_shop = prize_data.get("type") == "shop_item_random"
     for w in winners:
-        try:
-            await asyncio.to_thread(_apply_giveaway_prize, w.id, prize_data)
-        except Exception as e:
-            print(f"[Giveaway] Error applying prize to {w.id}: {e}")
-        await channel.send(
-            f"🎁 Congratulations {w.mention}! You won: **{prize_display}**\n"
-            f"Contact {danny_mention} to claim your prize!"
-        )
+        if is_random_shop:
+            item_id = random.choice(DAILY_SHOP_ITEM_IDS)
+            single_prize = {"type": "shop_item", "item_id": item_id}
+            item_display = DAILY_SHOP_ITEMS.get(item_id, {}).get("name", item_id)
+            try:
+                await asyncio.to_thread(_apply_giveaway_prize, w.id, single_prize)
+            except Exception as e:
+                print(f"[Giveaway] Error applying prize to {w.id}: {e}")
+            await channel.send(
+                f"🎁 Congratulations {w.mention}! You won: **{item_display}**\n"
+                f"Contact {danny_mention} to claim your prize!"
+            )
+        else:
+            try:
+                await asyncio.to_thread(_apply_giveaway_prize, w.id, prize_data)
+            except Exception as e:
+                print(f"[Giveaway] Error applying prize to {w.id}: {e}")
+            await channel.send(
+                f"🎁 Congratulations {w.mention}! You won: **{prize_display}**\n"
+                f"Contact {danny_mention} to claim your prize!"
+            )
 
 
 @bot.tree.command(name="giveaway", description="[ADMIN] Start a reaction-based giveaway in #giveaways (money, item, or imbue)")
@@ -15991,7 +16007,8 @@ async def _giveaway_end_task(
     duration_minutes="How long the giveaway runs (minutes)",
     num_winners="Number of winners to pick (default 1)",
     amount="Money amount (for money prize)",
-    shop_item="Daily shop item (for item prize)",
+    shop_item="Daily shop item (for item prize); omit if using random_item_count",
+    random_item_count="Number of random daily shop items to give out (for Item prize); each winner gets one random item",
     tool_type="Hoe or Tractor (for imbue prize)",
     rarity="Imbue rarity (for imbue prize)",
     imbue_name="Imbue name (for imbue prize)",
@@ -16024,6 +16041,7 @@ async def giveaway(
     num_winners: int = 1,
     amount: float = None,
     shop_item: str = None,
+    random_item_count: int = None,
     tool_type: str = None,
     rarity: str = None,
     imbue_name: str = None,
@@ -16062,13 +16080,22 @@ async def giveaway(
             prize_display = f"${amount:,.2f}"
             prize_data = {"type": "money", "amount": amount}
         elif pt == "shop_item":
-            if not shop_item or shop_item not in DAILY_SHOP_ITEMS:
-                await safe_interaction_response(interaction, interaction.followup.send,
-                    "❌ **Error**: Select a valid `shop_item`.", ephemeral=True)
-                return
-            info = DAILY_SHOP_ITEMS[shop_item]
-            prize_display = info.get("name", shop_item)
-            prize_data = {"type": "shop_item", "item_id": shop_item}
+            if random_item_count is not None:
+                if random_item_count < 1 or random_item_count > 50:
+                    await safe_interaction_response(interaction, interaction.followup.send,
+                        "❌ **Error**: `random_item_count` must be between 1 and 50.", ephemeral=True)
+                    return
+                num_winners = random_item_count
+                prize_display = f"{random_item_count} random Daily Shop item(s)"
+                prize_data = {"type": "shop_item_random", "count": random_item_count}
+            else:
+                if not shop_item or shop_item not in DAILY_SHOP_ITEMS:
+                    await safe_interaction_response(interaction, interaction.followup.send,
+                        "❌ **Error**: Select a valid `shop_item`, or set `random_item_count` for random items.", ephemeral=True)
+                    return
+                info = DAILY_SHOP_ITEMS[shop_item]
+                prize_display = info.get("name", shop_item)
+                prize_data = {"type": "shop_item", "item_id": shop_item}
         elif pt == "imbue":
             if not tool_type or not rarity or not imbue_name:
                 await safe_interaction_response(interaction, interaction.followup.send,
