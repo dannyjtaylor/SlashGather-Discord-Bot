@@ -12642,11 +12642,11 @@ async def unlock(interaction: discord.Interaction, area: app_commands.Choice[str
         area_data = result["area_data"]
         new_balance = result["new_balance"]
         embed = discord.Embed(
-            title=f"{area_data['emoji']} Area Unlocked!",
-            description=f"{interaction.user.mention} has unlocked **{area_data['display_name']}**!",
+            title=f"{area_data['emoji']} NEW AREA",
+            description=f"{interaction.user.mention} HAS UNLOCKED **{area_data['display_name'].upper()}**!",
             color=discord.Color.green()
         )
-        embed.add_field(name="📈 Area Multiplier", value=f"**{area_data['multiplier']}x**", inline=False)
+        embed.add_field(name="📈 **AREA MULTIPLIER**", value=f"**{area_data['multiplier']}x**", inline=False)
         embed.add_field(name="💵 **NEW BALANCE**", value=f"**${new_balance:,.2f}**", inline=False)
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
         if result.get("should_notify_areas"):
