@@ -7652,7 +7652,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.0.5"
+            name="running /gather on V1.0.5 :3"
         )
     )
     try:
@@ -9435,7 +9435,7 @@ class ObsidianTowerView(discord.ui.View):
             embed.add_field(name="HP", value=f"**{self.tower_hp}** / **{ENDER_DRAGON_TOWER_HP}**\n{_tower_hp_bar(self.tower_hp)}", inline=False)
             if last_hit:
                 embed.add_field(name="⚔️ Last Hit", value=f"**{last_hit}**!", inline=False)
-            embed.set_footer(text=f"Break all End Crystals {END_CRYSTAL_EMOJI} in every channel, then defeat the Ender Dragon!")
+            embed.set_footer(text="Break all End Crystals in every channel, then defeat the Ender Dragon!")
         return embed
 
     async def _debounced_update(self, message: discord.Message | None = None):
@@ -9495,7 +9495,8 @@ class ObsidianTowerView(discord.ui.View):
                 return
             self.defeated = True
             button.disabled = True
-            button.label = "<:endcrystal:1479156246081835050> Crystal Broken!"
+            button.label = "Crystal Broken!"
+            button.emoji = END_CRYSTAL_EMOJI_PARTIAL
             if self.guild_id in ender_dragon_towers:
                 ender_dragon_towers[self.guild_id].discard(self.channel_id)
             victory_embed = self._embed()
@@ -17517,7 +17518,7 @@ async def update_stock_prices(guild_id: int):
         await initialize_stocks(guild_id)
     
     current_time = time.time()
-    cache_duration = 120  # Cache for 120 seconds (2 minutes)
+    cache_duration = 21600  # Cache for 6 hours
     
     for ticker in STOCK_TICKERS:
         symbol = ticker["symbol"]
@@ -17821,12 +17822,12 @@ async def update_marketboard_message(guild: discord.Guild):
         logging.error(f"Unexpected error updating marketboard in {guild.name}: {e}", exc_info=True)
 
 async def update_all_marketboards():
-    """Background task to update all marketboards every minute."""
+    """Background task to update all marketboards every 6 hours."""
     await bot.wait_until_ready()
-    
+
     # Wait a bit for guilds to fully load
     await asyncio.sleep(5)
-    
+
     while not bot.is_closed():
         try:
             # Update marketboards for all guilds the bot is in
@@ -17847,9 +17848,9 @@ async def update_all_marketboards():
                 await asyncio.sleep(1)
         except Exception as e:
             logging.error(f"Error in marketboard update task: {e}", exc_info=True)
-        
-        # Wait 60 seconds before next update
-        await asyncio.sleep(60)
+
+        # Wait 6 hours before next update
+        await asyncio.sleep(21600)
 
 
 # MARKET NEWS - News Alert System
@@ -18255,29 +18256,29 @@ async def update_coinbase_message(guild: discord.Guild):
         print(f"Error updating fernbase in {guild.name}: {e}")
 
 async def update_all_coinbase():
-    """Background task to update all #fernbase channels every minute."""
+    """Background task to update all #fernbase channels every 6 hours."""
     await bot.wait_until_ready()
-    
+
     # Wait a bit for guilds to fully load
     await asyncio.sleep(5)
-    
+
     logging.info("Fernbase update task started")
-    
+
     while not bot.is_closed():
         try:
             # Update prices first (now async)
             logging.info("Starting crypto price update...")
             await update_crypto_prices_market()
-            
+
             # Update fernbase channels for all guilds the bot is in
             for guild in bot.guilds:
                 await update_coinbase_message(guild)
                 await asyncio.sleep(1)  # Small delay between updates
         except Exception as e:
             logging.error(f"Error in fernbase update task: {e}", exc_info=True)
-        
-        # Wait 60 seconds before next update
-        await asyncio.sleep(60)
+
+        # Wait 6 hours before next update
+        await asyncio.sleep(21600)
 
 
 async def gardener_background_task():
