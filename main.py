@@ -7652,7 +7652,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.0.5 :3"
+            name="running /gather on V1.0.5"
         )
     )
     try:
@@ -18481,6 +18481,14 @@ async def secret_gardener_background_task():
                                                 prefix = f"{rip_em} " if rip_em else ""
                                                 lines.append(f"{prefix}{emoji} (**{item['ripeness']}**){gmo}")
                                             items_display = "\n".join(lines) or "No items"
+                                            # Truncate to fit Discord's 1024 char field limit
+                                            if len(items_display) > 1024:
+                                                truncated = items_display[:1000]
+                                                last_newline = truncated.rfind("\n")
+                                                if last_newline > 0:
+                                                    truncated = truncated[:last_newline]
+                                                remaining = len(harvest_result["gathered_items"]) - truncated.count("\n") - 1
+                                                items_display = truncated + f"\n...and {remaining} more"
                                             embed.add_field(name="\U0001f4e6 Items Harvested", value=items_display, inline=False)
                                             embed.add_field(name="\U0001f4b0 **TOTAL**", value=f"**${total_value:,.2f}**", inline=True)
                                             embed.add_field(name="\U0001f4b5 **NEW BALANCE**", value=f"**${harvest_result['current_balance']:,.2f}**", inline=True)
