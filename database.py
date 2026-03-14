@@ -403,6 +403,10 @@ def init_database() -> None:
     users.create_index("last_gather_time")
     users.create_index("total_forage_count")
 
+    # Ensure events indexes exist
+    events = _get_events_collection()
+    events.create_index([("event_type", 1), ("end_time", 1)])
+
     # Trigger a ping to verify connectivity
     users.database.client.admin.command("ping")
 
@@ -3535,11 +3539,21 @@ def get_jackpot_pool() -> dict:
 
 
 def add_to_jackpot_pool(base_value: float) -> None:
-    """Atomically add base_value to the pool and increment dodge count."""
+    """Atomically add base_value to the pool (does NOT increment dodge count)."""
     users = _get_users_collection()
     users.update_one(
         {"_id": "jackpot_pool"},
-        {"$inc": {"amount": float(base_value), "dodge_count": 1}},
+        {"$inc": {"amount": float(base_value)}},
+        upsert=True,
+    )
+
+
+def increment_jackpot_dodge() -> None:
+    """Increment the dodge count by 1 (called once per manual gather/harvest roll)."""
+    users = _get_users_collection()
+    users.update_one(
+        {"_id": "jackpot_pool"},
+        {"$inc": {"dodge_count": 1}},
         upsert=True,
     )
 

@@ -247,6 +247,7 @@ from database import (
     get_jackpot_pool,
     add_to_jackpot_pool,
     claim_jackpot_pool,
+    increment_jackpot_dodge,
 )
 
 try:
@@ -3954,11 +3955,14 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     # === JACKPOT ROLL (manual player gathers only, not gardener) ===
     is_jackpot = False
     jackpot_pool_amount = 0.0
-    if apply_cooldown and random.random() < JACKPOT_CHANCE:
-        pool_amt = claim_jackpot_pool()
-        if pool_amt > 0:
-            is_jackpot = True
-            jackpot_pool_amount = pool_amt
+    if apply_cooldown:
+        if random.random() < JACKPOT_CHANCE:
+            pool_amt = claim_jackpot_pool()
+            if pool_amt > 0:
+                is_jackpot = True
+                jackpot_pool_amount = pool_amt
+        else:
+            increment_jackpot_dodge()
 
     # Choose a random item, with event modifications
     items_to_choose = GATHERABLE_ITEMS.copy()
@@ -10407,7 +10411,7 @@ async def gather(interaction: discord.Interaction):
                     f"\U0001f4a5 **2X MONEY** \U0001f4a5"),
                 color=discord.Color.orange())
             embed.add_field(name="**VALUE**", value=f"**{format_money(gather_result['base_value'])}**", inline=True)
-            embed.add_field(name="**RIPENESS**", value=f"{rip_emoji} {gather_result['ripeness']}".strip(), inline=True)
+            embed.add_field(name="**RIPENESS**", value=f"{rip_emoji} **{gather_result['ripeness'].upper()}**".strip(), inline=True)
             embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'NO'}", inline=False)
 
             bloom_count = full_data.get("bloom_count", 0)
@@ -10457,7 +10461,7 @@ async def gather(interaction: discord.Interaction):
                 description=f"{desc_prefix}You foraged for a(n) **{item_display}**!",
                 color=discord.Color.green())
             embed.add_field(name="**VALUE**", value=f"**{format_money(gather_result['base_value'])}**", inline=True)
-            embed.add_field(name="**RIPENESS**", value=f"{rip_emoji} {gather_result['ripeness']}".strip(), inline=True)
+            embed.add_field(name="**RIPENESS**", value=f"{rip_emoji} **{gather_result['ripeness'].upper()}**".strip(), inline=True)
             embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'NO'}", inline=False)
 
             bloom_count = full_data.get("bloom_count", 0)
@@ -11602,11 +11606,14 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     # === JACKPOT ROLL for harvest (manual harvests only) ===
     harvest_is_jackpot = False
     harvest_jackpot_amount = 0.0
-    if set_cooldown and random.random() < JACKPOT_CHANCE:
-        pool_amt = claim_jackpot_pool()
-        if pool_amt > 0:
-            harvest_is_jackpot = True
-            harvest_jackpot_amount = pool_amt
+    if set_cooldown:
+        if random.random() < JACKPOT_CHANCE:
+            pool_amt = claim_jackpot_pool()
+            if pool_amt > 0:
+                harvest_is_jackpot = True
+                harvest_jackpot_amount = pool_amt
+        else:
+            increment_jackpot_dodge()
 
     for _item_idx in range(total_items_to_harvest):
         # === JACKPOT: first item in harvest becomes The JackPot ===
@@ -12110,7 +12117,7 @@ async def harvest(interaction: discord.Interaction):
             emoji = get_item_display_emoji(item["name"])
             gmo = " GMO! ✨" if item["is_gmo"] else ""
             prefix = f"{rip_em} " if rip_em else ""
-            lines.append(f"{prefix}{emoji} (**{item['ripeness']}**){gmo}")
+            lines.append(f"{prefix}{emoji} (**{item['ripeness'].upper()}**){gmo}")
         items_display = "\n".join(lines)
         if len(items_display) > 1024:
             max_content = 1024 - 20  # reserve space for " … and 99999 more"
@@ -12643,8 +12650,8 @@ async def unlock(interaction: discord.Interaction, area: app_commands.Choice[str
         area_data = result["area_data"]
         new_balance = result["new_balance"]
         embed = discord.Embed(
-            title=f"{area_data['emoji']} NEW AREA",
-            description=f"{interaction.user.mention} HAS UNLOCKED **{area_data['display_name'].upper()}**!",
+            title=f"{area_data['emoji']} **NEW AREA**",
+            description=f"{interaction.user.mention} **HAS UNLOCKED** **{area_data['display_name'].upper()}**!",
             color=discord.Color.green()
         )
         embed.add_field(name="📈 **AREA MULTIPLIER**", value=f"**{area_data['multiplier']}x**", inline=False)
@@ -14400,12 +14407,12 @@ class HireView(discord.ui.View):
                 ),
                 color=color
             )
-            embed.add_field(name="Status", value="**HIRED** ✅", inline=False)
+            embed.add_field(name="**STATUS**", value="**HIRED** ✅", inline=False)
             extra_stats = get_virtual_gardener_stats(self.user_id).get(str(slot_id), {})
             plants_gathered = extra_stats.get("plants_gathered", 0)
             total_money = extra_stats.get("total_money_earned", 0.0)
-            embed.add_field(name="Plants Gathered", value=f"**{plants_gathered}**", inline=True)
-            embed.add_field(name="Total Money Earned", value=f"**${total_money:,.2f}**", inline=True)
+            embed.add_field(name="**PLANTS GATHERED**", value=f"**{plants_gathered}**", inline=True)
+            embed.add_field(name="**MONEY EARNED**", value=f"**${total_money:,.2f}**", inline=True)
             embed.set_footer(text=f"Page {page + 1} of {self.total_pages}")
             return embed
         # Regular gardener 1-5
@@ -14415,9 +14422,9 @@ class HireView(discord.ui.View):
         gardener = gardener_dict.get(slot_id)
         price = bloom_scaled_price(self.user_id, GARDENER_PRICES[slot_id - 1])
         gardener_chance = GARDENER_CHANCES.get(slot_id, 0.05) * 100
-        description_text = f"💰 Your Balance: **${balance:,.2f}**\n\nHire gardeners to automatically gather items for you! This gardener has a **{gardener_chance:.0f}%** chance to gather every minute."
+        description_text = f"💰 **BALANCE:** **${balance:,.2f}**\n\nHire gardeners to automatically gather items for you! This gardener has a **{gardener_chance:.0f}%** chance to gather every minute."
         embed = discord.Embed(
-            title=f"🌱 Gardener #{slot_id}",
+            title=f"🌱 **GIUSEPPE**" if slot_id == 1 else f"🌱 Gardener #{slot_id}",
             description=description_text,
             color=discord.Color.green()
         )
@@ -14428,17 +14435,17 @@ class HireView(discord.ui.View):
             tool_info = GARDENER_TOOLS.get(slot_id, {"name": "Tool", "cost": 0, "chance": 0})
             tool_chance_pct = round(tool_info["chance"] * 100, 1)
             tool_chance_str = f"{tool_chance_pct:.1f}%" if tool_chance_pct < 1 else f"{tool_chance_pct:.0f}%"
-            embed.add_field(name="Status", value="**HIRED** ✅", inline=False)
-            embed.add_field(name="Plants Gathered", value=f"**{plants_gathered}**", inline=True)
-            embed.add_field(name="Total Money Earned", value=f"**${total_money:,.2f}**", inline=True)
+            embed.add_field(name="**STATUS**", value="**HIRED** ✅", inline=False)
+            embed.add_field(name="**PLANTS GATHERED**", value=f"**{plants_gathered}**", inline=True)
+            embed.add_field(name="**MONEY EARNED**", value=f"**${total_money:,.2f}**", inline=True)
             if has_tool:
-                embed.add_field(name="Tool", value=f"**{tool_info['name']}** ✅ for a **{tool_chance_str}** chance to auto harvest", inline=False)
+                embed.add_field(name="**TOOL**", value=f"**{tool_info['name'].upper()} - {tool_chance_str} AUTO-HARVEST CHANCE** ✅", inline=False)
             else:
-                embed.add_field(name="Tool", value=f"Buy **{tool_info['name']}** for a **{tool_chance_str}** chance to auto harvest", inline=False)
+                embed.add_field(name="**TOOL**", value=f"**{tool_info['name'].upper()} - {tool_chance_str} AUTO-HARVEST CHANCE**", inline=False)
         else:
             can_afford = "✅" if balance >= price else "❌"
-            embed.add_field(name="Status", value="**Available**", inline=False)
-            embed.add_field(name="Price", value=f"**${price:,.2f}** {can_afford}", inline=True)
+            embed.add_field(name="**STATUS**", value="**AVAILABLE**", inline=False)
+            embed.add_field(name="**PRICE**", value=f"**${price:,.2f}** {can_afford}", inline=True)
         embed.set_footer(text=f"Page {page + 1} of {self.total_pages}")
         return embed
 
@@ -14452,19 +14459,19 @@ class HireView(discord.ui.View):
             color=discord.Color.purple() if sg_unlocked else discord.Color.dark_grey()
         )
         if sg_unlocked:
-            embed.add_field(name="Status", value="**UNLOCKED** \u2705", inline=False)
+            embed.add_field(name="**STATUS**", value="**UNLOCKED** \u2705", inline=False)
             extra_stats = get_virtual_gardener_stats(self.user_id).get("secret", {})
             plants_gathered = extra_stats.get("plants_gathered", 0)
             total_money = extra_stats.get("total_money_earned", 0.0)
-            embed.add_field(name="Plants Gathered", value=f"**{plants_gathered}**", inline=True)
-            embed.add_field(name="Total Money Earned", value=f"**${total_money:,.2f}**", inline=True)
+            embed.add_field(name="**PLANTS GATHERED**", value=f"**{plants_gathered}**", inline=True)
+            embed.add_field(name="**MONEY EARNED**", value=f"**${total_money:,.2f}**", inline=True)
         else:
-            embed.add_field(name="Status", value="\U0001f512 Locked \u2014 Invite 10 people to unlock!", inline=False)
-        embed.add_field(name="Gather Chance", value="**50%** chance to /gather every minute", inline=False)
+            embed.add_field(name="**STATUS**", value="\U0001f512 Locked \u2014 Invite 10 people to unlock!", inline=False)
+        embed.add_field(name="**GATHER CHANCE**", value="**50%** chance to /gather every minute", inline=False)
         if sg_harvest:
-            embed.add_field(name="Auto Harvest", value="**UNLOCKED** \u2705", inline=False)
+            embed.add_field(name="**AUTO HARVEST**", value="**UNLOCKED** \u2705", inline=False)
         else:
-            embed.add_field(name="Auto Harvest", value="\U0001f512 Locked \u2014 Invite 12 people to unlock!", inline=False)
+            embed.add_field(name="**AUTO HARVEST**", value="\U0001f512 Locked \u2014 Invite 12 people to unlock!", inline=False)
         embed.set_footer(text=f"Page {self.total_pages} of {self.total_pages}")
         return embed
     
@@ -14516,7 +14523,7 @@ class HireView(discord.ui.View):
             self.hire_button.style = discord.ButtonStyle.secondary
         else:
             self.hire_button.disabled = False
-            self.hire_button.label = f"Hire for ${price:,.0f}"
+            self.hire_button.label = "HIRE"
             self.hire_button.style = discord.ButtonStyle.success
         tool_info = GARDENER_TOOLS.get(slot_id, {"name": "Tool", "cost": 0})
         if gardener:
@@ -14825,7 +14832,7 @@ class GpuView(discord.ui.View):
         else:
             # Can buy
             self.buy_button.disabled = False
-            self.buy_button.label = f"Buy for ${price:,.0f}"
+            self.buy_button.label = "BUY"
             self.buy_button.style = discord.ButtonStyle.success
     
     @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, row=0)
@@ -14995,7 +15002,7 @@ async def starthourlyevent(interaction: discord.Interaction, event: str, duratio
                 return
             else:
                 # Clean up expired event
-                clear_event(existing_hourly.get("event_id", ""))
+                await asyncio.to_thread(clear_event, existing_hourly.get("event_id", ""))
         
         # Find the event info
         event_info = next((e for e in HOURLY_EVENTS if e["id"] == event), None)
@@ -15074,7 +15081,7 @@ async def startdailyevent(interaction: discord.Interaction, event: str):
                 return
             else:
                 # Clean up expired event
-                clear_event(existing_daily.get("event_id", ""))
+                await asyncio.to_thread(clear_event, existing_daily.get("event_id", ""))
         
         # Find the event info
         event_info = next((e for e in DAILY_EVENTS if e["id"] == event), None)
@@ -15154,7 +15161,7 @@ async def startcelestialevent(interaction: discord.Interaction, event: str, dura
                 ephemeral=True)
             return
         if existing:
-            clear_event(existing.get("event_id", ""))
+            await asyncio.to_thread(clear_event, existing.get("event_id", ""))
 
         # End any active hourly and daily (send their end embeds, then clear) before starting celestial
         for ev_type in ("hourly", "daily"):
@@ -15227,7 +15234,7 @@ async def endevent(interaction: discord.Interaction, event_type: str):
         # Celestial events: no lookup in HOURLY/DAILY_EVENTS; use event_name from active_event
         if event_type in ("solar_eclipse", "blood_moon"):
             display_name = active_event.get("event_name", event_type)
-            clear_event(active_event.get("event_id", ""))
+            await asyncio.to_thread(clear_event, active_event.get("event_id", ""))
             for guild in bot.guilds:
                 try:
                     await send_event_end_embed(guild, active_event)
@@ -15258,7 +15265,7 @@ async def endevent(interaction: discord.Interaction, event_type: str):
             await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: Event info not found.", ephemeral=True)
             return
 
-        clear_event(active_event.get("event_id", ""))
+        await asyncio.to_thread(clear_event, active_event.get("event_id", ""))
 
         for guild in bot.guilds:
             try:
@@ -18365,7 +18372,7 @@ async def gardener_background_task():
                                                     emoji = get_item_display_emoji(item["name"])
                                                     gmo = " GMO! ✨" if item["is_gmo"] else ""
                                                     prefix = f"{rip_em} " if rip_em else ""
-                                                    lines.append(f"{prefix}{emoji} (**{item['ripeness']}**){gmo}")
+                                                    lines.append(f"{prefix}{emoji} (**{item['ripeness'].upper()}**){gmo}")
                                                 items_display = "\n".join(lines) or "No items"
                                                 # Discord embed field value limit is 1024 characters
                                                 if len(items_display) > 1024:
@@ -18415,7 +18422,7 @@ async def gardener_background_task():
                                                         color=gather_color
                                                     )
                                                     embed.add_field(name="**VALUE**", value=f"**${gather_result['base_value']:.2f}**", inline=True)
-                                                    embed.add_field(name="**RIPENESS**", value=f"{rip_em} {gather_result['ripeness']}".strip(), inline=True)
+                                                    embed.add_field(name="**RIPENESS**", value=f"{rip_em} **{gather_result['ripeness'].upper()}**".strip(), inline=True)
                                                     embed.add_field(name="GMO?", value="Yes ✨" if gather_result['is_gmo'] else "NO", inline=False)
                                                     await lawn_channel.send(embed=embed)
                                                     # Hidden achievement: One in a Mikellion (gardener gathered Mikellion)
@@ -18480,7 +18487,7 @@ async def secret_gardener_background_task():
                                                 emoji = get_item_display_emoji(item["name"])
                                                 gmo = " GMO! ✨" if item["is_gmo"] else ""
                                                 prefix = f"{rip_em} " if rip_em else ""
-                                                lines.append(f"{prefix}{emoji} (**{item['ripeness']}**){gmo}")
+                                                lines.append(f"{prefix}{emoji} (**{item['ripeness'].upper()}**){gmo}")
                                             items_display = "\n".join(lines) or "No items"
                                             # Truncate to fit Discord's 1024 char field limit
                                             if len(items_display) > 1024:
@@ -18490,9 +18497,18 @@ async def secret_gardener_background_task():
                                                     truncated = truncated[:last_newline]
                                                 remaining = len(harvest_result["gathered_items"]) - truncated.count("\n") - 1
                                                 items_display = truncated + f"\n...and {remaining} more"
+                                            # Final safety: hard cap at 1024
+                                            if len(items_display) > 1024:
+                                                items_display = items_display[:1021] + "..."
+                                            total_value_str = f"**${total_value:,.2f}**"
+                                            if len(total_value_str) > 1024:
+                                                total_value_str = total_value_str[:1021] + "..."
+                                            balance_str = f"**${harvest_result['current_balance']:,.2f}**"
+                                            if len(balance_str) > 1024:
+                                                balance_str = balance_str[:1021] + "..."
                                             embed.add_field(name="\U0001f4e6 Items Harvested", value=items_display, inline=False)
-                                            embed.add_field(name="\U0001f4b0 **TOTAL**", value=f"**${total_value:,.2f}**", inline=True)
-                                            embed.add_field(name="\U0001f4b5 **NEW BALANCE**", value=f"**${harvest_result['current_balance']:,.2f}**", inline=True)
+                                            embed.add_field(name="\U0001f4b0 **TOTAL**", value=total_value_str, inline=True)
+                                            embed.add_field(name="\U0001f4b5 **NEW BALANCE**", value=balance_str, inline=True)
                                             await lawn_channel.send(embed=embed)
                                             # Hidden achievement: One in a Mikellion (secret gardener harvest included Mikellion)
                                             has_mikellion = any(item.get("ripeness") == "Mikellion" for item in harvest_result.get("gathered_items", []))
@@ -18523,7 +18539,7 @@ async def secret_gardener_background_task():
                                                 color=discord.Color.purple()
                                             )
                                             embed.add_field(name="**VALUE**", value=f"**${gather_result['base_value']:,.2f}**", inline=True)
-                                            embed.add_field(name="**RIPENESS**", value=f"{rip_em} {gather_result['ripeness']}".strip(), inline=True)
+                                            embed.add_field(name="**RIPENESS**", value=f"{rip_em} **{gather_result['ripeness'].upper()}**".strip(), inline=True)
                                             embed.add_field(name="GMO?", value="Yes \u2728" if gather_result['is_gmo'] else "NO", inline=False)
                                             await lawn_channel.send(embed=embed)
                                             # Hidden achievement: One in a Mikellion (secret gardener gathered Mikellion)
@@ -18888,7 +18904,7 @@ async def hourly_event_check():
     while not bot.is_closed():
         try:
             # Check if there's already an active hourly event
-            existing_hourly = get_active_event_by_type("hourly")
+            existing_hourly = await asyncio.to_thread(get_active_event_by_type, "hourly")
             if existing_hourly:
                 # Verify the event is actually still valid (double-check)
                 current_time = time.time()
@@ -18898,11 +18914,11 @@ async def hourly_event_check():
                 else:
                     # Event found but expired, clean it up and proceed
                     print(f"Found expired hourly event: {existing_hourly['event_name']}, cleaning up and proceeding")
-                    clear_event(existing_hourly.get("event_id", ""))
+                    await asyncio.to_thread(clear_event, existing_hourly.get("event_id", ""))
                     existing_hourly = None
-            
+
             # Do not start hourly events during Solar Eclipse or Blood Moon
-            celestial_active = get_active_event_by_type("solar_eclipse") or get_active_event_by_type("blood_moon")
+            celestial_active = await asyncio.to_thread(get_active_event_by_type, "solar_eclipse") or await asyncio.to_thread(get_active_event_by_type, "blood_moon")
             if not existing_hourly and not celestial_active:
                 # 50% chance to trigger an event
                 if random.random() < 0.5:
@@ -18926,7 +18942,7 @@ async def hourly_event_check():
                     event_id = f"hourly_{int(start_time)}_{event_info['id']}"
                     
                     # Store event
-                    set_active_event(
+                    await asyncio.to_thread(set_active_event,
                         event_id=event_id,
                         event_type="hourly",
                         event_name=event_info["name"],
@@ -18934,7 +18950,7 @@ async def hourly_event_check():
                         end_time=end_time,
                         effects={"event_id": event_info["id"]}
                     )
-                    
+
                     # Send START embed first so channel order is Start then End (avoid "Ended" then "Started!" for same event name)
                     for guild in bot.guilds:
                         try:
@@ -18948,10 +18964,10 @@ async def hourly_event_check():
                             print(f"Error sending start embed to {guild.name} for hourly event: {e}")
                             import traceback
                             traceback.print_exc()
-                    
+
                     # Then send end embeds for any expired events (e.g. from bot restart), so order is Start (new) then End (old)
                     await _send_end_embeds_for_expired_events()
-                    clear_expired_events()
+                    await asyncio.to_thread(clear_expired_events)
                     
                     print(f"Started hourly event: {event_info['name']} for {duration_minutes} minutes")
                     
@@ -18960,10 +18976,10 @@ async def hourly_event_check():
                     await asyncio.sleep(wait_seconds)
                     
                     # If event was ended early (e.g. by Blood Moon/Solar Eclipse), don't send end embed again
-                    still_active = get_active_event_by_type("hourly")
+                    still_active = await asyncio.to_thread(get_active_event_by_type, "hourly")
                     if not still_active or still_active.get("event_id") != event_id:
-                        clear_event(event_id)
-                        clear_expired_events()
+                        await asyncio.to_thread(clear_event, event_id)
+                        await asyncio.to_thread(clear_expired_events)
                         print(f"Skipping hourly end embed - event was already ended (e.g. by celestial).")
                     else:
                         # Build event dict for end embed
@@ -18982,8 +18998,8 @@ async def hourly_event_check():
                                 print(f"Sent end embed to #events channel in {guild.name}")
                             except Exception as e:
                                 print(f"Error sending end embed to {guild.name}: {e}")
-                        clear_event(event_id)
-                        clear_expired_events()
+                        await asyncio.to_thread(clear_event, event_id)
+                        await asyncio.to_thread(clear_expired_events)
                         print(f"Sent end message for hourly event: {event_info['name']} (5 seconds remaining)")
                         # Wait for remaining 5 seconds until event actually ends
                         await asyncio.sleep(5)
@@ -18991,11 +19007,11 @@ async def hourly_event_check():
                 else:
                     # No new event this iteration: send end embeds for expired and clear
                     await _send_end_embeds_for_expired_events()
-                    clear_expired_events()
+                    await asyncio.to_thread(clear_expired_events)
             else:
                 # Existing event or celestial active: send end embeds for any expired and clear
                 await _send_end_embeds_for_expired_events()
-                clear_expired_events()
+                await asyncio.to_thread(clear_expired_events)
             
             # Wait for the configured interval before next check
             print(f"Hourly event check completed. Waiting {HOURLY_EVENT_INTERVAL} seconds until next check...")
@@ -19019,7 +19035,7 @@ async def daily_event_check():
     while not bot.is_closed():
         try:
             # Check if there's already an active daily event
-            existing_daily = get_active_event_by_type("daily")
+            existing_daily = await asyncio.to_thread(get_active_event_by_type, "daily")
             if existing_daily:
                 # Verify the event is actually still valid (double-check)
                 current_time = time.time()
@@ -19029,11 +19045,11 @@ async def daily_event_check():
                 else:
                     # Event found but expired, clean it up and proceed
                     print(f"Found expired daily event: {existing_daily['event_name']}, cleaning up and proceeding")
-                    clear_event(existing_daily.get("event_id", ""))
+                    await asyncio.to_thread(clear_event, existing_daily.get("event_id", ""))
                     existing_daily = None
-            
+
             # Do not start daily events during Solar Eclipse or Blood Moon
-            celestial_active = get_active_event_by_type("solar_eclipse") or get_active_event_by_type("blood_moon")
+            celestial_active = await asyncio.to_thread(get_active_event_by_type, "solar_eclipse") or await asyncio.to_thread(get_active_event_by_type, "blood_moon")
             if not existing_daily and not celestial_active:
                 # 10% chance to trigger an event
                 if random.random() < 0.10:
@@ -19050,7 +19066,7 @@ async def daily_event_check():
                     event_id = f"daily_{int(start_time)}_{event_info['id']}"
                     
                     # Store event
-                    set_active_event(
+                    await asyncio.to_thread(set_active_event,
                         event_id=event_id,
                         event_type="daily",
                         event_name=event_info["name"],
@@ -19075,7 +19091,7 @@ async def daily_event_check():
                     
                     # Then send end embeds for any expired events (e.g. from bot restart), so order is Start (new) then End (old)
                     await _send_end_embeds_for_expired_events()
-                    clear_expired_events()
+                    await asyncio.to_thread(clear_expired_events)
                     
                     print(f"Started daily event: {event_info['name']} for 24 hours")
                     
@@ -19084,10 +19100,10 @@ async def daily_event_check():
                     await asyncio.sleep(wait_seconds)
                     
                     # If event was ended early (e.g. by Blood Moon/Solar Eclipse), don't send end embed again
-                    still_active = get_active_event_by_type("daily")
+                    still_active = await asyncio.to_thread(get_active_event_by_type, "daily")
                     if not still_active or still_active.get("event_id") != event_id:
-                        clear_event(event_id)
-                        clear_expired_events()
+                        await asyncio.to_thread(clear_event, event_id)
+                        await asyncio.to_thread(clear_expired_events)
                         print(f"Skipping daily end embed - event was already ended (e.g. by celestial).")
                     else:
                         # Build event dict for end embed
@@ -19106,8 +19122,8 @@ async def daily_event_check():
                                 print(f"Sent end embed to #events channel in {guild.name}")
                             except Exception as e:
                                 print(f"Error sending end embed to {guild.name}: {e}")
-                        clear_event(event_id)
-                        clear_expired_events()
+                        await asyncio.to_thread(clear_event, event_id)
+                        await asyncio.to_thread(clear_expired_events)
                         print(f"Sent end message for daily event: {event_info['name']} (5 seconds remaining)")
                         # Wait for remaining 5 seconds until event actually ends
                         await asyncio.sleep(5)
@@ -19115,11 +19131,11 @@ async def daily_event_check():
                 else:
                     # No new event this iteration: send end embeds for expired and clear
                     await _send_end_embeds_for_expired_events()
-                    clear_expired_events()
+                    await asyncio.to_thread(clear_expired_events)
             else:
                 # Existing event or celestial active: send end embeds for any expired and clear
                 await _send_end_embeds_for_expired_events()
-                clear_expired_events()
+                await asyncio.to_thread(clear_expired_events)
             
             # Wait for the configured interval before next check
             print(f"Daily event check completed. Waiting {DAILY_EVENT_INTERVAL} seconds until next check...")
@@ -19141,7 +19157,7 @@ async def event_cleanup_task():
     while not bot.is_closed():
         try:
             await _send_end_embeds_for_expired_events()
-            clear_expired_events()
+            await asyncio.to_thread(clear_expired_events)
             await asyncio.sleep(60)  # Check every minute
         except Exception as e:
             print(f"Error in event_cleanup_task: {e}")
@@ -19156,21 +19172,21 @@ async def _end_active_event_for_all_guilds(event: dict):
             await send_event_end_embed(guild, event)
         except Exception as e:
             print(f"Error sending event end embed to {guild.name}: {e}")
-    clear_event(event_id)
+    await asyncio.to_thread(clear_event, event_id)
 
 
 async def _send_end_embeds_for_expired_events():
     """Get any events that have already ended, send their end embeds to #events in all guilds, then clear them. Call on startup and before clear_expired_events() in loops."""
-    expired = get_expired_events()
+    expired = await asyncio.to_thread(get_expired_events)
     for event in expired:
         try:
             await _end_active_event_for_all_guilds(event)
             print(f"Event recovery: sent end embed for {event.get('event_type')} '{event.get('event_name')}'")
         except Exception as e:
             print(f"Error sending end embed for expired event {event.get('event_id')}: {e}")
-            clear_event(event.get("event_id", ""))
+            await asyncio.to_thread(clear_event, event.get("event_id", ""))
     if expired:
-        clear_expired_events()
+        await asyncio.to_thread(clear_expired_events)
 
 
 async def celestial_event_check():
@@ -19182,18 +19198,18 @@ async def celestial_event_check():
     while not bot.is_closed():
         try:
             await _send_end_embeds_for_expired_events()
-            clear_expired_events()
+            await asyncio.to_thread(clear_expired_events)
             now_est = _now_est()
             now_utc = now_est.astimezone(datetime.timezone.utc)
             now_ts = now_utc.timestamp()
             today_est = (now_est.year, now_est.month, now_est.day)
 
             # End expired celestial events (send end embed, then clear)
-            se = get_active_event_by_type("solar_eclipse")
+            se = await asyncio.to_thread(get_active_event_by_type, "solar_eclipse")
             if se and now_ts >= se.get("end_time", 0):
                 await _end_active_event_for_all_guilds(se)
                 print("Solar Eclipse ended (time expired).")
-            bm = get_active_event_by_type("blood_moon")
+            bm = await asyncio.to_thread(get_active_event_by_type, "blood_moon")
             if bm and now_ts >= bm.get("end_time", 0):
                 await _end_active_event_for_all_guilds(bm)
                 print("Blood Moon ended (time expired).")
@@ -19201,17 +19217,17 @@ async def celestial_event_check():
             # At 4:30 Eastern: 50% chance to start Solar Eclipse (day: 4:30 -> 19:30 Eastern)
             if (now_est.hour, now_est.minute) == CELESTIAL_DAY_START_EST and today_est != last_solar_trigger_date:
                 last_solar_trigger_date = today_est
-                if not get_active_event_by_type("solar_eclipse") and random.random() < CELESTIAL_TRIGGER_CHANCE:
+                if not await asyncio.to_thread(get_active_event_by_type, "solar_eclipse") and random.random() < CELESTIAL_TRIGGER_CHANCE:
                     # End any active hourly and daily (send their end embeds, then clear)
                     for ev_type in ("hourly", "daily"):
-                        existing = get_active_event_by_type(ev_type)
+                        existing = await asyncio.to_thread(get_active_event_by_type, ev_type)
                         if existing:
                             await _end_active_event_for_all_guilds(existing)
                             print(f"Ended active {ev_type} event for Solar Eclipse start.")
                     end_est = now_est.replace(hour=CELESTIAL_NIGHT_START_EST[0], minute=CELESTIAL_NIGHT_START_EST[1], second=0, microsecond=0)
                     end_ts = end_est.timestamp()
                     event_id = f"solar_eclipse_{int(now_ts)}"
-                    set_active_event(
+                    await asyncio.to_thread(set_active_event,
                         event_id=event_id,
                         event_type="solar_eclipse",
                         event_name=SOLAR_ECLIPSE_EVENT_NAME,
@@ -19234,9 +19250,9 @@ async def celestial_event_check():
             # At 19:30 Eastern: 50% chance to start Blood Moon (night: 19:30 -> 4:30 Eastern next day)
             if (now_est.hour, now_est.minute) == CELESTIAL_NIGHT_START_EST and today_est != last_blood_trigger_date:
                 last_blood_trigger_date = today_est
-                if not get_active_event_by_type("blood_moon") and random.random() < CELESTIAL_TRIGGER_CHANCE:
+                if not await asyncio.to_thread(get_active_event_by_type, "blood_moon") and random.random() < CELESTIAL_TRIGGER_CHANCE:
                     for ev_type in ("hourly", "daily"):
-                        existing = get_active_event_by_type(ev_type)
+                        existing = await asyncio.to_thread(get_active_event_by_type, ev_type)
                         if existing:
                             await _end_active_event_for_all_guilds(existing)
                             print(f"Ended active {ev_type} event for Blood Moon start.")
@@ -19245,7 +19261,7 @@ async def celestial_event_check():
                                              hour=CELESTIAL_DAY_START_EST[0], minute=CELESTIAL_DAY_START_EST[1], second=0, microsecond=0)
                     end_ts = end_est.timestamp()
                     event_id = f"blood_moon_{int(now_ts)}"
-                    set_active_event(
+                    await asyncio.to_thread(set_active_event,
                         event_id=event_id,
                         event_type="blood_moon",
                         event_name=BLOOD_MOON_EVENT_NAME,
@@ -19340,32 +19356,31 @@ class MiningView(discord.ui.View):
         # Create session summary
         session_summary = ""
         for sym, amt in self.session_mined.items():
-            coin_name = next(c["name"] for c in CRYPTO_COINS if c["symbol"] == sym)
-            session_summary += f"{coin_name} ({sym}): **{amt:.4f}**\n"
-        
+            session_summary += f"**{sym}**: **{amt:.4f}**\n"
+
         # Create GPU info text
         gpu_text = ""
         if self.gpus_used:
             gpu_text = "\n".join(f"**{g}**" for g in self.gpus_used)
-        
+
         # Create description with countdown timer
-        description_text = f"Click the button as many times as you can in {max_time} seconds!"
+        description_text = ""
         if self.gpu_percent_boost > 0:
-            description_text += f"\n💰 **GPU Boost: +{self.gpu_percent_boost}%**"
-        
+            description_text += f"💰 **GPU MULTI: +{self.gpu_percent_boost}%**"
+
         # Show time remaining in integer seconds - BOLD THE SECONDS
         description_text += f"\n\n⏰ Time Remaining: **{int(time_remaining)}** seconds"
-        
+
         success_embed = discord.Embed(
             title="⛏️ /mine",
             description=description_text,
             color=discord.Color.light_grey()
         )
-        success_embed.add_field(name="**Total Mines**", value=f"**{self.total_mines}**", inline=True)
+        success_embed.add_field(name="**MINES:**", value=f"**{self.total_mines}**", inline=True)
         if gpu_text:
-            success_embed.add_field(name="**GPUs Active**", value=gpu_text, inline=False)
+            success_embed.add_field(name="**GPUS:**", value=gpu_text, inline=False)
         if session_summary:
-            success_embed.add_field(name="Mined", value=session_summary.strip(), inline=False)
+            success_embed.add_field(name="**CRYPTO:**", value=session_summary.strip(), inline=False)
         success_embed.set_footer(text="Keep clicking!")
         
         try:
@@ -19395,37 +19410,36 @@ class MiningView(discord.ui.View):
         
         # Create timeout embed
         timeout_embed = discord.Embed(
-            title="⏰ Mine Session Over",
-            description="Time's up!",
+            title="⏰ **SESSION OVER**",
+            description="**TIME'S UP!**",
             color=discord.Color.orange()
         )
-        
+
         if self.total_mines > 0:
             timeout_embed.add_field(
-                name="\u200b",
-                value=f"Total Mines: **{self.total_mines}**",
+                name="**MINES:**",
+                value=f"**{self.total_mines}**",
                 inline=False
             )
-            
+
             # Add GPU info if GPUs were used
             if self.gpus_used:
-                timeout_embed.add_field(name="GPUs Used", value="\n".join(f"**{g}**" for g in self.gpus_used), inline=False)
-            
+                timeout_embed.add_field(name="**GPUS:**", value="\n".join(f"**{g}**" for g in self.gpus_used), inline=False)
+
             session_summary = ""
             for sym, amt in self.session_mined.items():
-                coin_name = next(c["name"] for c in CRYPTO_COINS if c["symbol"] == sym)
-                session_summary += f"{coin_name} ({sym}): **{amt:.4f}**\n"
-            
+                session_summary += f"**{sym}**: **{amt:.4f}**\n"
+
             if session_summary:
-                timeout_embed.add_field(name="Crypto Mined", value=session_summary.strip(), inline=False)
-            
+                timeout_embed.add_field(name="**CRYPTO:**", value=session_summary.strip(), inline=False)
+
             # Add hidden achievement message if unlocked
             if self.blockchain_achievement_unlocked:
                 timeout_embed.add_field(name="🎉 Hidden Achievement Unlocked!", value="**Blockchain**", inline=False)
 
             timeout_embed.set_footer(text="Use /sell to sell your crypto")
         else:
-            timeout_embed.description = "Time's up! You didn't mine anything this session."
+            timeout_embed.description = "**TIME'S UP!**"
         
         # Update the message with timeout embed if we have a reference
         if self.message:
@@ -19659,21 +19673,21 @@ async def mine(interaction: discord.Interaction):
         # Create mining embed with button
         base_time = 60
         total_time = base_time + total_seconds_boost
-        description_text = f"Click the **MINE!** button below to start mining!\n\nYou will have **{total_time}** seconds to click as many times as you can once you start!"
+        description_text = f"You will have **{total_time}** seconds to click as many times as you can!"
         if total_percent_boost > 0:
-            description_text += f"\n💰 **GPU Boost: +{total_percent_boost}%**"
+            description_text += f"\n💰 **GPU MULTI: +{total_percent_boost}%**"
         if total_seconds_boost > 0:
-            description_text += f"\n⏱️ **Time Boost: +{total_seconds_boost} seconds**"
-        
+            description_text += f"\n⏱️ **ADDED TIME: +{total_seconds_boost} seconds**"
+
         embed = discord.Embed(
-            title="⛏️ Cryptocurrency Mining",
+            title="⛏️ **/mine**",
             description=description_text,
             color=discord.Color.blue()
         )
         
         # Add GPU info if user has GPUs
         if gpus_used:
-            embed.add_field(name="GPUs Active", value="\n".join(f"**{g}**" for g in gpus_used), inline=False)
+            embed.add_field(name="**GPUS:**", value="\n".join(f"**{g}**" for g in gpus_used), inline=False)
         
         view = MiningView(user_id, timeout=total_time, gpu_percent_boost=total_percent_boost, gpu_seconds_boost=total_seconds_boost, gpus_used=gpus_used)
         message = await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
@@ -19796,7 +19810,6 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         # Create success embed
         embed = discord.Embed(
             title="💰 **SOLD!**",
-            description=f"You sold all your cryptocurrency for **${total_sale_value:.2f}**!",
             color=discord.Color.green(),
         )
         embed.add_field(name="**SOLD**", value="\n".join(sold_items) if sold_items else "None", inline=False)
@@ -19903,7 +19916,8 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
             value=f"**RTC**: {updated_holdings['RTC']:.4f}\n**TER**: {updated_holdings['TER']:.4f}\n**CNY**: {updated_holdings['CNY']:.4f}",
             inline=False,
         )
-        embed.add_field(name="**NEW BALANCE**", value=f"**${new_balance:.2f}**", inline=False)
+        embed.add_field(name="💰 **TOTAL**", value=f"**${total_sale_value:,.2f}**", inline=True)
+        embed.add_field(name="💵 **NEW BALANCE**", value=f"**${new_balance:,.2f}**", inline=True)
 
         return {"embed": embed}
 
@@ -19996,7 +20010,6 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
     # Create success embed
     embed = discord.Embed(
         title="💰 **SOLD!**",
-        description=f"You sold {amount:.4f} **{coin}** for **${sale_value:.2f}**!",
         color=discord.Color.green(),
     )
 
@@ -20096,7 +20109,8 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         value=f"**RTC**: {updated_holdings['RTC']:.4f}\n**TER**: {updated_holdings['TER']:.4f}\n**CNY**: {updated_holdings['CNY']:.4f}",
         inline=False,
     )
-    embed.add_field(name="**NEW BALANCE**", value=f"**${new_balance:.2f}**", inline=False)
+    embed.add_field(name="💰 **TOTAL**", value=f"**${sale_value:,.2f}**", inline=True)
+    embed.add_field(name="💵 **NEW BALANCE**", value=f"**${new_balance:,.2f}**", inline=True)
 
     return {"embed": embed}
 
