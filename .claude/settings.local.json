@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh run:*)",
+      "Bash(python:*)",
+      "Bash(git status:*)",
+      "Bash(git add:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [],
+    "PostToolUse": [],
+    "PreCompact": [],
+    "Stop": [],
+    "SessionStart": [],
+    "SessionEnd": []
+  }
+}

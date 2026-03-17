@@ -1548,6 +1548,10 @@ GATHERING_AREAS = {
 
 VALID_GATHERING_CHANNELS = set(GATHERING_AREAS.keys())
 
+# Bloom rank auto-unlock: if bloom_count >= threshold, area is unlocked AND planter level check is skipped.
+# CEDAR I+ (3) = grove, BIRCH I+ (6) = marsh, MAPLE I+ (9) = bog, OAK I+ (12) = mire.
+BLOOM_AUTO_UNLOCK_THRESHOLDS = {"grove": 3, "marsh": 6, "bog": 9, "mire": 12}
+
 # Order of unlockable areas for areas_unlocked achievement (forest is default; jungle before grove)
 AREA_ORDER_FOR_ACHIEVEMENT = ["underground-jungle", "grove", "marsh", "bog", "mire"]
 
@@ -2056,12 +2060,17 @@ def check_area_access(member, channel_name: str, user_id: int) -> tuple[bool, st
 
     # Check planter rank: use the higher of Discord role level and DB-derived level (bloom_cycle_plants)
     # so e.g. PLANTER X who just leveled up can use mire even if role hasn't synced yet
-    role_level = get_user_planter_level(member)
-    cycle_plants = get_user_bloom_cycle_plants(user_id)
-    db_level = get_planter_level_from_total_items(cycle_plants)
-    user_planter_level = max(role_level, db_level)
-    if user_planter_level < area["required_planter_level"]:
-        return False, f"❌ You must be **{area['required_planter_rank']}** or above to gather in **{area['display_name']}**! You need to gather more plants to rank up."
+    # Skip planter level check if bloom rank auto-unlocked this area
+    bloom_count = get_user_bloom_count(user_id)
+    bloom_threshold = BLOOM_AUTO_UNLOCK_THRESHOLDS.get(channel_name)
+    bloom_bypassed = bloom_threshold is not None and bloom_count >= bloom_threshold
+    if not bloom_bypassed:
+        role_level = get_user_planter_level(member)
+        cycle_plants = get_user_bloom_cycle_plants(user_id)
+        db_level = get_planter_level_from_total_items(cycle_plants)
+        user_planter_level = max(role_level, db_level)
+        if user_planter_level < area["required_planter_level"]:
+            return False, f"❌ You must be **{area['required_planter_rank']}** or above to gather in **{area['display_name']}**! You need to gather more plants to rank up."
 
     return True, ""
 
@@ -5390,7 +5399,10 @@ class RouletteContinueView(discord.ui.View):
                 await interaction.message.delete()
             except:
                 pass  # Message might already be deleted
-            
+
+            # Increment russian roulette achievement for pulling the trigger
+            await check_russian_roulette_achievement(current_player_id, interaction=interaction)
+
             # Continue the game
             await play_roulette_round(interaction.channel, self.game_id)
         except Exception as e:
@@ -7656,7 +7668,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.0.5 :3"
+            name="running /gather on V1.0.6 :3"
         )
     )
     try:
@@ -8080,7 +8092,11 @@ def _gather_critical_path(member, user_id: int, channel_name: str, area: dict) -
                     f"Use `/unlock {channel_name}` to unlock it for **{format_money(area['unlock_cost'])}**."
                 )
             }
-        if effective_planter_level < area.get("required_planter_level", 0):
+        # Skip planter level check if bloom rank auto-unlocked this area
+        bloom_count = full_data.get("bloom_count", 0)
+        bloom_threshold = BLOOM_AUTO_UNLOCK_THRESHOLDS.get(channel_name)
+        bloom_bypassed = bloom_threshold is not None and bloom_count >= bloom_threshold
+        if not bloom_bypassed and effective_planter_level < area.get("required_planter_level", 0):
             return {"area_error": f"❌ You must be **{area['required_planter_rank']}** or above to gather in **{area['display_name']}**! You need to gather more plants to rank up."}
 
     # --- cooldown check (pure computation on pre-fetched data) ---
@@ -8238,12 +8254,12 @@ async def _gather_post_response(interaction: discord.Interaction, user_id: int,
 class StealView(discord.ui.View):
     """Red STEAL button on stealable gather/harvest. Valid for 6s (gather) or 4s (harvest)."""
 
-    def __init__(self, victim_id: int, victim_planter_level: int, steal_type: str, steal_payload: dict, window_sec: float):
+    def __init__(self, victim_id: int, steal_type: str, steal_payload: dict, window_sec: float, channel_name: str):
         super().__init__(timeout=window_sec + 1.0)  # slightly longer so we can disable on_timeout
         self.victim_id = victim_id
-        self.victim_planter_level = victim_planter_level
         self.steal_type = steal_type
         self.steal_payload = steal_payload
+        self.channel_name = channel_name
         self._window_sec = window_sec
         self._created_at = time.time()
         self._stolen = False
@@ -8281,18 +8297,26 @@ class StealView(discord.ui.View):
                 "❌ Too late! The steal window has closed!", ephemeral=True)
             return
 
-        stealer_level = get_user_planter_level(interaction.user)
-        if stealer_level == 0:
-            await safe_interaction_response(
-                interaction, interaction.response.send_message,
-                "❌ You need a Planter rank to steal! Use /gather to rank up.", ephemeral=True)
-            return
         stealer_id = interaction.user.id
-        if not has_shop_item(stealer_id, "bandana") and abs(stealer_level - self.victim_planter_level) > 2:
-            await safe_interaction_response(
-                interaction, interaction.response.send_message,
-                "❌ You can only steal from someone within 2 Planter ranks above or below you!", ephemeral=True)
-            return
+
+        # Area-based steal restriction: stealer must have the steal channel's area unlocked,
+        # or the area directly above or below it. Underground jungle is a free-for-all.
+        if self.channel_name != "underground-jungle":
+            stealer_unlocked = get_user_unlocked_areas(stealer_id)
+            # Forest is always unlocked
+            stealer_unlocked["forest"] = True
+            area_order = ["forest", "underground-jungle", "grove", "marsh", "bog", "mire"]
+            steal_area = self.channel_name
+            if steal_area in area_order:
+                idx = area_order.index(steal_area)
+                # Allowed if stealer has unlocked this area, or adjacent areas
+                adjacent = {area_order[i] for i in range(max(0, idx - 1), min(len(area_order), idx + 2))}
+                stealer_has_adjacent = any(stealer_unlocked.get(a, False) for a in adjacent)
+                if not stealer_has_adjacent:
+                    await safe_interaction_response(
+                        interaction, interaction.response.send_message,
+                        "❌ You can't steal here! You need a nearby area unlocked.", ephemeral=True)
+                    return
 
         self._stolen = True
         victim_id = self.victim_id
@@ -8323,8 +8347,10 @@ class StealView(discord.ui.View):
                 decoy_refund = round(stolen_value * 0.15, 2)
                 victim_bal = get_user_balance(victim_id)
                 update_user_balance(victim_id, victim_bal + decoy_refund)
+            # Return stealer's updated balance for embed
+            return get_user_balance(stealer_id)
 
-        await asyncio.to_thread(_do_steal)
+        stealer_new_balance = await asyncio.to_thread(_do_steal)
 
         # Check stealing achievement (total steals just incremented in DB)
         def _check_stealing_achievement():
@@ -8352,23 +8378,24 @@ class StealView(discord.ui.View):
         decoy_refund = round(stolen_val * 0.15, 2) if has_shop_item(self.victim_id, "decoys") and stolen_val > 0 else 0
         try:
             old_embed = interaction.message.embeds[0] if interaction.message.embeds else None
-            if self.steal_type == "gather" and old_embed:
-                # Rebuild as dark-red "STOLEN GATHER!" embed with clean formatting
+            if self.steal_type in ("gather", "harvest") and old_embed:
+                # Rebuild as dark-red "STOLEN GATHER!/HARVEST!" embed with clean formatting
                 DARK_RED = 0x8B0000
+                label = "GATHER" if self.steal_type == "gather" else "HARVEST"
                 new_embed = discord.Embed(
-                    title="🔴 STOLEN GATHER!",
-                    description=f"**{stealer_name}** stole this gather!",
+                    title=f"🔴 STOLEN {label}!",
+                    description=f"**{stealer_name}** stole this {self.steal_type}!",
                     color=DARK_RED,
                 )
                 for f in old_embed.fields:
-                    new_embed.add_field(name=f.name, value=f.value, inline=f.inline)
+                    # Replace NEW BALANCE with stealer's updated balance
+                    if "NEW BALANCE" in (f.name or ""):
+                        new_embed.add_field(name=f.name, value=f"**{format_money(stealer_new_balance)}**", inline=f.inline)
+                    else:
+                        new_embed.add_field(name=f.name, value=f.value, inline=f.inline)
                 if decoy_refund > 0:
                     new_embed.add_field(name="🪤 Decoys", value=f"Victim got **15%** back: **${decoy_refund:.2f}**", inline=False)
                 embed = new_embed
-            elif self.steal_type == "harvest" and old_embed:
-                # Harvest: keep embed, add footer for who stole it
-                old_embed.set_footer(text=f"🔴 Stolen by **{stealer_name}**")
-                embed = old_embed
             elif old_embed:
                 old_embed.set_footer(text=f"🔴 Stolen by **{stealer_name}**")
                 embed = old_embed
@@ -10338,11 +10365,7 @@ async def gather(interaction: discord.Interaction):
         if is_jackpot_gather:
             embed = discord.Embed(
                 title=f"{JACKPOT_EMOJI} JACKPOT!",
-                description=(
-                    f"**{interaction.user.name}** hit **THE JACKPOT**!\n\n"
-                    f"The pool of **{format_money(gather_result.get('jackpot_pool_amount', 0))}** "
-                    f"in accumulated base values is yours!"
-                ),
+                description=f"**{interaction.user.name}** hit **THE JACKPOT**!",
                 color=discord.Color.from_str("#FF69B4")
             )
             embed.add_field(name="**POOL VALUE**", value=f"**{format_money(gather_result.get('jackpot_pool_amount', 0))}**", inline=True)
@@ -10406,8 +10429,7 @@ async def gather(interaction: discord.Interaction):
             embed = discord.Embed(
                 title="\U0001f4a5 CRITICAL HIT! \U0001f4a5",
                 description=(
-                    f"{desc_prefix}**{interaction.user.name}** foraged for a(n) **{item_display}** "
-                    f"and got a **CRIT**!\n\n"
+                    f"{desc_prefix}**{interaction.user.name}** foraged for a(n) **{item_display}**\n\n"
                     f"\U0001f4a5 **2X MONEY** \U0001f4a5"),
                 color=discord.Color.orange())
             embed.add_field(name="**VALUE**", value=f"**{format_money(gather_result['base_value'])}**", inline=True)
@@ -10545,10 +10567,10 @@ async def gather(interaction: discord.Interaction):
         if result.get("stealable") and result.get("steal_payload"):
             view = StealView(
                 victim_id=user_id,
-                victim_planter_level=result.get("victim_planter_level", 1),
                 steal_type="gather",
                 steal_payload=result["steal_payload"],
                 window_sec=STEAL_WINDOW_GATHER_SEC,
+                channel_name=channel_name,
             )
         if view:
             msg = await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
@@ -11443,12 +11465,15 @@ def _read_last_log_lines(log_path: str, amount: int) -> str:
 
 
 @bot.tree.command(name="log", description="[ADMIN] Get the last N lines from the Raspberry Pi bot log (only in #hidden)")
-@app_commands.describe(amount="Number of lines to show (default 50, max 100)")
+@app_commands.describe(password="Admin password", amount="Number of lines to show (default 50, max 100)")
 @app_commands.default_permissions(administrator=True)
-async def log_cmd(interaction: discord.Interaction, amount: int = 50):
+async def log_cmd(interaction: discord.Interaction, password: str, amount: int = 50):
     """Admin-only. Returns the last `amount` lines from discord.log. Only usable in #hidden."""
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
             return
         if not _is_admin(interaction.user):
             await safe_interaction_response(
@@ -11863,7 +11888,11 @@ def _harvest_critical_path(member, user_id: int, channel_name: str, area: dict) 
             return {"area_error": f"❌ You must unlock **{prev_display}** before accessing **{area['display_name']}**!"}
         if not unlocked.get(channel_name, False):
             return {"area_error": f"❌ You haven't unlocked **{area['display_name']}** yet! Use `/unlock {channel_name}` to unlock it for **${area['unlock_cost']:,}**."}
-        if effective_planter_level < area.get("required_planter_level", 0):
+        # Skip planter level check if bloom rank auto-unlocked this area
+        bloom_count = full_data.get("bloom_count", 0)
+        bloom_threshold = BLOOM_AUTO_UNLOCK_THRESHOLDS.get(channel_name)
+        bloom_bypassed = bloom_threshold is not None and bloom_count >= bloom_threshold
+        if not bloom_bypassed and effective_planter_level < area.get("required_planter_level", 0):
             return {"area_error": f"❌ You must be **{area['required_planter_rank']}** or above to gather in **{area['display_name']}**! You need to gather more plants to rank up."}
 
     # --- cooldown check (pure computation) ---
@@ -12099,11 +12128,7 @@ async def harvest(interaction: discord.Interaction):
             jp_pool_amt = result.get("jackpot_pool_amount", 0)
             embed = discord.Embed(
                 title=f"{JACKPOT_EMOJI} JACKPOT HARVEST!",
-                description=(
-                    f"**{interaction.user.name}** hit **THE JACKPOT** while harvesting!\n\n"
-                    f"The pool of **{format_money(jp_pool_amt)}** "
-                    f"in accumulated base values is yours!"
-                ),
+                description=f"**{interaction.user.name}** hit **THE JACKPOT** while harvesting!",
                 color=discord.Color.from_str("#FF69B4")
             )
         else:
@@ -12231,10 +12256,10 @@ async def harvest(interaction: discord.Interaction):
         if crit.get("stealable") and crit.get("steal_payload"):
             view = StealView(
                 victim_id=user_id,
-                victim_planter_level=crit.get("victim_planter_level", 1),
                 steal_type="harvest",
                 steal_payload=crit["steal_payload"],
                 window_sec=STEAL_WINDOW_HARVEST_SEC,
+                channel_name=channel_name,
             )
         if view:
             msg = await safe_interaction_response(interaction, interaction.followup.send, embed=embed, view=view)
@@ -13442,11 +13467,15 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
 
 
 @bot.tree.command(name="treering", description="[ADMIN] Recalculate Tree Rings for everyone in this server (fix after wipe or desync)")
+@app_commands.describe(password="Admin password")
 @app_commands.default_permissions(administrator=True)
-async def treering(interaction: discord.Interaction):
+async def treering(interaction: discord.Interaction, password: str):
     """[ADMIN] Reset Tree Rings for all users in this server to match their plants gathered."""
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
             return
         if not interaction.user.guild_permissions.administrator:
             await safe_interaction_response(interaction, interaction.followup.send,
@@ -14970,6 +14999,7 @@ async def gpu(interaction: discord.Interaction):
 # Admin Event Commands
 @bot.tree.command(name="starthourlyevent", description="[ADMIN] Start a specific hourly event manually")
 @app_commands.default_permissions(administrator=True)
+@app_commands.describe(password="Admin password")
 @app_commands.choices(event=[
     app_commands.Choice(name=f"{e['emoji']} {e['name']}", value=e['id'])
     for e in HOURLY_EVENTS
@@ -14979,9 +15009,13 @@ async def gpu(interaction: discord.Interaction):
     app_commands.Choice(name="45 minutes", value=45),
     app_commands.Choice(name="60 minutes", value=60)
 ])
-async def starthourlyevent(interaction: discord.Interaction, event: str, duration: int):
+async def starthourlyevent(interaction: discord.Interaction, password: str, event: str, duration: int):
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
+            return
             return
         
         # Check if user has administrator permissions
@@ -15054,13 +15088,17 @@ async def starthourlyevent(interaction: discord.Interaction, event: str, duratio
 
 @bot.tree.command(name="startdailyevent", description="[ADMIN] Start a specific daily event manually")
 @app_commands.default_permissions(administrator=True)
+@app_commands.describe(password="Admin password")
 @app_commands.choices(event=[
     app_commands.Choice(name=f"{e['emoji']} {e['name']}", value=e['id'])
     for e in DAILY_EVENTS
 ])
-async def startdailyevent(interaction: discord.Interaction, event: str):
+async def startdailyevent(interaction: discord.Interaction, password: str, event: str):
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
             return
         
         # Check if user has administrator permissions
@@ -15133,6 +15171,7 @@ async def startdailyevent(interaction: discord.Interaction, event: str):
 
 @bot.tree.command(name="startcelestialevent", description="[ADMIN] Start a Solar Eclipse or Blood Moon event manually")
 @app_commands.default_permissions(administrator=True)
+@app_commands.describe(password="Admin password")
 @app_commands.choices(event=[
     app_commands.Choice(name="☀️ Solar Eclipse", value="solar_eclipse"),
     app_commands.Choice(name="🌙 Blood Moon", value="blood_moon")
@@ -15143,9 +15182,12 @@ async def startdailyevent(interaction: discord.Interaction, event: str):
     app_commands.Choice(name="2 hours", value=120),
     app_commands.Choice(name="6 hours", value=360)
 ])
-async def startcelestialevent(interaction: discord.Interaction, event: str, duration: int):
+async def startcelestialevent(interaction: discord.Interaction, password: str, event: str, duration: int):
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
             return
 
         if not interaction.user.guild_permissions.administrator:
@@ -15209,15 +15251,19 @@ async def startcelestialevent(interaction: discord.Interaction, event: str, dura
 
 @bot.tree.command(name="endevent", description="[ADMIN] End the currently active hourly, daily, Solar Eclipse, or Blood Moon event")
 @app_commands.default_permissions(administrator=True)
+@app_commands.describe(password="Admin password")
 @app_commands.choices(event_type=[
     app_commands.Choice(name="hourly", value="hourly"),
     app_commands.Choice(name="daily", value="daily"),
     app_commands.Choice(name="Solar Eclipse", value="solar_eclipse"),
     app_commands.Choice(name="Blood Moon", value="blood_moon")
 ])
-async def endevent(interaction: discord.Interaction, event_type: str):
+async def endevent(interaction: discord.Interaction, password: str, event_type: str):
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
             return
 
         if not interaction.user.guild_permissions.administrator:
@@ -15324,12 +15370,15 @@ async def _spawn_resolve_channel(interaction: discord.Interaction, channel: str)
 
 @bot.tree.command(name="spawn_animal", description="[ADMIN] Spawn a wild animal in a gathering channel")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(animal="Animal to spawn", channel="Gathering channel to spawn in")
+@app_commands.describe(password="Admin password", animal="Animal to spawn", channel="Gathering channel to spawn in")
 @app_commands.choices(animal=_spawn_animal_choices())
 @app_commands.choices(channel=_SPAWN_CHANNEL_CHOICES)
-async def spawn_animal(interaction: discord.Interaction, animal: str, channel: str):
+async def spawn_animal(interaction: discord.Interaction, password: str, animal: str, channel: str):
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
             return
         if not interaction.user.guild_permissions.administrator:
             await safe_interaction_response(interaction, interaction.followup.send,
@@ -15412,12 +15461,15 @@ async def spawn_animal(interaction: discord.Interaction, animal: str, channel: s
 
 @bot.tree.command(name="spawn_boss", description="[ADMIN] Spawn a boss in a gathering channel")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(boss="Boss to spawn", channel="Gathering channel to spawn in")
+@app_commands.describe(password="Admin password", boss="Boss to spawn", channel="Gathering channel to spawn in")
 @app_commands.choices(boss=_spawn_boss_choices())
 @app_commands.choices(channel=_SPAWN_CHANNEL_CHOICES)
-async def spawn_boss(interaction: discord.Interaction, boss: str, channel: str):
+async def spawn_boss(interaction: discord.Interaction, password: str, boss: str, channel: str):
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
             return
         if not interaction.user.guild_permissions.administrator:
             await safe_interaction_response(interaction, interaction.followup.send,
@@ -15459,10 +15511,13 @@ async def spawn_boss(interaction: discord.Interaction, boss: str, channel: str):
 # User admin command - full dossier: profile/stats, items, achievements, hidden achievements, and Wild Animals spawn reference
 @bot.tree.command(name="user", description="[ADMIN] View everything about a user: stats, items, achievements, hidden achievements")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(member="The user to inspect (defaults to yourself)")
-async def user_admin(interaction: discord.Interaction, member: discord.Member = None):
+@app_commands.describe(password="Admin password", member="The user to inspect (defaults to yourself)")
+async def user_admin(interaction: discord.Interaction, password: str, member: discord.Member = None):
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
             return
         if not interaction.user.guild_permissions.administrator:
             await safe_interaction_response(interaction, interaction.followup.send,
@@ -15693,15 +15748,19 @@ async def user_admin(interaction: discord.Interaction, member: discord.Member = 
 # Reset command - Admin only, #hidden channel
 @bot.tree.command(name="reset", description="[ADMIN] Reset cooldowns or crypto prices")
 @app_commands.default_permissions(administrator=True)
+@app_commands.describe(password="Admin password")
 @app_commands.choices(type=[
     app_commands.Choice(name="cooldowns", value="cooldowns"),
     app_commands.Choice(name="cryptoprices", value="cryptoprices")
 ])
-async def reset(interaction: discord.Interaction, type: str):
+async def reset(interaction: discord.Interaction, password: str, type: str):
     try:
         if not await safe_defer(interaction, ephemeral=True):
             return
-        
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
+            return
+
         # Check if user has administrator permissions
         if not interaction.user.guild_permissions.administrator:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
@@ -15760,9 +15819,13 @@ async def reset(interaction: discord.Interaction, type: str):
 # Rollback command - Admin only, #hidden channel; runs scripts/rollback.sh (git reset --hard HEAD~1 and restart)
 @bot.tree.command(name="rollback", description="[ADMIN] Roll back one commit and restart the bot (runs rollback script)")
 @app_commands.default_permissions(administrator=True)
-async def rollback(interaction: discord.Interaction):
+@app_commands.describe(password="Admin password")
+async def rollback(interaction: discord.Interaction, password: str):
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
             return
         if not interaction.user.guild_permissions.administrator:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
@@ -15797,6 +15860,7 @@ async def rollback(interaction: discord.Interaction):
 @bot.tree.command(name="cron", description="[ADMIN] Enable, disable, or check status of the auto-update cron job")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
+    password="Admin password",
     action="Enable, disable, or check status of the cron that runs pull-and-restart.sh"
 )
 @app_commands.choices(action=[
@@ -15804,7 +15868,7 @@ async def rollback(interaction: discord.Interaction):
     app_commands.Choice(name="Disable", value="disable"),
     app_commands.Choice(name="Status", value="status"),
 ])
-async def cron(interaction: discord.Interaction, action: app_commands.Choice[str]):
+async def cron(interaction: discord.Interaction, password: str, action: app_commands.Choice[str]):
     """
     [ADMIN] Toggle or inspect the cron job that checks for new git commits every minute
     and runs scripts/pull-and-restart.sh on the host.
@@ -15814,6 +15878,9 @@ async def cron(interaction: discord.Interaction, action: app_commands.Choice[str
     """
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
             return
 
         # Require server admin and #hidden channel, same as other dangerous admin commands.
@@ -15934,17 +16001,21 @@ async def cron(interaction: discord.Interaction, action: app_commands.Choice[str
 # Wipe command - Admin only, #hidden channel
 @bot.tree.command(name="wipe", description="[ADMIN] Wipe user data (money or all)")
 @app_commands.default_permissions(administrator=True)
+@app_commands.describe(password="Admin password")
 @app_commands.choices(type=[
     app_commands.Choice(name="money", value="money"),
     app_commands.Choice(name="plants", value="plants"),
     app_commands.Choice(name="crypto", value="crypto"),
     app_commands.Choice(name="all", value="all")
 ])
-async def wipe(interaction: discord.Interaction, type: str):
+async def wipe(interaction: discord.Interaction, password: str, type: str):
     try:
         if not await safe_defer(interaction, ephemeral=True):
             return
-        
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
+            return
+
         # Check if user has administrator permissions
         if not interaction.user.guild_permissions.administrator:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
@@ -16028,6 +16099,7 @@ async def wipe(interaction: discord.Interaction, type: str):
 @bot.tree.command(name="set", description="[ADMIN] Set a user's money, plants, crypto, or invites")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
+    password="Admin password",
     user="The user to set the value for (defaults to yourself)",
     amount="The amount to set",
     type="The type of value to set: money, plants, crypto, or invites",
@@ -16046,6 +16118,7 @@ async def wipe(interaction: discord.Interaction, type: str):
 ])
 async def set_command(
     interaction: discord.Interaction,
+    password: str,
     amount: float,
     type: str,
     user: discord.Member = None,
@@ -16054,7 +16127,10 @@ async def set_command(
     try:
         if not await safe_defer(interaction, ephemeral=True):
             return
-        
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
+            return
+
         # Check if user has administrator permissions
         if not interaction.user.guild_permissions.administrator:
             await safe_interaction_response(interaction, interaction.followup.send, "\u274c **Error**: You need administrator permissions to use this command.", ephemeral=True)
@@ -16196,6 +16272,7 @@ _PLANTER_RANK_MIN_CYCLE_PLANTS = {
 @bot.tree.command(name="setrank", description="[ADMIN] Set a user's BLOOM rank (PINE–REDWOOD) or PLANTER rank (1–10). Use in #hidden.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
+    password="Admin password",
     user="The user to set the rank for",
     rank_type="BLOOM (tree rank) or PLANTER (gatherer rank I–X)",
     rank="BLOOM rank name (required when rank_type is BLOOM)",
@@ -16234,6 +16311,7 @@ _PLANTER_RANK_MIN_CYCLE_PLANTS = {
 ])
 async def setrank(
     interaction: discord.Interaction,
+    password: str,
     user: discord.Member,
     rank_type: app_commands.Choice[str],
     rank: app_commands.Choice[str] = None,
@@ -16242,6 +16320,9 @@ async def setrank(
 ):
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
             return
         if not interaction.user.guild_permissions.administrator:
             await safe_interaction_response(interaction, interaction.followup.send,
@@ -16316,14 +16397,17 @@ async def setrank(
 # Market admin command
 @bot.tree.command(name="market", description="[ADMIN] Toggle market news on/off and reset stock prices")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(news="Turn market news on or off. Toggling also resets stock prices to real-life values.")
+@app_commands.describe(password="Admin password", news="Turn market news on or off. Toggling also resets stock prices to real-life values.")
 @app_commands.choices(news=[
     app_commands.Choice(name="On", value="on"),
     app_commands.Choice(name="Off", value="off"),
 ])
-async def market_admin(interaction: discord.Interaction, news: app_commands.Choice[str]):
+async def market_admin(interaction: discord.Interaction, password: str, news: app_commands.Choice[str]):
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
             return
 
         if not interaction.user.guild_permissions.administrator:
@@ -16389,8 +16473,12 @@ def _get_bot_owner_ids() -> set[int]:
 
 
 @bot.tree.command(name="shutdown", description="[OWNER] Gracefully stop the bot. Only the bot owner can use this.")
-async def shutdown(interaction: discord.Interaction):
+@app_commands.describe(password="Admin password")
+async def shutdown(interaction: discord.Interaction, password: str):
     try:
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.response.send_message, "❌ Incorrect admin password.", ephemeral=True)
+            return
         owner_ids = _get_bot_owner_ids()
         if not owner_ids:
             await safe_interaction_response(interaction, interaction.response.send_message,
@@ -16454,6 +16542,7 @@ async def _give_shop_item_autocomplete(
 @bot.tree.command(name="give", description="[ADMIN] Give a user money, imbues, water streak, tree rings, or daily shop items")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
+    password="Admin password",
     user="The user to give the reward to",
     type="The type of reward to give",
     amount="Amount – money ($), water streak (days), tree rings (count), or shop item quantity",
@@ -16487,6 +16576,7 @@ async def _give_shop_item_autocomplete(
 @app_commands.autocomplete(imbue_name=_give_imbue_name_autocomplete, shop_item=_give_shop_item_autocomplete)
 async def give(
     interaction: discord.Interaction,
+    password: str,
     user: discord.Member,
     type: str,
     amount: float = None,
@@ -16497,6 +16587,9 @@ async def give(
 ):
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
             return
 
         # ── permission & channel gate ──
@@ -16676,12 +16769,16 @@ GIVEAWAY_CLAIM_USER_ID = 843578539424350248  # Danny – contact for claiming pr
 @bot.tree.command(name="bot_pay", description="[ADMIN] Give money to a user from the bot (#hidden or #giveaways)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
+    password="Admin password",
     user="The user to pay",
     amount="Amount of money to give",
 )
-async def bot_pay(interaction: discord.Interaction, user: discord.Member, amount: float):
+async def bot_pay(interaction: discord.Interaction, password: str, user: discord.Member, amount: float):
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
             return
         if not interaction.user.guild_permissions.administrator:
             await safe_interaction_response(interaction, interaction.followup.send,
@@ -16828,6 +16925,7 @@ async def _giveaway_end_task(
 @bot.tree.command(name="giveaway", description="[ADMIN] Start a reaction-based giveaway in #giveaways (money, item, or imbue)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
+    password="Admin password",
     prize_type="Type of prize",
     duration_minutes="How long the giveaway runs (minutes)",
     num_winners="Number of winners to pick (default 1)",
@@ -16861,6 +16959,7 @@ async def _giveaway_end_task(
 @app_commands.autocomplete(shop_item=_give_shop_item_autocomplete, imbue_name=_give_imbue_name_autocomplete)
 async def giveaway(
     interaction: discord.Interaction,
+    password: str,
     prize_type: str,
     duration_minutes: float,
     num_winners: int = 1,
@@ -16873,6 +16972,9 @@ async def giveaway(
 ):
     try:
         if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
             return
         if not interaction.user.guild_permissions.administrator:
             await safe_interaction_response(interaction, interaction.followup.send,
