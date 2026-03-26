@@ -5,7 +5,8 @@
       "Bash(python:*)",
       "Bash(git status:*)",
       "Bash(git add:*)",
-      "Bash(find /c/Users/lpdtd/OneDrive/Documents/GitHub/Cursor/SlashGather-Discord-Bot -name *.json -o -name *.db)"
+      "Bash(find /c/Users/lpdtd/OneDrive/Documents/GitHub/Cursor/SlashGather-Discord-Bot -name *.json -o -name *.db)",
+      "Bash(python3:*)"
     ]
   },
   "hooks": {

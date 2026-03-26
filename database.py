@@ -2283,11 +2283,16 @@ def _get_jump_state_collection() -> Collection:
     return _jump_state_collection
 
 
-def get_jump_counter(guild_id: int) -> int:
-    """Get the current global jump counter for a guild (jumps since last branch break)."""
+def get_jump_state(guild_id: int) -> dict:
+    """Get the jump state for a guild (counter + repair timestamp)."""
     col = _get_jump_state_collection()
     doc = col.find_one({"_id": int(guild_id)})
-    return int(doc.get("jump_counter", 0)) if doc else 0
+    if not doc:
+        return {"jump_counter": 0, "repair_until": 0.0}
+    return {
+        "jump_counter": int(doc.get("jump_counter", 0)),
+        "repair_until": float(doc.get("repair_until", 0.0)),
+    }
 
 
 def increment_jump_counter(guild_id: int) -> int:
@@ -2302,12 +2307,12 @@ def increment_jump_counter(guild_id: int) -> int:
     return int(result.get("jump_counter", 1))
 
 
-def reset_jump_counter(guild_id: int) -> None:
-    """Reset the global jump counter for a guild (after a branch break)."""
+def reset_jump_counter(guild_id: int, repair_until: float = 0.0) -> None:
+    """Reset the global jump counter and set repair timestamp."""
     col = _get_jump_state_collection()
     col.update_one(
         {"_id": int(guild_id)},
-        {"$set": {"jump_counter": 0}},
+        {"$set": {"jump_counter": 0, "repair_until": repair_until}},
         upsert=True,
     )
 

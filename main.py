@@ -251,6 +251,9 @@ from database import (
     get_user_jump_data,
     set_user_jump_data,
     get_user_total_jumps,
+    get_jump_state,
+    increment_jump_counter,
+    reset_jump_counter,
 )
 
 try:
@@ -366,7 +369,6 @@ JUMP_COOLDOWN_SEC = 10
 JUMP_BREAK_DENOMINATOR = 10000  # TEMPORARY: was 10000, set to 10 for testing
 JUMP_REPAIR_SEC = 60 * 60  # 1 hour repair time after branch breaks
 _jump_cooldowns: dict[int, float] = {}  # user_id -> last jump timestamp
-_jump_repair_until: dict[int, float] = {}  # guild_id -> timestamp when repairs finish
 
 
 def get_jump_multi_multiplier(user_id: int) -> float:
@@ -7728,7 +7730,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.1.0 :3"
+            name="running /gather on V1.1.0"
         )
     )
     try:
@@ -10203,7 +10205,8 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
                                    max_hp: int | None = None):
     """Award plants to every participant. Record defeats, update PLANTER role, unlock achievements.
     Reward damage is capped by the entity's max_hp so overkill (e.g. 12 damage on 1 HP left) doesn't over-reward.
-    Items + defeat are applied in one thread; reward DM is sent first; role + achievement DMs run in background."""
+    Phase 1: all DB work runs in a dedicated thread pool in parallel (one thread per user).
+    Phase 2: all reward DMs fire concurrently. Role/achievement followups run in background."""
     channel = interaction.guild.get_channel(channel_id)
     enemy_id = animal.get("id")
     guild = interaction.guild
@@ -10215,64 +10218,74 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
     for uid in attackers:
         users_pending_pve_rewards.add(uid)
 
-    async def reward_one_user(user_id: int, total_damage: int) -> None:
-        try:
-            member = guild.get_member(user_id)
-            if not member:
-                return
-
-            # Single thread: roll items, batch write, and record PvE defeat
-            results, total_value = await asyncio.to_thread(
-                _pve_roll_items_and_batch_write, user_id, total_damage, area_multiplier, enemy_id)
-
-            plant_emojis = [get_item_display_emoji(r["name"]) for r in results]
-            emoji_display = " ".join(plant_emojis)
-            is_sans = enemy_id == "sans"
-            if is_sans:
-                header = (
-                    f"You made **{total_damage}** attack{'s' if total_damage != 1 else ''} "
-                    f"and gathered **{total_damage}** plant{'s' if total_damage != 1 else ''}!\n\n")
-            else:
-                header = (
-                    f"You dealt **{total_damage}** damage "
-                    f"and gathered **{total_damage}** plant{'s' if total_damage != 1 else ''}!\n\n")
-            max_emoji_len = 4000 - len(header)
-            if len(emoji_display) > max_emoji_len:
-                emoji_display = emoji_display[:max_emoji_len - 5] + " …"
-
-            reward_embed = discord.Embed(
-                title=f"🎁 PvE Rewards — {animal['emoji']} {animal['name']}",
-                description=f"{header}{emoji_display}",
-                color=discord.Color.green())
-            reward_embed.add_field(
-                name="💰 **TOTAL**", value=f"**{format_money(total_value)}**", inline=True)
-            _pve_jm_mult = get_jump_multi_multiplier(user_id)
-            _pve_jd_mult = get_jump_debuff_multiplier(user_id)
-            if _pve_jm_mult > 1.0:
-                _jm_pct = (_pve_jm_mult - 1.0) * 100
-                reward_embed.add_field(
-                    name="🌿 **JUMP MULTI**", value=f"+{_jm_pct:.2f}% active", inline=True)
-            if _pve_jd_mult < 1.0:
-                _jd_pct = (1.0 - _pve_jd_mult) * 100
-                reward_embed.add_field(
-                    name="💀 **JUMP DEBUFF**", value=f"-{_jd_pct:.2f}% active", inline=True)
-            reward_embed.set_footer(text="Thanks for defending the gathering grounds!")
-
-            # Send reward DM first so user sees rewards quickly
-            try:
-                await member.send(embed=reward_embed)
-            except Exception:
-                pass
-            # Role + achievement DMs in background so they don't delay the reward
-            asyncio.create_task(_pve_reward_followup(member, guild, user_id, enemy_id))
-        except Exception as e:
-            print(f"PvE reward failed for user {user_id}: {e}")
-        finally:
-            users_pending_pve_rewards.discard(user_id)
-
     try:
-        tasks = [reward_one_user(user_id, total_damage) for user_id, total_damage in attackers.items()]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # Phase 1: Run ALL DB work in parallel using a dedicated thread pool
+        # so we don't bottleneck on the default executor's limited worker count.
+        import concurrent.futures
+        _pve_executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(attackers))
+        loop = asyncio.get_running_loop()
+        db_futures = {
+            user_id: loop.run_in_executor(
+                _pve_executor,
+                _pve_roll_items_and_batch_write, user_id, total_damage, area_multiplier, enemy_id,
+            )
+            for user_id, total_damage in attackers.items()
+        }
+        db_results: dict[int, tuple] = {}
+        for user_id, future in db_futures.items():
+            try:
+                db_results[user_id] = await future
+            except Exception as e:
+                print(f"PvE reward DB failed for user {user_id}: {e}")
+        _pve_executor.shutdown(wait=False)
+
+        # Phase 2: Build embeds and fire ALL DMs concurrently
+        is_sans = enemy_id == "sans"
+
+        async def _send_reward(user_id: int, results: list, total_value: float) -> None:
+            try:
+                member = guild.get_member(user_id)
+                if not member:
+                    return
+                total_damage = attackers[user_id]
+                plant_emojis = [get_item_display_emoji(r["name"]) for r in results]
+                emoji_display = " ".join(plant_emojis)
+                if is_sans:
+                    header = (
+                        f"You made **{total_damage}** attack{'s' if total_damage != 1 else ''} "
+                        f"and gathered **{total_damage}** plant{'s' if total_damage != 1 else ''}!\n\n")
+                else:
+                    header = (
+                        f"You dealt **{total_damage}** damage "
+                        f"and gathered **{total_damage}** plant{'s' if total_damage != 1 else ''}!\n\n")
+                max_emoji_len = 4000 - len(header)
+                if len(emoji_display) > max_emoji_len:
+                    emoji_display = emoji_display[:max_emoji_len - 5] + " …"
+
+                reward_embed = discord.Embed(
+                    title=f"🎁 PvE Rewards — {animal['emoji']} {animal['name']}",
+                    description=f"{header}{emoji_display}",
+                    color=discord.Color.green())
+                reward_embed.add_field(
+                    name="💰 **TOTAL**", value=f"**{format_money(total_value)}**", inline=True)
+                reward_embed.set_footer(text="Thanks for defending the gathering grounds!")
+
+                try:
+                    await member.send(embed=reward_embed)
+                except Exception:
+                    pass
+                # Role + achievement DMs in background so they don't delay other users
+                asyncio.create_task(_pve_reward_followup(member, guild, user_id, enemy_id))
+            except Exception as e:
+                print(f"PvE reward DM failed for user {user_id}: {e}")
+            finally:
+                users_pending_pve_rewards.discard(user_id)
+
+        dm_tasks = [
+            _send_reward(user_id, results, total_value)
+            for user_id, (results, total_value) in db_results.items()
+        ]
+        await asyncio.gather(*dm_tasks, return_exceptions=True)
     except Exception as e:
         print(f"Error distributing PvE rewards: {e}")
     finally:
@@ -17309,71 +17322,88 @@ async def giveaway(
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
+def _pay_critical_path(sender_id: int, recipient_id: int, amount: float) -> dict:
+    """All DB work for /pay in ONE sync call (runs via to_thread)."""
+    # Check sender balance
+    sender_balance = get_user_balance(sender_id)
+    sender_balance = normalize_money(sender_balance)
+
+    if not can_afford_rounded(sender_balance, amount):
+        return {"cant_afford": True}
+
+    # Get recipient balance
+    recipient_balance = get_user_balance(recipient_id)
+    recipient_balance = normalize_money(recipient_balance)
+
+    # Transfer money
+    new_sender_balance = normalize_money(sender_balance - amount)
+    new_recipient_balance = normalize_money(recipient_balance + amount)
+    update_user_balance(sender_id, new_sender_balance)
+    update_user_balance(recipient_id, new_recipient_balance)
+
+    # Check for hidden achievements
+    sender_achievement = False
+    recipient_achievement = False
+    if amount >= 1000000.0:
+        sender_achievement = unlock_hidden_achievement(sender_id, "john_rockefeller")
+        recipient_achievement = unlock_hidden_achievement(recipient_id, "beneficiary")
+
+    return {
+        "cant_afford": False,
+        "sender_achievement": sender_achievement,
+        "recipient_achievement": recipient_achievement,
+    }
+
+
 # Pay command
 @bot.tree.command(name="pay", description="Pay money to another user!")
 async def pay(interaction: discord.Interaction, amount: float, user: discord.Member):
     try:
         if not await safe_defer(interaction, ephemeral=False):
             return
-        
+
         sender_id = interaction.user.id
         recipient_id = user.id
-        
+
         # Can't pay yourself
         if sender_id == recipient_id:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ You can't pay yourself!", ephemeral=True)
             return
-        
+
         # Can't pay the bot
         if recipient_id == bot.user.id:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ You can't pay the bot!", ephemeral=True)
             return
-        
+
         # Validate amount is positive
         if amount <= 0:
             await safe_interaction_response(interaction, interaction.followup.send, "❌ Payment amount must be greater than $0!", ephemeral=True)
             return
-        
+
         # Validate amount has at most 2 decimal places (no fractional cents)
         if not validate_money_precision(amount):
             await safe_interaction_response(interaction, interaction.followup.send, "❌ Invalid payment amount!", ephemeral=True)
             return
-        
+
         # Normalize amount to exactly 2 decimal places
         amount = normalize_money(amount)
-        
-        # Check sender balance
-        sender_balance = get_user_balance(sender_id)
-        sender_balance = normalize_money(sender_balance)
-        
-        if not can_afford_rounded(sender_balance, amount):
+
+        # Run all DB work in a thread to avoid blocking the event loop
+        result = await asyncio.to_thread(_pay_critical_path, sender_id, recipient_id, amount)
+
+        if result["cant_afford"]:
             await safe_interaction_response(interaction, interaction.followup.send, f"❌ You don't have enough balance!", ephemeral=True)
             return
-        
-        # Get recipient balance
-        recipient_balance = get_user_balance(recipient_id)
-        recipient_balance = normalize_money(recipient_balance)
-        
-        # Transfer money
-        new_sender_balance = normalize_money(sender_balance - amount)
-        new_recipient_balance = normalize_money(recipient_balance + amount)
-        update_user_balance(sender_id, new_sender_balance)
-        update_user_balance(recipient_id, new_recipient_balance)
-        
-        # Send confirmation message first
+
+        # Send confirmation message
         await safe_interaction_response(interaction, interaction.followup.send, f"{interaction.user.mention} has paid {user.mention} **${amount:.2f}**! 💰")
-        
-        # Check for hidden achievements (after main response)
-        # John Rockefeller: Pay someone over $1,000,000
-        if amount >= 1000000.0 and unlock_hidden_achievement(sender_id, "john_rockefeller"):
+
+        # Send achievement notifications (after main response)
+        if result["sender_achievement"]:
             await send_hidden_achievement_notification(interaction, "john_rockefeller")
-        
-        # Beneficiary: Receive over $1,000,000 from someone
-        # DM the recipient since we can't send ephemeral to someone who didn't initiate the interaction
-        if amount >= 1000000.0:
-            newly_unlocked = unlock_hidden_achievement(recipient_id, "beneficiary")
-            if newly_unlocked:
-                await send_hidden_achievement_notification_dm(recipient_id, "beneficiary")
+
+        if result["recipient_achievement"]:
+            await send_hidden_achievement_notification_dm(recipient_id, "beneficiary")
     except Exception as e:
         print(f"Error in pay command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
@@ -17714,16 +17744,15 @@ async def update_all_leaderboards():
             # Update leaderboards for all guilds the bot is in
             for guild in bot.guilds:
                 try:
-                    await update_leaderboard_message(guild, "plants")
-                    await asyncio.sleep(2)  # Delay between updates to avoid rate limits
-                    await update_leaderboard_message(guild, "money")
-                    await asyncio.sleep(2)  # Delay between updates
-                    await update_leaderboard_message(guild, "ranks")
-                    await asyncio.sleep(2)  # Delay between updates
+                    await asyncio.gather(
+                        update_leaderboard_message(guild, "plants"),
+                        update_leaderboard_message(guild, "money"),
+                        update_leaderboard_message(guild, "ranks"),
+                    )
                 except Exception as e:
                     logging.error(f"Error updating leaderboards for guild {guild.name}: {e}", exc_info=True)
                 # Delay between guilds to prevent rate limiting
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
         except Exception as e:
             logging.error(f"Error in leaderboard update task: {e}", exc_info=True)
         
@@ -18158,19 +18187,16 @@ async def update_all_marketboards():
             # Update marketboards for all guilds the bot is in
             for guild in bot.guilds:
                 try:
-                    await update_marketboard_message(guild)
-                    await asyncio.sleep(2)  # Delay after marketboard update
-                    # Update leaderboards after stock prices change
-                    await update_leaderboard_message(guild, "plants")
-                    await asyncio.sleep(2)  # Delay between updates to avoid rate limits
-                    await update_leaderboard_message(guild, "money")
-                    await asyncio.sleep(2)  # Delay between updates
-                    await update_leaderboard_message(guild, "ranks")
-                    await asyncio.sleep(2)  # Delay between updates
+                    await asyncio.gather(
+                        update_marketboard_message(guild),
+                        update_leaderboard_message(guild, "plants"),
+                        update_leaderboard_message(guild, "money"),
+                        update_leaderboard_message(guild, "ranks"),
+                    )
                 except Exception as e:
                     logging.error(f"Error updating marketboard/leaderboards for guild {guild.name}: {e}", exc_info=True)
                 # Delay between guilds to prevent rate limiting
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
         except Exception as e:
             logging.error(f"Error in marketboard update task: {e}", exc_info=True)
 
@@ -18702,8 +18728,8 @@ async def gardener_background_task():
                                                 # Hidden achievement: One in a Mikellion (gardener harvest included Mikellion)
                                                 has_mikellion = any(item.get("ripeness") == "Mikellion" for item in harvest_result.get("gathered_items", []))
                                                 if has_mikellion and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
-                                                    await send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion")
-                                                await check_almanac_achievements_async(user_id, lawn_channel, mention)
+                                                    asyncio.create_task(send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion"))
+                                                asyncio.create_task(check_almanac_achievements_async(user_id, lawn_channel, mention))
                                                 break
                                             except Exception as e:
                                                 print(f"Error sending gardener harvest-upgrade notification to #lawn in {guild.name} for user {user_id}: {e}")
@@ -18721,11 +18747,6 @@ async def gardener_background_task():
                                     member = guild.get_member(user_id)
                                     if member:
                                         user_name = member.display_name or member.name
-                                        break
-                                
-                                for guild in bot.guilds:
-                                    member = guild.get_member(user_id)
-                                    if member:
                                         lawn_channel = discord.utils.get(guild.text_channels, name="lawn")
                                         if lawn_channel:
                                             try:
@@ -18745,8 +18766,8 @@ async def gardener_background_task():
                                                     await lawn_channel.send(embed=embed)
                                                     # Hidden achievement: One in a Mikellion (gardener gathered Mikellion)
                                                     if gather_result.get("ripeness") == "Mikellion" and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
-                                                        await send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion")
-                                                    await check_almanac_achievements_async(user_id, lawn_channel, member.mention)
+                                                        asyncio.create_task(send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion"))
+                                                    asyncio.create_task(check_almanac_achievements_async(user_id, lawn_channel, member.mention))
                                                     break
                                             except Exception as e:
                                                 print(f"Error sending gardener notification to #lawn channel in {guild.name} for user {user_id}: {e}")
@@ -18831,8 +18852,8 @@ async def secret_gardener_background_task():
                                             # Hidden achievement: One in a Mikellion (secret gardener harvest included Mikellion)
                                             has_mikellion = any(item.get("ripeness") == "Mikellion" for item in harvest_result.get("gathered_items", []))
                                             if has_mikellion and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
-                                                await send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion")
-                                            await check_almanac_achievements_async(user_id, lawn_channel, member.mention)
+                                                asyncio.create_task(send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion"))
+                                            asyncio.create_task(check_almanac_achievements_async(user_id, lawn_channel, member.mention))
                                         except Exception as e:
                                             print(f"Error sending secret gardener harvest notification: {e}")
                                     break
@@ -18862,8 +18883,8 @@ async def secret_gardener_background_task():
                                             await lawn_channel.send(embed=embed)
                                             # Hidden achievement: One in a Mikellion (secret gardener gathered Mikellion)
                                             if gather_result.get("ripeness") == "Mikellion" and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
-                                                await send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion")
-                                            await check_almanac_achievements_async(user_id, lawn_channel, member.mention)
+                                                asyncio.create_task(send_hidden_achievement_notification_dm(user_id, "one_in_a_mikellion"))
+                                            asyncio.create_task(check_almanac_achievements_async(user_id, lawn_channel, member.mention))
                                         except Exception as e:
                                             print(f"Error sending secret gardener notification: {e}")
                                     break
@@ -20591,7 +20612,7 @@ async def portfolio(interaction: discord.Interaction):
             # Add total as a field right after stock holdings
             embed.add_field(
                 name="\u200b",
-                value=f"**TOTAL**: ${stock_total:.2f}**",
+                value=f"**TOTAL**: ${stock_total:.2f}",
                 inline=False
             )
         
@@ -21147,6 +21168,60 @@ def start_http_server():
 
 # ==================== /JUMP COMMAND ====================
 
+def _jump_critical_path(guild_id: int, user_id: int, jumps_today: int, today_est: str, now: float) -> dict:
+    """All DB work for /jump in ONE sync call (runs via to_thread)."""
+    # Increment server-wide counter
+    increment_jump_counter(guild_id)
+
+    # Roll break chance
+    broke = random.randint(1, JUMP_BREAK_DENOMINATOR) <= 1
+
+    # Update daily jump count and increment all-time total
+    set_user_jump_data(user_id, jumps_today + 1, today_est, increment_total=True)
+
+    # Check jumping achievement
+    new_total = get_user_total_jumps(user_id)
+    jumping_lvl = get_achievement_level_for_stat("jumping", new_total)
+    cur_jumping = get_user_achievement_level(user_id, "jumping")
+    jumping_up = None
+    if jumping_lvl > cur_jumping:
+        set_user_achievement_level(user_id, "jumping", jumping_lvl)
+        jumping_up = jumping_lvl
+
+    branch_breaker_unlocked = False
+    debuff_count = 0
+    total_debuff_percent = 0.0
+    buff_count = 0
+    total_buff_percent = 0.0
+    user_total = new_total
+
+    if broke:
+        # Branch broke — apply debuff, lock branch
+        reset_jump_counter(guild_id, repair_until=now + JUMP_REPAIR_SEC)
+        add_dayboost(user_id, "jump_debuff", duration_hours=12.0)
+        debuff_count = get_dayboost_count(user_id, "jump_debuff")
+        total_debuff_percent = JUMP_DEBUFF_PERCENT * debuff_count * 100
+        user_total = get_user_total_jumps(user_id)
+        branch_breaker_unlocked = unlock_hidden_achievement(user_id, "branch_breaker")
+    else:
+        # Successful jump — apply buff
+        add_dayboost(user_id, "jump_multi", duration_hours=1.0)
+        buff_count = get_dayboost_count(user_id, "jump_multi")
+        total_buff_percent = JUMP_MULTI_PERCENT * buff_count * 100
+        user_total = get_user_total_jumps(user_id)
+
+    return {
+        "broke": broke,
+        "jumping_up": jumping_up,
+        "user_total": user_total,
+        "branch_breaker_unlocked": branch_breaker_unlocked,
+        "debuff_count": debuff_count,
+        "total_debuff_percent": total_debuff_percent,
+        "buff_count": buff_count,
+        "total_buff_percent": total_buff_percent,
+    }
+
+
 @bot.tree.command(name="jump", description="Jump off the tree branch into the spring!")
 @app_commands.describe(action="Check the branch status or jump")
 @app_commands.choices(action=[
@@ -21167,9 +21242,10 @@ async def jump(interaction: discord.Interaction, action: app_commands.Choice[str
         await interaction.response.send_message("❌ You can only use `/jump` in the **#spring** channel!", ephemeral=True)
         return
 
-    # Check if branch is under repairs
+    # Check if branch is under repairs (persisted in DB)
     now = time.time()
-    repair_until = _jump_repair_until.get(guild.id, 0)
+    jump_state = get_jump_state(guild.id)
+    repair_until = jump_state["repair_until"]
     if now < repair_until:
         remaining_min = int((repair_until - now) / 60) + 1
         await interaction.response.send_message(
@@ -21181,9 +21257,14 @@ async def jump(interaction: discord.Interaction, action: app_commands.Choice[str
     # /jump check — show your total jumps and branch status
     if action_val == "check":
         user_total = get_user_total_jumps(user_id)
+        server_counter = jump_state["jump_counter"]
         embed = discord.Embed(
             title="🌿 **BRANCH STATUS**",
-            description=f"The branch is intact and ready!\n\nYour total jumps: **{user_total}**",
+            description=(
+                f"The branch is intact and ready!\n\n"
+                f"Jumps since last break: **{server_counter}**\n"
+                f"Your total jumps: **{user_total}**"
+            ),
             color=discord.Color.dark_blue(),
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -21222,35 +21303,23 @@ async def jump(interaction: discord.Interaction, action: app_commands.Choice[str
     # Update cooldown
     _jump_cooldowns[user_id] = now
 
-    # Roll the break chance: 1 / DENOMINATOR per jump
-    broke = random.randint(1, JUMP_BREAK_DENOMINATOR) <= 1
+    # Run all DB work in a single thread call
+    result = await asyncio.to_thread(_jump_critical_path, guild.id, user_id, jumps_today, today_est, now)
 
-    # Update daily jump count and increment all-time total
-    set_user_jump_data(user_id, jumps_today + 1, today_est, increment_total=True)
-
-    # Check jumping achievement
-    new_total = get_user_total_jumps(user_id)
-    jumping_lvl = get_achievement_level_for_stat("jumping", new_total)
-    cur_jumping = get_user_achievement_level(user_id, "jumping")
-    jumping_up = None
-    if jumping_lvl > cur_jumping:
-        set_user_achievement_level(user_id, "jumping", jumping_lvl)
-        jumping_up = jumping_lvl
+    broke = result["broke"]
+    jumping_up = result["jumping_up"]
+    user_total = result["user_total"]
 
     if broke:
-        # BRANCH BROKE — apply debuff, lock branch for 1 hour
-        _jump_repair_until[guild.id] = now + JUMP_REPAIR_SEC
-        add_dayboost(user_id, "jump_debuff", duration_hours=12.0)
-        debuff_count = get_dayboost_count(user_id, "jump_debuff")
-        total_debuff_percent = JUMP_DEBUFF_PERCENT * debuff_count * 100
+        total_debuff_percent = result["total_debuff_percent"]
+        debuff_count = result["debuff_count"]
 
         # Personal embed (in #spring via followup)
-        user_total = get_user_total_jumps(user_id)
         debuff_embed = discord.Embed(
             title="💀 **THE BRANCH BROKE!**",
             description=(
                 f"**{interaction.user.display_name}** jumped & the branch **SNAPPED**!\n\n"
-                f"💀 **JUMP DEBUFF**: **-{total_debuff_percent:.0f}%** **FOR 12 HOURS**\n"
+                f"💀 **JUMP DEBUFF**: **-{total_debuff_percent:.0f}%** ({debuff_count} active)\n"
                 f"🔧 The branch is now **UNDER REPAIRS** for **1 HOUR**."
             ),
             color=discord.Color.dark_blue(),
@@ -21263,27 +21332,24 @@ async def jump(interaction: discord.Interaction, action: app_commands.Choice[str
         await _post_to_rares_channel(guild, f"💀 {interaction.user.mention} **BROKE** the **BRANCH**! | **[SPRING]**")
 
         # Hidden achievement: break the branch for the first time
-        if unlock_hidden_achievement(user_id, "branch_breaker"):
+        if result["branch_breaker_unlocked"]:
             await send_hidden_achievement_notification(interaction, "branch_breaker")
         if jumping_up:
             await send_achievement_notification(interaction, "jumping", jumping_up)
     else:
-        # Successful jump — apply buff
-        add_dayboost(user_id, "jump_multi", duration_hours=1.0)
-        buff_count = get_dayboost_count(user_id, "jump_multi")
-        total_buff_percent = JUMP_MULTI_PERCENT * buff_count * 100
+        total_buff_percent = result["total_buff_percent"]
+        buff_count = result["buff_count"]
         jumps_left = JUMP_MAX_PER_DAY - (jumps_today + 1)
 
         success_embed = discord.Embed(
             title="🌿 **JUMP!**",
             description=(
                 f"**{interaction.user.display_name}** jumped off the branch & landed safely in the spring!\n\n"
-                f"🌿 **JUMP MULTI**: **+{total_buff_percent:.0f}%** **FOR 1 HOUR**\n"
+                f"🌿 **JUMP MULTI**: **+{total_buff_percent:.0f}%** ({buff_count} active)\n"
                 f"JUMPS REMAINING: **{jumps_left}**"
             ),
             color=discord.Color.dark_blue(),
         )
-        user_total = get_user_total_jumps(user_id)
         success_embed.set_footer(text=f"Your total jumps: {user_total}")
 
         await interaction.followup.send(embed=success_embed)
