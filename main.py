@@ -7668,7 +7668,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.0.6 :3"
+            name="running /gather on V1.0.7 :3"
         )
     )
     try:
@@ -7743,13 +7743,8 @@ async def on_ready():
         import traceback
         traceback.print_exc()
 
-    # NOTE: Automatic leaderboard updates are intentionally disabled.
-    # The previous background task caused leaderboard messages to be
-    # re-posted in channels, which is no longer desired.
-    # If automatic leaderboard updates are needed in the future, this
-    # call can be re-enabled with appropriate rate limiting and behavior.
-    # bot.loop.create_task(update_all_leaderboards())
-    # print("Started automatic leaderboard updates")
+    bot.loop.create_task(update_all_leaderboards())
+    print("Started automatic leaderboard updates")
     
     
     # Start the marketboard update task
@@ -14453,7 +14448,7 @@ class HireView(discord.ui.View):
         gardener_chance = GARDENER_CHANCES.get(slot_id, 0.05) * 100
         description_text = f"💰 **BALANCE:** **${balance:,.2f}**\n\nHire gardeners to automatically gather items for you! This gardener has a **{gardener_chance:.0f}%** chance to gather every minute."
         embed = discord.Embed(
-            title=f"🌱 **GIUSEPPE**" if slot_id == 1 else f"🌱 Gardener #{slot_id}",
+            title=f"🌱 **GIUSEPPE**" if slot_id == 1 else f"🌱 **JOSE**" if slot_id == 2 else f"🌱 **ESTEBAN**" if slot_id == 3 else f"🌱 Gardener #{slot_id}",
             description=description_text,
             color=discord.Color.green()
         )
@@ -17487,7 +17482,7 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
         logging.error(f"Unexpected error updating {leaderboard_type} leaderboard in {guild.name}: {e}", exc_info=True)
 
 async def update_all_leaderboards():
-    """Background task to update all leaderboards every minute."""
+    """Background task to update all leaderboards every 5 minutes."""
     await bot.wait_until_ready()
     
     # Wait a bit for guilds to fully load
@@ -17511,8 +17506,8 @@ async def update_all_leaderboards():
         except Exception as e:
             logging.error(f"Error in leaderboard update task: {e}", exc_info=True)
         
-        # Wait 60 seconds before next update
-        await asyncio.sleep(60)
+        # Wait 5 minutes before next update
+        await asyncio.sleep(300)
 
 
 # STALK MARKET - Stock Market System
