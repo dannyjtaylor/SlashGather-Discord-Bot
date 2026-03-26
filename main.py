@@ -248,6 +248,9 @@ from database import (
     add_to_jackpot_pool,
     claim_jackpot_pool,
     increment_jackpot_dodge,
+    get_user_jump_data,
+    set_user_jump_data,
+    get_user_total_jumps,
 )
 
 try:
@@ -352,6 +355,36 @@ def grant_gamer_multi(user_id: int) -> bool:
         return False
     _gamer_multi_expires[user_id] = now + GAMER_MULTI_DURATION_SEC
     return True
+
+# Per-user JUMP MULTI (+5% per stack, 1 hour each) and JUMP DEBUFF (-60% per stack, 12 hours each)
+JUMP_MULTI_DURATION_SEC = 60 * 60  # 1 hour
+JUMP_DEBUFF_DURATION_SEC = 12 * 60 * 60  # 12 hours
+JUMP_MULTI_PERCENT = 0.05  # +5% per stack
+JUMP_DEBUFF_PERCENT = 0.60  # -60% per stack
+JUMP_MAX_PER_DAY = 5
+JUMP_COOLDOWN_SEC = 10
+JUMP_BREAK_DENOMINATOR = 10000  # TEMPORARY: was 10000, set to 10 for testing
+JUMP_REPAIR_SEC = 60 * 60  # 1 hour repair time after branch breaks
+_jump_cooldowns: dict[int, float] = {}  # user_id -> last jump timestamp
+_jump_repair_until: dict[int, float] = {}  # guild_id -> timestamp when repairs finish
+
+
+def get_jump_multi_multiplier(user_id: int) -> float:
+    """Return the JUMP MULTI multiplier (>=1.0). Each active stack adds +5%."""
+    count = get_dayboost_count(user_id, "jump_multi")
+    if count <= 0:
+        return 1.0
+    return 1.0 + (JUMP_MULTI_PERCENT * count)
+
+
+def get_jump_debuff_multiplier(user_id: int) -> float:
+    """Return the JUMP DEBUFF multiplier (<=1.0). Each active stack subtracts 60%."""
+    count = get_dayboost_count(user_id, "jump_debuff")
+    if count <= 0:
+        return 1.0
+    # Each stack is -60%, but floor at 0.0 (can't go negative)
+    return max(0.0, 1.0 - (JUMP_DEBUFF_PERCENT * count))
+
 
 # Helper function to safely handle interaction responses and prevent "interaction failed" messages
 async def safe_interaction_response(interaction: discord.Interaction, 
@@ -2930,6 +2963,18 @@ ACHIEVEMENTS = {
             {"level": 10, "name": "Root of All Knowledge", "description": "Max out your /almanac!", "threshold": 100, "boost": 0.50},
         ]
     },
+    "jumping": {
+        "name": "Jumping Achievement Category",
+        "levels": [
+            {"level": 0, "name": "Wimp", "description": "You haven't jumped yet! Do /jump!", "threshold": 0, "boost": 0.0},
+            {"level": 1, "name": "Testing The Waters", "description": "Jump 1 time", "threshold": 1, "boost": 0.015},
+            {"level": 2, "name": "CANNONBALL!", "description": "Jump 10 times", "threshold": 10, "boost": 0.03},
+            {"level": 3, "name": "I'm Springing It", "description": "Jump 25 times", "threshold": 25, "boost": 0.06},
+            {"level": 4, "name": "Bouncing On It", "description": "Jump 75 times", "threshold": 75, "boost": 0.10},
+            {"level": 5, "name": "Daredevil", "description": "Jump 150 times", "threshold": 150, "boost": 0.15},
+            {"level": 6, "name": "Guys It's NOT Gonna Break This Time I Swear", "description": "Jump 250 times", "threshold": 250, "boost": 0.20},
+        ]
+    },
 }
 
 # Hidden achievements definitions
@@ -3193,6 +3238,11 @@ HIDDEN_ACHIEVEMENTS = {
         "name": "\"No Honor\"",
         "description": "Steal a critical /gather",
         "boost": 0.10  # 10%
+    },
+    "branch_breaker": {
+        "name": "Hospitalized",
+        "description": "Break the branch when doing /jump",
+        "boost": 0.05  # 5%
     }
 }
 
@@ -3813,30 +3863,32 @@ def get_pve_damage_multiplier(user_id: int, is_boss: bool = False) -> int:
     """Return total damage per hit for PvE (wild animals and optionally bosses). Base 1, weapons stack additively.
     King's Blade +3, Zenith +2, Death Note +2, Black Knife +2, Split Soul Katana +1, Inverted Spear +1 (enemies and bosses),
     Diamond Sword +1, Ancient Staff +1, Reaver Karambit +1, Nail +1, Evoker +1, Thorfinn's Dagger +1."""
+    # Single DB call instead of 12 separate has_shop_item queries
+    inv = get_user_shop_inventory(user_id)
     damage = 1
-    if has_shop_item(user_id, "kings_blade"):
+    if inv.get("kings_blade", 0) >= 1:
         damage += 3  # +3 for enemies
-    if has_shop_item(user_id, "zenith"):
+    if inv.get("zenith", 0) >= 1:
         damage += 2  # 1 -> 3
-    if has_shop_item(user_id, "death_note"):
+    if inv.get("death_note", 0) >= 1:
         damage += 2  # +2 for enemies
-    if has_shop_item(user_id, "black_knife"):
+    if inv.get("black_knife", 0) >= 1:
         damage += 2  # +2 for enemies
-    if has_shop_item(user_id, "split_soul_katana"):
+    if inv.get("split_soul_katana", 0) >= 1:
         damage += 1  # +1 for enemies
-    if has_shop_item(user_id, "inverted_spear_of_heaven"):
+    if inv.get("inverted_spear_of_heaven", 0) >= 1:
         damage += 1  # +1 for enemies and bosses
-    if has_shop_item(user_id, "diamond_sword"):
+    if inv.get("diamond_sword", 0) >= 1:
         damage += 1  # +1 for enemies
-    if has_shop_item(user_id, "ancient_staff"):
+    if inv.get("ancient_staff", 0) >= 1:
         damage += 1  # +1 for enemies
-    if has_shop_item(user_id, "reaver_karambit"):
+    if inv.get("reaver_karambit", 0) >= 1:
         damage += 1  # +1 for enemies
-    if has_shop_item(user_id, "nail"):
+    if inv.get("nail", 0) >= 1:
         damage += 1  # +1 for enemies
-    if has_shop_item(user_id, "evoker"):
+    if inv.get("evoker", 0) >= 1:
         damage += 1  # +1 for enemies
-    if has_shop_item(user_id, "thorfinns_dagger"):
+    if inv.get("thorfinns_dagger", 0) >= 1:
         damage += 1  # +1 for enemies
     return damage
 
@@ -4247,7 +4299,11 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     elif full_data is None and has_shop_item(user_id, "alchemists_pocketwatch"):
         alchemist_extra = base_for_buffs * 0.05
     extra_money_from_gamer_multi = base_for_buffs * (gamer_multi_mult - 1.0) if gamer_multi_mult > 1.0 else 0.0
-    final_value = base_for_buffs + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_server_tag + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra + extra_money_from_scarecrow + extra_money_from_bloomstone + extra_money_from_gamer_multi
+    jump_multi_mult = get_jump_multi_multiplier(user_id)
+    jump_debuff_mult = get_jump_debuff_multiplier(user_id)
+    extra_money_from_jump_multi = base_for_buffs * (jump_multi_mult - 1.0) if jump_multi_mult > 1.0 else 0.0
+    extra_money_from_jump_debuff = base_for_buffs * (jump_debuff_mult - 1.0) if jump_debuff_mult < 1.0 else 0.0  # negative value
+    final_value = base_for_buffs + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_server_tag + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra + extra_money_from_scarecrow + extra_money_from_bloomstone + extra_money_from_gamer_multi + extra_money_from_jump_multi + extra_money_from_jump_debuff
 
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
@@ -4302,6 +4358,10 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         "extra_money_from_shadow_crystal": extra_money_from_shadow_crystal,
         "gamer_multi_multiplier": gamer_multi_mult,
         "extra_money_from_gamer_multi": extra_money_from_gamer_multi,
+        "jump_multi_multiplier": jump_multi_mult,
+        "extra_money_from_jump_multi": extra_money_from_jump_multi,
+        "jump_debuff_multiplier": jump_debuff_mult,
+        "extra_money_from_jump_debuff": extra_money_from_jump_debuff,
         "seasonal_multiplier": seasonal_multiplier,
         "seasonal_label": seasonal_label,
         "tree_ring_awarded": tree_ring_awarded,
@@ -7668,7 +7728,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.0.7 :3"
+            name="running /gather on V1.1.0 :3"
         )
     )
     try:
@@ -8450,6 +8510,7 @@ class WildAnimalView(discord.ui.View):
         self._dirty = False
         self._last_hit_name: str | None = None
         self._update_task: asyncio.Task | None = None
+        self._damage_cache: dict[int, int] = {}  # user_id -> cached damage (weapons don't change mid-fight)
 
     def _hp_bar(self) -> str:
         filled = max(0, round((self.hp / self.max_hp) * 20))
@@ -8498,17 +8559,24 @@ class WildAnimalView(discord.ui.View):
             # If this fails, we just drop the visual update; HP state is already correct.
             pass
 
+    def _get_damage(self, user_id: int) -> int:
+        """Get cached damage for a user (avoids repeated DB calls mid-fight)."""
+        if user_id not in self._damage_cache:
+            self._damage_cache[user_id] = get_pve_damage_multiplier(user_id)
+        return self._damage_cache[user_id]
+
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await safe_defer(interaction, ephemeral=False):
             return
         if getattr(interaction, "message", None):
             self.message = interaction.message
+        # Compute damage OUTSIDE the lock (DB call doesn't block other attackers)
+        damage = await asyncio.to_thread(self._get_damage, interaction.user.id)
         async with self._lock:
             if self.defeated:
                 return  # Already dead; send nothing to avoid flooding chat when spam-clicking
 
-            damage = get_pve_damage_multiplier(interaction.user.id)
             self.hp -= damage
             self.attackers[interaction.user.id] = self.attackers.get(interaction.user.id, 0) + damage
 
@@ -8539,8 +8607,13 @@ class WildAnimalView(discord.ui.View):
                 victory_embed.add_field(name="🏆 Contributors", value=participants_text, inline=False)
                 victory_embed.set_footer(text="Rewards are being distributed…")
 
-                await safe_interaction_response(
-                    interaction, interaction.response.edit_message, embed=victory_embed, view=self)
+                # Edit the message directly (interaction already deferred)
+                target = getattr(self, "message", None) or getattr(interaction, "message", None)
+                if target:
+                    try:
+                        await target.edit(embed=victory_embed, view=self)
+                    except Exception:
+                        pass
 
                 # Unlock the channel IMMEDIATELY so commands aren't stuck
                 active_pve_events.pop(self.channel_id, None)
@@ -8581,6 +8654,7 @@ class BulletAntView(discord.ui.View):
         self._dirty = False
         self._last_hit_name: str | None = None
         self._update_task: asyncio.Task | None = None
+        self._damage_cache: dict[int, int] = {}
 
     def _hp_bar(self) -> str:
         filled = max(0, round((self.hp / self.max_hp) * 20))
@@ -8604,15 +8678,18 @@ class BulletAntView(discord.ui.View):
                 return
             last_hit = self._last_hit_name
             self._dirty = False
-        async with self._lock:
-            if self.defeated:
-                return
         target = message or getattr(self, "message", None)
+        if not target:
+            return
         try:
-            if target:
-                await target.edit(embed=self._progress_embed(last_hit), view=self)
+            await target.edit(embed=self._progress_embed(last_hit), view=self)
         except Exception:
             pass
+
+    def _get_damage(self, user_id: int) -> int:
+        if user_id not in self._damage_cache:
+            self._damage_cache[user_id] = get_pve_damage_multiplier(user_id)
+        return self._damage_cache[user_id]
 
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_ant_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -8620,14 +8697,11 @@ class BulletAntView(discord.ui.View):
             return
         if getattr(interaction, "message", None):
             self.message = interaction.message
+        damage = await asyncio.to_thread(self._get_damage, interaction.user.id)
         async with self._lock:
             if self.defeated:
-                await safe_interaction_response(
-                    interaction, interaction.response.send_message,
-                    "This ant is already squashed!", ephemeral=True)
-                return
+                return  # Already dead; silently ignore like other PvE views
 
-            damage = get_pve_damage_multiplier(interaction.user.id)
             self.hp -= damage
             self.swarm_state["attackers"][interaction.user.id] = self.swarm_state["attackers"].get(interaction.user.id, 0) + damage
 
@@ -8637,13 +8711,18 @@ class BulletAntView(discord.ui.View):
                 button.label = "☠️"
                 button.style = discord.ButtonStyle.secondary
 
-                await safe_interaction_response(
-                    interaction, interaction.response.edit_message,
-                    embed=discord.Embed(
-                        title=f"☠️ {BULLET_ANT_ANIMAL['emoji']} Bullet Ant squashed!",
-                        description=BULLET_ANT_ANIMAL["defeat_msg"],
-                        color=discord.Color.gold()),
-                    view=self)
+                # Edit the message directly (interaction already deferred)
+                target = getattr(self, "message", None) or getattr(interaction, "message", None)
+                if target:
+                    try:
+                        await target.edit(
+                            embed=discord.Embed(
+                                title=f"☠️ {BULLET_ANT_ANIMAL['emoji']} Bullet Ant squashed!",
+                                description=BULLET_ANT_ANIMAL["defeat_msg"],
+                                color=discord.Color.gold()),
+                            view=self)
+                    except Exception:
+                        pass
 
                 self.swarm_state["ants_remaining"] -= 1
                 if self.swarm_state["ants_remaining"] <= 0:
@@ -8756,7 +8835,7 @@ class LarvaView(discord.ui.View):
 
 
 class BeeView(discord.ui.View):
-    """Single bee in a Bee Swarm. On defeat, decrements bees_remaining; when 0, edits intro, distributes rewards, then 40%% chance to spawn Larva (Break/Ignore → Queen Bee or ignore)."""
+    """Single bee in a Bee Swarm. On defeat, decrements bees_remaining; when 0, edits intro, distributes rewards, then 40%% chance to spawn Larva (Break/Ignore → Queen Bee or ignore). Progress embed updates are debounced."""
 
     def __init__(self, bee_hp: int, channel_id: int, swarm_state: dict):
         super().__init__(timeout=None)
@@ -8766,24 +8845,56 @@ class BeeView(discord.ui.View):
         self.swarm_state = swarm_state
         self.defeated = False
         self._lock = asyncio.Lock()
+        self._dirty = False
+        self._last_hit_name: str | None = None
+        self._update_task: asyncio.Task | None = None
+        self._damage_cache: dict[int, int] = {}
 
     def _hp_bar(self) -> str:
         filled = max(0, round((self.hp / self.max_hp) * 20))
         empty = 20 - filled
         return f"{'🟥' * filled}{'⬛' * empty}"
 
+    def _progress_embed(self) -> discord.Embed:
+        e = discord.Embed(
+            title=f"🚨 {BEE_ANIMAL['emoji']} Bee 🚨",
+            description=BEE_ANIMAL["description"],
+            color=BEE_ANIMAL["color"])
+        e.add_field(name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
+        if self._last_hit_name:
+            e.add_field(name="⚔️ Last Hit", value=f"**{self._last_hit_name}**!", inline=False)
+        return e
+
+    async def _debounced_update(self, message: discord.Message | None = None):
+        await asyncio.sleep(PVE_EMBED_UPDATE_DEBOUNCE_SEC)
+        async with self._lock:
+            if self.defeated or not self._dirty:
+                return
+            self._dirty = False
+        target = message or getattr(self, "message", None)
+        if not target:
+            return
+        try:
+            await target.edit(embed=self._progress_embed(), view=self)
+        except Exception:
+            pass
+
+    def _get_damage(self, user_id: int) -> int:
+        if user_id not in self._damage_cache:
+            self._damage_cache[user_id] = get_pve_damage_multiplier(user_id)
+        return self._damage_cache[user_id]
+
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_bee_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await safe_defer(interaction, ephemeral=False):
             return
+        if getattr(interaction, "message", None):
+            self.message = interaction.message
+        damage = await asyncio.to_thread(self._get_damage, interaction.user.id)
         async with self._lock:
             if self.defeated:
-                await safe_interaction_response(
-                    interaction, interaction.response.send_message,
-                    "This bee is already swatted!", ephemeral=True)
-                return
+                return  # Already dead; silently ignore like other PvE views
 
-            damage = get_pve_damage_multiplier(interaction.user.id)
             self.hp -= damage
             self.swarm_state["attackers"][interaction.user.id] = self.swarm_state["attackers"].get(interaction.user.id, 0) + damage
 
@@ -8793,13 +8904,16 @@ class BeeView(discord.ui.View):
                 button.label = "☠️"
                 button.style = discord.ButtonStyle.secondary
 
-                await safe_interaction_response(
-                    interaction, interaction.response.edit_message,
-                    embed=discord.Embed(
-                        title=f"☠️ {BEE_ANIMAL['emoji']} Bee swatted!",
-                        description=BEE_ANIMAL["defeat_msg"],
-                        color=discord.Color.gold()),
-                    view=self)
+                defeat_embed = discord.Embed(
+                    title=f"☠️ {BEE_ANIMAL['emoji']} Bee swatted!",
+                    description=BEE_ANIMAL["defeat_msg"],
+                    color=discord.Color.gold())
+                target = getattr(self, "message", None) or getattr(interaction, "message", None)
+                if target:
+                    try:
+                        await target.edit(embed=defeat_embed, view=self)
+                    except Exception:
+                        pass
 
                 self.swarm_state["bees_remaining"] -= 1
                 if self.swarm_state["bees_remaining"] <= 0:
@@ -8811,7 +8925,7 @@ class BeeView(discord.ui.View):
                     if channel and intro_id:
                         try:
                             intro_msg = await channel.fetch_message(intro_id)
-                            defeat_embed = discord.Embed(
+                            swarm_defeat_embed = discord.Embed(
                                 title=f"☠️ 🐝 Bee Swarm Defeated! ☠️",
                                 description=self.swarm_state["defeat_msg"],
                                 color=discord.Color.gold())
@@ -8825,8 +8939,8 @@ class BeeView(discord.ui.View):
                             participants_text = "\n".join(participants_lines) if participants_lines else "No participants"
                             if len(participants_text) > 1024:
                                 participants_text = participants_text[:1020] + " …"
-                            defeat_embed.add_field(name="🏆 Contributors", value=participants_text, inline=False)
-                            await intro_msg.edit(embed=defeat_embed)
+                            swarm_defeat_embed.add_field(name="🏆 Contributors", value=participants_text, inline=False)
+                            await intro_msg.edit(embed=swarm_defeat_embed)
                         except Exception as e:
                             print(f"Bee Swarm intro edit failed: {e}")
                     asyncio.create_task(
@@ -8848,15 +8962,11 @@ class BeeView(discord.ui.View):
                         view_larva.message = larva_msg
                 return
 
-            progress_embed = discord.Embed(
-                title=f"🚨 {BEE_ANIMAL['emoji']} Bee 🚨",
-                description=BEE_ANIMAL["description"],
-                color=BEE_ANIMAL["color"])
-            progress_embed.add_field(
-                name="HP", value=f"**{self.hp}** / **{self.max_hp}**\n{self._hp_bar()}", inline=False)
-            progress_embed.add_field(name="⚔️ Last Hit", value=f"**{interaction.user.display_name}**!", inline=False)
-            await safe_interaction_response(
-                interaction, interaction.response.edit_message, embed=progress_embed, view=self)
+            self._last_hit_name = interaction.user.display_name
+            self._dirty = True
+            if self._update_task is None or self._update_task.done():
+                msg = getattr(interaction, "message", None)
+                self._update_task = asyncio.create_task(self._debounced_update(msg))
 
 
 def _get_guild_gather_channels(guild: discord.Guild) -> list[discord.TextChannel]:
@@ -8979,6 +9089,7 @@ class BossView(discord.ui.View):
         self._dirty = False
         self._last_hit_name: str | None = None
         self._update_task: asyncio.Task | None = None
+        self._damage_cache: dict[int, int] = {}
 
     def _hp_bar(self) -> str:
         filled = max(0, round((self.hp / self.max_hp) * 20))
@@ -8996,6 +9107,11 @@ class BossView(discord.ui.View):
         e.set_footer(text="All gathering channels are blocked until this boss is defeated!")
         return e
 
+    def _get_damage(self, user_id: int) -> int:
+        if user_id not in self._damage_cache:
+            self._damage_cache[user_id] = get_pve_damage_multiplier(user_id)
+        return self._damage_cache[user_id]
+
     async def _debounced_update(self, message: discord.Message | None = None):
         await asyncio.sleep(PVE_EMBED_UPDATE_DEBOUNCE_SEC)
         async with self._lock:
@@ -9003,13 +9119,11 @@ class BossView(discord.ui.View):
                 return
             last_hit = self._last_hit_name
             self._dirty = False
-        async with self._lock:
-            if self.defeated:
-                return
         target = message or getattr(self, "message", None)
+        if not target:
+            return
         try:
-            if target:
-                await target.edit(embed=self._progress_embed(last_hit), view=self)
+            await target.edit(embed=self._progress_embed(last_hit), view=self)
         except Exception:
             pass
 
@@ -9019,12 +9133,11 @@ class BossView(discord.ui.View):
             return
         if getattr(interaction, "message", None):
             self.message = interaction.message
-        damage = 0
+        damage = await asyncio.to_thread(self._get_damage, interaction.user.id)
         async with self._lock:
             if self.defeated:
                 return  # Already dead; send nothing to avoid flooding chat when spam-clicking
 
-            damage = get_pve_damage_multiplier(interaction.user.id)
             self.hp -= damage
             self.attackers[interaction.user.id] = self.attackers.get(interaction.user.id, 0) + damage
 
@@ -9048,16 +9161,22 @@ class BossView(discord.ui.View):
                     participants_lines.append(f"**{name}** — {dmg} damage")
                 victory_embed.add_field(name="🏆 Contributors", value="\n".join(participants_lines) or "No participants", inline=False)
                 victory_embed.set_footer(text="Rewards are being distributed…")
-                if self.boss["id"] == "wither":
-                    nether_claimed_ref = [None]
-                    claim_view = NetherStarClaimView(claimed_ref=nether_claimed_ref)
-                    await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=claim_view)
-                elif self.boss["id"] == "the_roaring_knight":
-                    black_shard_claimed_ref = [None]
-                    claim_view = BlackShardClaimView(claimed_ref=black_shard_claimed_ref)
-                    await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=claim_view)
-                else:
-                    await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
+                # Edit the message directly (interaction already deferred)
+                target = getattr(self, "message", None) or getattr(interaction, "message", None)
+                if target:
+                    try:
+                        if self.boss["id"] == "wither":
+                            nether_claimed_ref = [None]
+                            claim_view = NetherStarClaimView(claimed_ref=nether_claimed_ref)
+                            await target.edit(embed=victory_embed, view=claim_view)
+                        elif self.boss["id"] == "the_roaring_knight":
+                            black_shard_claimed_ref = [None]
+                            claim_view = BlackShardClaimView(claimed_ref=black_shard_claimed_ref)
+                            await target.edit(embed=victory_embed, view=claim_view)
+                        else:
+                            await target.edit(embed=victory_embed, view=self)
+                    except Exception:
+                        pass
 
                 # Accumulate this boss's defeat for deferred rewards (single boss: 1 entry; Twins: 2 entries)
                 _pve_boss_defeated_pending.setdefault(self.guild_id, []).append((self.boss, dict(self.attackers), self.max_hp))
@@ -9144,6 +9263,7 @@ class SansView(discord.ui.View):
         self.mercy_users: set[int] = set()  # Track users who have used MERCY
         self._lock = asyncio.Lock()
         self._dirty = False
+        self._damage_cache: dict[int, int] = {}
         self._last_action_name: str | None = None
         self._update_task: asyncio.Task | None = None
         # Sans is defeated after 50 total attack attempts
@@ -9174,15 +9294,18 @@ class SansView(discord.ui.View):
                 return
             last_action_name = self._last_action_name
             self._dirty = False
-        async with self._lock:
-            if self.defeated:
-                return
         target = message or getattr(self, "message", None)
+        if not target:
+            return
         try:
-            if target:
-                await target.edit(embed=self._progress_embed(last_action_name), view=self)
+            await target.edit(embed=self._progress_embed(last_action_name), view=self)
         except Exception:
             pass
+
+    def _get_damage(self, user_id: int) -> int:
+        if user_id not in self._damage_cache:
+            self._damage_cache[user_id] = get_pve_damage_multiplier(user_id)
+        return self._damage_cache[user_id]
 
     @discord.ui.button(label="FIGHT", emoji=SOUL_EMOJI_PARTIAL, style=discord.ButtonStyle.danger, custom_id="sans_fight", row=0)
     async def fight(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -9191,11 +9314,11 @@ class SansView(discord.ui.View):
                 return
             if getattr(interaction, "message", None):
                 self.message = interaction.message
+            damage = await asyncio.to_thread(self._get_damage, interaction.user.id)
             async with self._lock:
                 if self.defeated:
                     return
 
-                damage = get_pve_damage_multiplier(interaction.user.id)
                 self.total_attempts += 1
                 self.attack_attempts[interaction.user.id] = self.attack_attempts.get(interaction.user.id, 0) + 1
                 # Track attempted damage for rewards (even though it "dodges")
@@ -9225,7 +9348,13 @@ class SansView(discord.ui.View):
                         participants_lines.append(f"**{name}** — {attempts} attack{'s' if attempts != 1 else ''}")
                     victory_embed.add_field(name="🏆 Contributors", value="\n".join(participants_lines) or "No participants", inline=False)
                     victory_embed.set_footer(text="Rewards are being distributed…")
-                    await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
+                    # Edit the message directly (interaction already deferred)
+                    target = getattr(self, "message", None) or getattr(interaction, "message", None)
+                    if target:
+                        try:
+                            await target.edit(embed=victory_embed, view=self)
+                        except Exception:
+                            pass
 
                     # Accumulate for deferred rewards
                     # For Sans, pass attack_attempts instead of attackers (damage), and None as max_hp so rewards aren't capped
@@ -9443,6 +9572,12 @@ class ObsidianTowerView(discord.ui.View):
         self._dirty = False
         self._last_hit_name: str | None = None
         self._update_task: asyncio.Task | None = None
+        self._damage_cache: dict[int, int] = {}
+
+    def _get_damage(self, user_id: int) -> int:
+        if user_id not in self._damage_cache:
+            self._damage_cache[user_id] = get_pve_damage_multiplier(user_id)
+        return self._damage_cache[user_id]
 
     def _embed(self, last_hit: str | None = None) -> discord.Embed:
         if self.defeated:
@@ -9471,13 +9606,11 @@ class ObsidianTowerView(discord.ui.View):
                 return
             last_hit = self._last_hit_name
             self._dirty = False
-        async with self._lock:
-            if self.defeated:
-                return
         target = message or getattr(self, "message", None)
+        if not target:
+            return
         try:
-            if target:
-                await target.edit(embed=self._embed(last_hit), view=self)
+            await target.edit(embed=self._embed(last_hit), view=self)
         except Exception:
             pass
 
@@ -9487,12 +9620,10 @@ class ObsidianTowerView(discord.ui.View):
             return
         if getattr(interaction, "message", None):
             self.message = interaction.message
+        damage = await asyncio.to_thread(self._get_damage, interaction.user.id)
         async with self._lock:
             if self.defeated:
-                await safe_interaction_response(interaction, interaction.response.send_message,
-                    f"This tower's End Crystal {END_CRYSTAL_EMOJI} has already been broken!", ephemeral=True)
-                return
-            damage = get_pve_damage_multiplier(interaction.user.id)
+                return  # Already broken; silently ignore
             self.tower_hp = max(0, self.tower_hp - damage)
             # Track tower damage for plant rewards when Ender Dragon is defeated (no achievement / enemy defeat)
             ender_dragon_tower_attackers.setdefault(self.guild_id, {})[interaction.user.id] = (
@@ -9512,13 +9643,9 @@ class ObsidianTowerView(discord.ui.View):
             return
         async with self._lock:
             if self.defeated:
-                await safe_interaction_response(interaction, interaction.response.send_message,
-                    f"This End Crystal {END_CRYSTAL_EMOJI} has already been broken!", ephemeral=True)
-                return
+                return  # Already broken; silently ignore
             if self.tower_hp > 0:
-                await safe_interaction_response(interaction, interaction.response.send_message,
-                    "Reduce the tower's HP to 0 first!", ephemeral=True)
-                return
+                return  # HP not zero yet; button should still be disabled
             self.defeated = True
             button.disabled = True
             button.label = "Crystal Broken!"
@@ -9527,7 +9654,13 @@ class ObsidianTowerView(discord.ui.View):
                 ender_dragon_towers[self.guild_id].discard(self.channel_id)
             victory_embed = self._embed()
             victory_embed.set_footer(text="The tower has no effect!")
-            await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
+            # Edit the message directly (interaction already deferred)
+            target = getattr(self, "message", None) or getattr(interaction, "message", None)
+            if target:
+                try:
+                    await target.edit(embed=victory_embed, view=self)
+                except Exception:
+                    pass
 
 
 class EnderDragonView(discord.ui.View):
@@ -9546,6 +9679,12 @@ class EnderDragonView(discord.ui.View):
         self._dirty = False
         self._last_hit_name: str | None = None
         self._update_task: asyncio.Task | None = None
+        self._damage_cache: dict[int, int] = {}
+
+    def _get_damage(self, user_id: int) -> int:
+        if user_id not in self._damage_cache:
+            self._damage_cache[user_id] = get_pve_damage_multiplier(user_id)
+        return self._damage_cache[user_id]
 
     def _hp_bar(self) -> str:
         hp, max_hp = self.entry["hp"], self.entry["max_hp"]
@@ -9575,13 +9714,11 @@ class EnderDragonView(discord.ui.View):
                 return
             last_hit = self._last_hit_name
             self._dirty = False
-        async with self._lock:
-            if self.defeated:
-                return
         target = message or getattr(self, "message", None)
+        if not target:
+            return
         try:
-            if target:
-                await target.edit(embed=self._embed(last_hit), view=self)
+            await target.edit(embed=self._embed(last_hit), view=self)
         except Exception:
             pass
 
@@ -9591,10 +9728,10 @@ class EnderDragonView(discord.ui.View):
             return
         if getattr(interaction, "message", None):
             self.message = interaction.message
+        damage = await asyncio.to_thread(self._get_damage, interaction.user.id)
         async with self._lock:
             if self.defeated:
                 return  # Already dead; send nothing to avoid flooding chat when spam-clicking
-            damage = get_pve_damage_multiplier(interaction.user.id)
             self.entry["hp"] = max(0, self.entry["hp"] - damage)
             self.attackers[interaction.user.id] = self.attackers.get(interaction.user.id, 0) + damage
 
@@ -9615,7 +9752,13 @@ class EnderDragonView(discord.ui.View):
                     participants_lines.append(f"**{name}** — {dmg} damage")
                 victory_embed.add_field(name="🏆 Contributors", value="\n".join(participants_lines) or "No participants", inline=False)
                 victory_embed.set_footer(text="Rewards are being distributed…")
-                await safe_interaction_response(interaction, interaction.response.edit_message, embed=victory_embed, view=self)
+                # Edit the message directly (interaction already deferred)
+                target = getattr(self, "message", None) or getattr(interaction, "message", None)
+                if target:
+                    try:
+                        await target.edit(embed=victory_embed, view=self)
+                    except Exception:
+                        pass
 
                 _pve_boss_defeated_pending.setdefault(self.guild_id, []).append((self.boss, dict(self.attackers)))
                 boss_list = active_boss_events.get(self.guild_id, [])
@@ -9684,6 +9827,7 @@ def _ender_dragon_embed_from_entry(entry: dict, boss: dict, guild_id: int) -> di
 
 async def _ender_dragon_regen_loop(guild_id: int):
     """Every second, for each standing Obsidian Tower (End Crystal), heal the Ender Dragon by ENDER_DRAGON_REGEN_PER_CRYSTAL (capped at max_hp)."""
+    cached_message: discord.Message | None = None
     while True:
         try:
             await asyncio.sleep(1.0)
@@ -9704,16 +9848,21 @@ async def _ender_dragon_regen_loop(guild_id: int):
         if not message_id:
             continue
         try:
-            guild = bot.get_guild(guild_id)
-            if not guild:
-                continue
-            channel = guild.get_channel(entry["channel_id"])
-            if not channel or not isinstance(channel, discord.TextChannel):
-                continue
-            message = await channel.fetch_message(message_id)
+            # Use cached message to avoid fetching from Discord API every second
+            if cached_message is None or cached_message.id != message_id:
+                guild = bot.get_guild(guild_id)
+                if not guild:
+                    continue
+                channel = guild.get_channel(entry["channel_id"])
+                if not channel or not isinstance(channel, discord.TextChannel):
+                    continue
+                cached_message = await channel.fetch_message(message_id)
             boss = entry["boss"]
             embed = _ender_dragon_embed_from_entry(entry, boss, guild_id)
-            await message.edit(embed=embed)
+            await cached_message.edit(embed=embed)
+        except discord.NotFound:
+            # Message was deleted; clear cache so we re-fetch next tick
+            cached_message = None
         except Exception as e:
             print(f"Ender Dragon regen embed update failed: {e}")
 
@@ -9904,6 +10053,22 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
     veg_cfg = _ripe_cfg(LEVEL_OF_RIPENESS_VEGETABLES)
     flower_cfg = _ripe_cfg(LEVEL_OF_RIPENESS_FLOWERS)
 
+    # Pre-compute ALL money multipliers ONCE (they don't change per-item)
+    beta_mult = get_beta_tester_money_multiplier(user_id)
+    sb_mult = get_server_booster_money_multiplier(user_id)
+    tag_mult = get_server_tag_money_multiplier(user_id)
+    prem_mult = get_premium_tier_money_multiplier(user_id)
+    nether_mult = get_nether_star_money_multiplier(user_id)
+    shadow_crystal_mult = get_shadow_crystal_money_multiplier(user_id)
+    palace_mult = get_palace_treasure_money_multiplier(user_id)
+    edward_mult = get_edward_splash_money_multiplier(user_id)
+    eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
+    gamer_multi_mult = 1.25 if has_gamer_multi(user_id) else 1.0
+    jm_mult = get_jump_multi_multiplier(user_id)
+    jd_mult = get_jump_debuff_multiplier(user_id)
+    # Combined additive buff factor from all money multipliers (computed once)
+    money_buff_factor = (1.0 + (beta_mult - 1.0) + (sb_mult - 1.0) + (tag_mult - 1.0) + (prem_mult - 1.0) + (nether_mult - 1.0) + (shadow_crystal_mult - 1.0) + (palace_mult - 1.0) + (edward_mult - 1.0) + (eclipse_mult - 1.0) + (gamer_multi_mult - 1.0) + (jm_mult - 1.0) + (jd_mult - 1.0))
+
     # Roll all items (pure CPU, zero DB)
     items_inc: dict[str, int] = {}
     ripeness_inc: dict[str, int] = {}
@@ -9954,20 +10119,7 @@ def _pve_roll_items_and_batch_write(user_id: int, num_items: int, area_multiplie
         if has_bloomstone and cat == "Flower":
             fv *= 3.0
 
-        # All money buffs apply to the SAME base value (additive stacking) per item
-        base_for_buffs = float(fv)
-        beta_mult = get_beta_tester_money_multiplier(user_id)
-        sb_mult = get_server_booster_money_multiplier(user_id)
-        tag_mult = get_server_tag_money_multiplier(user_id)
-        prem_mult = get_premium_tier_money_multiplier(user_id)
-        nether_mult = get_nether_star_money_multiplier(user_id)
-        shadow_crystal_mult = get_shadow_crystal_money_multiplier(user_id)
-        palace_mult = get_palace_treasure_money_multiplier(user_id)
-        edward_mult = get_edward_splash_money_multiplier(user_id)
-        eclipse_mult = get_eclipse_glasses_money_multiplier(user_id)
-        gamer_active = has_gamer_multi(user_id)
-        gamer_multi_mult = 1.25 if gamer_active else 1.0
-        fv = base_for_buffs * (1.0 + (beta_mult - 1.0) + (sb_mult - 1.0) + (tag_mult - 1.0) + (prem_mult - 1.0) + (nether_mult - 1.0) + (shadow_crystal_mult - 1.0) + (palace_mult - 1.0) + (edward_mult - 1.0) + (eclipse_mult - 1.0) + (gamer_multi_mult - 1.0))
+        fv = float(fv) * money_buff_factor
         total_balance += fv
         name = item["name"]
         items_inc[name] = items_inc.get(name, 0) + 1
@@ -10094,6 +10246,16 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
                 color=discord.Color.green())
             reward_embed.add_field(
                 name="💰 **TOTAL**", value=f"**{format_money(total_value)}**", inline=True)
+            _pve_jm_mult = get_jump_multi_multiplier(user_id)
+            _pve_jd_mult = get_jump_debuff_multiplier(user_id)
+            if _pve_jm_mult > 1.0:
+                _jm_pct = (_pve_jm_mult - 1.0) * 100
+                reward_embed.add_field(
+                    name="🌿 **JUMP MULTI**", value=f"+{_jm_pct:.2f}% active", inline=True)
+            if _pve_jd_mult < 1.0:
+                _jd_pct = (1.0 - _pve_jd_mult) * 100
+                reward_embed.add_field(
+                    name="💀 **JUMP DEBUFF**", value=f"-{_jd_pct:.2f}% active", inline=True)
             reward_embed.set_footer(text="Thanks for defending the gathering grounds!")
 
             # Send reward DM first so user sees rewards quickly
@@ -10529,6 +10691,23 @@ async def gather(interaction: discord.Interaction):
                 value=f"+{gamer_multi_percent:.2f}% - **+${gather_result['extra_money_from_gamer_multi']:,.2f}**",
                 inline=False,
             )
+
+        if gather_result.get("extra_money_from_jump_multi", 0) > 0:
+            jump_multi_percent = (gather_result["jump_multi_multiplier"] - 1.0) * 100
+            embed.add_field(
+                name="🌿 **JUMP MULTI**",
+                value=f"+{jump_multi_percent:.2f}% - **+${gather_result['extra_money_from_jump_multi']:,.2f}**",
+                inline=False,
+            )
+
+        if gather_result.get("extra_money_from_jump_debuff", 0) < 0:
+            jump_debuff_percent = (1.0 - gather_result["jump_debuff_multiplier"]) * 100
+            embed.add_field(
+                name="💀 **JUMP DEBUFF**",
+                value=f"-{jump_debuff_percent:.2f}% - **-${abs(gather_result['extra_money_from_jump_debuff']):,.2f}**",
+                inline=False,
+            )
+
             if item_boost_sources:
                 extra_ns = gather_result.get("extra_money_from_nether_star", 0)
                 extra_bs = gather_result.get("extra_money_from_black_shard", 0)
@@ -11036,6 +11215,9 @@ async def stats(interaction: discord.Interaction):
                 else:
                     remaining_str = f"{secs}s"
                 profile_lines.append(f"**🎮 GAMER MULTI:** +25% for {remaining_str}")
+        _total_jumps = get_user_total_jumps(user_id)
+        if _total_jumps > 0:
+            profile_lines.append(f"**🌿 TOTAL JUMPS:** {_total_jumps}")
         if items_needed == 0:
             profile_lines.append(f"**📈 Rank Status: {next_rank} — You've Reached PLANTER X!**")
         else:
@@ -11230,12 +11412,23 @@ async def stats(interaction: discord.Interaction):
         if gamer_active:
             # GAMER MULTI is a flat +25% temporary money boost from recent game wins.
             mult_lines.append("**🎮 GAMER MULTI —** +25%")
+        jump_multi_mult = get_jump_multi_multiplier(user_id)
+        jump_debuff_mult = get_jump_debuff_multiplier(user_id)
+        if jump_multi_mult > 1.0:
+            jm_pct = (jump_multi_mult - 1.0) * 100
+            jm_count = get_dayboost_count(user_id, "jump_multi")
+            mult_lines.append(f"**🌿 JUMP MULTI —** +{jm_pct:.1f}% ({jm_count}x)")
+        if jump_debuff_mult < 1.0:
+            jd_pct = (1.0 - jump_debuff_mult) * 100
+            jd_count = get_dayboost_count(user_id, "jump_debuff")
+            mult_lines.append(f"**💀 JUMP DEBUFF —** -{jd_pct:.1f}% ({jd_count}x)")
         additive_total = 1.0 + (bloom_mult - 1.0) + (water_mult - 1.0) + (achievement_mult - 1.0) + (daily_mult - 1.0)
         additive_total += (beta_mult - 1.0) + (server_booster_mult - 1.0) + (server_tag_mult - 1.0) + (premium_mult - 1.0)
         additive_total += (nether_star_mult - 1.0) + (black_shard_mult - 1.0) + (shadow_crystal_mult - 1.0)
         additive_total += (palace_mult - 1.0) + (edward_mult - 1.0) + (eclipse_mult - 1.0)
         if gamer_active:
             additive_total += 0.25
+        additive_total += (jump_multi_mult - 1.0) + (jump_debuff_mult - 1.0)
         # Imbue prosperity (Gather + Harvest) counts toward combined %
         imbue_gather_prosperity = (hoe_attunement.get("money_bonus", 0) or 0) if hoe_attunement else 0
         imbue_harvest_prosperity = (tractor_attunement.get("money_bonus", 0) or 0) if tractor_attunement else 0
@@ -11769,9 +11962,13 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
     gamer_multi_mult = 1.25 if has_gamer_multi(user_id) else 1.0
     extra_gamer_multi = base_for_buffs * (gamer_multi_mult - 1.0) if gamer_multi_mult > 1.0 else 0.0
+    jump_multi_mult = get_jump_multi_multiplier(user_id)
+    jump_debuff_mult = get_jump_debuff_multiplier(user_id)
+    extra_jump_multi = base_for_buffs * (jump_multi_mult - 1.0) if jump_multi_mult > 1.0 else 0.0
+    extra_jump_debuff = base_for_buffs * (jump_debuff_mult - 1.0) if jump_debuff_mult < 1.0 else 0.0
     work_lunch_extra = base_for_buffs * 0.10 if (not set_cooldown and has_shop_item(user_id, "work_lunch")) else 0.0
     overtime_extra = base_for_buffs * 1.0 if (not set_cooldown and has_shop_item(user_id, "overtime_approval") and random.random() < 0.10) else 0.0
-    total_value = base_for_buffs + extra_money_from_fuzzy_dice + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_server_tag + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + extra_gamer_multi
+    total_value = base_for_buffs + extra_money_from_fuzzy_dice + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_server_tag + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + extra_gamer_multi + extra_jump_multi + extra_jump_debuff
     current_balance = current_balance + total_value
 
     # ----- single batch write: items + ripeness + balance + counts + tree rings + cooldown + almanac -----
@@ -11836,6 +12033,10 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         "extra_money_from_shadow_crystal": extra_money_from_shadow_crystal,
         "gamer_multi_multiplier": gamer_multi_mult,
         "extra_money_from_gamer_multi": extra_gamer_multi,
+        "jump_multi_multiplier": jump_multi_mult,
+        "extra_money_from_jump_multi": extra_jump_multi,
+        "jump_debuff_multiplier": jump_debuff_mult,
+        "extra_money_from_jump_debuff": extra_jump_debuff,
         "is_jackpot": harvest_is_jackpot,
         "jackpot_pool_amount": harvest_jackpot_amount,
     }
@@ -12198,6 +12399,23 @@ async def harvest(interaction: discord.Interaction):
                 value=f"+{gamer_multi_percent:.2f}% - **+${result['extra_money_from_gamer_multi']:,.2f}**",
                 inline=False,
             )
+
+        if result.get("extra_money_from_jump_multi", 0) > 0:
+            jump_multi_percent = (result["jump_multi_multiplier"] - 1.0) * 100
+            embed.add_field(
+                name="🌿 **JUMP MULTI**",
+                value=f"+{jump_multi_percent:.2f}% - **+${result['extra_money_from_jump_multi']:,.2f}**",
+                inline=False,
+            )
+
+        if result.get("extra_money_from_jump_debuff", 0) < 0:
+            jump_debuff_percent = (1.0 - result["jump_debuff_multiplier"]) * 100
+            embed.add_field(
+                name="💀 **JUMP DEBUFF**",
+                value=f"-{jump_debuff_percent:.2f}% - **-${abs(result['extra_money_from_jump_debuff']):,.2f}**",
+                inline=False,
+            )
+
         # Daily shop / item boosts that affected this harvest
         item_boost_sources = []
         shop_inv = full_data.get("shop_inventory", {}) if full_data else {}
@@ -15776,6 +15994,9 @@ async def reset(interaction: discord.Interaction, password: str, type: str):
             user_ids = [m.id for m in guild.members if not m.bot]
             # Run all resets in thread so event loop stays responsive
             await asyncio.to_thread(lambda: [reset_user_cooldowns(uid) for uid in user_ids])
+            # Clear in-memory jump cooldowns
+            for uid in user_ids:
+                _jump_cooldowns.pop(uid, None)
             reset_count = len(user_ids)
 
             embed = discord.Embed(
@@ -19897,7 +20118,11 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
         extra_msi = base_for_buffs * 0.20 if has_shop_item(user_id, "msi_afterburner") else 0.0
         extra_gamer_multi = base_for_buffs * (gamer_multi_mult - 1.0) if gamer_multi_mult > 1.0 else 0.0
-        total_sale_value = base_for_buffs + extra_beta + extra_booster + extra_tag + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi + extra_gamer_multi
+        jump_multi_mult = get_jump_multi_multiplier(user_id)
+        jump_debuff_mult = get_jump_debuff_multiplier(user_id)
+        extra_jump_multi = base_for_buffs * (jump_multi_mult - 1.0) if jump_multi_mult > 1.0 else 0.0
+        extra_jump_debuff = base_for_buffs * (jump_debuff_mult - 1.0) if jump_debuff_mult < 1.0 else 0.0
+        total_sale_value = base_for_buffs + extra_beta + extra_booster + extra_tag + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi + extra_gamer_multi + extra_jump_multi + extra_jump_debuff
 
         # Add money to balance (with boosts)
         current_balance = get_user_balance(user_id)
@@ -19979,6 +20204,20 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
             embed.add_field(
                 name="🎮 **GAMER MULTI**",
                 value=f"+{gamer_percent:.2f}% - **+${extra_gamer_multi:.2f}**",
+                inline=False,
+            )
+        if extra_jump_multi > 0:
+            jump_multi_percent = (jump_multi_mult - 1.0) * 100
+            embed.add_field(
+                name="🌿 **JUMP MULTI**",
+                value=f"+{jump_multi_percent:.2f}% - **+${extra_jump_multi:.2f}**",
+                inline=False,
+            )
+        if extra_jump_debuff < 0:
+            jump_debuff_percent = (1.0 - jump_debuff_mult) * 100
+            embed.add_field(
+                name="💀 **JUMP DEBUFF**",
+                value=f"-{jump_debuff_percent:.2f}% - **-${abs(extra_jump_debuff):.2f}**",
                 inline=False,
             )
 
@@ -20309,14 +20548,14 @@ async def portfolio(interaction: discord.Interaction):
         
         # Create portfolio embed
         embed = discord.Embed(
-            title="💼 Your Portfolio",
-            description=f"**Total Portfolio Value: ${total_value:.2f}**",
+            title="💼 **PORTFOLIO**",
+            description=f"**TOTAL VALUE: ${total_value:.2f}**",
             color=discord.Color.blue()
         )
         
         # Add cryptocurrency section
         if crypto_total > 0:
-            embed.description += "\n**💰 Cryptocurrency:**"
+            embed.description += "\n**💰 CRYPTOCURRENCY:**"
             for coin in CRYPTO_COINS:
                 symbol = coin["symbol"]
                 amount = crypto_holdings.get(symbol, 0.0)
@@ -20325,19 +20564,19 @@ async def portfolio(interaction: discord.Interaction):
                     value = crypto_values.get(symbol, 0.0)
                     embed.add_field(
                         name=f"{coin['name']} ({symbol})",
-                        value=f"Amount: {amount:.4f}\nValue: ${value:.2f}",
+                        value=f"**AMOUNT**: {amount:.4f}\n**VALUE**: ${value:.2f}",
                         inline=True
                     )
             # Add total as a field right after crypto holdings
             embed.add_field(
                 name="\u200b",
-                value=f"**Total: ${crypto_total:.2f}**",
+                value=f"**TOTAL**: ${crypto_total:.2f}**",
                 inline=False
             )
         
         # Add stock section
         if stock_total > 0:
-            embed.description += "\n**📈 Stocks:**"
+            embed.description += "\n**📈 STOCKS:**"
             for ticker in STOCK_TICKERS:
                 symbol = ticker["symbol"]
                 shares = stock_holdings.get(symbol, 0)
@@ -20346,13 +20585,13 @@ async def portfolio(interaction: discord.Interaction):
                     value = stock_values.get(symbol, 0.0)
                     embed.add_field(
                         name=f"{ticker['name']} ({symbol})",
-                        value=f"Shares: {shares:,}\nValue: ${value:.2f}",
+                        value=f"**SHARES**: {shares:,}\n**VALUE**: ${value:.2f}",
                         inline=True
                     )
             # Add total as a field right after stock holdings
             embed.add_field(
                 name="\u200b",
-                value=f"**Total: ${stock_total:.2f}**",
+                value=f"**TOTAL**: ${stock_total:.2f}**",
                 inline=False
             )
         
@@ -20905,6 +21144,152 @@ def start_http_server():
         traceback.print_exc()
         # Re-raise to prevent silent failures
         raise
+
+# ==================== /JUMP COMMAND ====================
+
+@bot.tree.command(name="jump", description="Jump off the tree branch into the spring!")
+@app_commands.describe(action="Check the branch status or jump")
+@app_commands.choices(action=[
+    app_commands.Choice(name="Jump", value="jump"),
+    app_commands.Choice(name="Check", value="check"),
+])
+async def jump(interaction: discord.Interaction, action: app_commands.Choice[str] = None):
+    user_id = interaction.user.id
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+        return
+
+    action_val = action.value if action else "jump"
+
+    # Only allowed in #spring
+    if not isinstance(interaction.channel, discord.TextChannel) or interaction.channel.name != "spring":
+        await interaction.response.send_message("❌ You can only use `/jump` in the **#spring** channel!", ephemeral=True)
+        return
+
+    # Check if branch is under repairs
+    now = time.time()
+    repair_until = _jump_repair_until.get(guild.id, 0)
+    if now < repair_until:
+        remaining_min = int((repair_until - now) / 60) + 1
+        await interaction.response.send_message(
+            f"🔧 The tree to jump off is under repairs.. Come back in **{remaining_min} minute{'s' if remaining_min != 1 else ''}**.",
+            ephemeral=True,
+        )
+        return
+
+    # /jump check — show your total jumps and branch status
+    if action_val == "check":
+        user_total = get_user_total_jumps(user_id)
+        embed = discord.Embed(
+            title="🌿 **BRANCH STATUS**",
+            description=f"The branch is intact and ready!\n\nYour total jumps: **{user_total}**",
+            color=discord.Color.dark_blue(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # --- /jump (actual jump) ---
+
+    # 10-second cooldown
+    last_jump = _jump_cooldowns.get(user_id, 0)
+    if now - last_jump < JUMP_COOLDOWN_SEC:
+        remaining = JUMP_COOLDOWN_SEC - (now - last_jump)
+        await interaction.response.send_message(
+            f"❌ You need to wait **{remaining:.1f}s** before jumping again!", ephemeral=True
+        )
+        return
+
+    # Daily limit (resets at midnight EST, same as water streak)
+    today_est = _get_date_est()
+    jump_data = get_user_jump_data(user_id)
+    jumps_today = jump_data["jump_today_count"]
+    jump_date = jump_data["jump_today_date"]
+
+    # Reset if it's a new day
+    if jump_date != today_est:
+        jumps_today = 0
+
+    if jumps_today >= JUMP_MAX_PER_DAY:
+        await interaction.response.send_message(
+            f"❌ You've already jumped **{JUMP_MAX_PER_DAY}** times today! Resets at midnight EST.", ephemeral=True
+        )
+        return
+
+    # Defer since we're doing DB work
+    await interaction.response.defer()
+
+    # Update cooldown
+    _jump_cooldowns[user_id] = now
+
+    # Roll the break chance: 1 / DENOMINATOR per jump
+    broke = random.randint(1, JUMP_BREAK_DENOMINATOR) <= 1
+
+    # Update daily jump count and increment all-time total
+    set_user_jump_data(user_id, jumps_today + 1, today_est, increment_total=True)
+
+    # Check jumping achievement
+    new_total = get_user_total_jumps(user_id)
+    jumping_lvl = get_achievement_level_for_stat("jumping", new_total)
+    cur_jumping = get_user_achievement_level(user_id, "jumping")
+    jumping_up = None
+    if jumping_lvl > cur_jumping:
+        set_user_achievement_level(user_id, "jumping", jumping_lvl)
+        jumping_up = jumping_lvl
+
+    if broke:
+        # BRANCH BROKE — apply debuff, lock branch for 1 hour
+        _jump_repair_until[guild.id] = now + JUMP_REPAIR_SEC
+        add_dayboost(user_id, "jump_debuff", duration_hours=12.0)
+        debuff_count = get_dayboost_count(user_id, "jump_debuff")
+        total_debuff_percent = JUMP_DEBUFF_PERCENT * debuff_count * 100
+
+        # Personal embed (in #spring via followup)
+        user_total = get_user_total_jumps(user_id)
+        debuff_embed = discord.Embed(
+            title="💀 **THE BRANCH BROKE!**",
+            description=(
+                f"**{interaction.user.display_name}** jumped & the branch **SNAPPED**!\n\n"
+                f"💀 **JUMP DEBUFF**: **-{total_debuff_percent:.0f}%** **FOR 12 HOURS**\n"
+                f"🔧 The branch is now **UNDER REPAIRS** for **1 HOUR**."
+            ),
+            color=discord.Color.dark_blue(),
+        )
+        debuff_embed.set_footer(text=f"Your total jumps: {user_total}")
+
+        await interaction.followup.send(embed=debuff_embed)
+
+        # Announcement in #rares
+        await _post_to_rares_channel(guild, f"💀 {interaction.user.mention} **BROKE** the **BRANCH**! | **[SPRING]**")
+
+        # Hidden achievement: break the branch for the first time
+        if unlock_hidden_achievement(user_id, "branch_breaker"):
+            await send_hidden_achievement_notification(interaction, "branch_breaker")
+        if jumping_up:
+            await send_achievement_notification(interaction, "jumping", jumping_up)
+    else:
+        # Successful jump — apply buff
+        add_dayboost(user_id, "jump_multi", duration_hours=1.0)
+        buff_count = get_dayboost_count(user_id, "jump_multi")
+        total_buff_percent = JUMP_MULTI_PERCENT * buff_count * 100
+        jumps_left = JUMP_MAX_PER_DAY - (jumps_today + 1)
+
+        success_embed = discord.Embed(
+            title="🌿 **JUMP!**",
+            description=(
+                f"**{interaction.user.display_name}** jumped off the branch & landed safely in the spring!\n\n"
+                f"🌿 **JUMP MULTI**: **+{total_buff_percent:.0f}%** **FOR 1 HOUR**\n"
+                f"JUMPS REMAINING: **{jumps_left}**"
+            ),
+            color=discord.Color.dark_blue(),
+        )
+        user_total = get_user_total_jumps(user_id)
+        success_embed.set_footer(text=f"Your total jumps: {user_total}")
+
+        await interaction.followup.send(embed=success_embed)
+        if jumping_up:
+            await send_achievement_notification(interaction, "jumping", jumping_up)
+
 
 def start_discord_bot():
     """Start the Discord bot with error handling"""

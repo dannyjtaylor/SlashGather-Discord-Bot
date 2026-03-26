@@ -12,6 +12,7 @@ _client: Optional[MongoClient] = None
 _users_collection: Optional[Collection] = None
 # Lazily-initialized collections that share the same Mongo client
 _giveaways_collection: Optional[Collection] = None
+_jump_state_collection: Optional[Collection] = None
 
 
 def _get_environment() -> str:
@@ -1755,7 +1756,8 @@ def get_user_gather_data(user_id: int) -> Dict:
 
 
 def reset_user_cooldowns(user_id: int) -> None:
-    """Reset all cooldowns for a user (gather, harvest, mine, Russian Roulette elimination, water)."""
+    """Reset all cooldowns for a user (gather, harvest, mine, Russian Roulette elimination, water, jump).
+    Does NOT reset water streak or total jump count — only the time-based cooldowns and daily jump count."""
     users = _get_users_collection()
     users.update_one(
         {"_id": int(user_id)},
@@ -1766,7 +1768,8 @@ def reset_user_cooldowns(user_id: int) -> None:
             "last_roulette_elimination_time": 0.0,
             "last_coinflip_loss_time": 0.0,
             "last_water_time": 0.0,
-            "consecutive_water_days": 0
+            "jump_today_count": 0,
+            "jump_today_date": "",
         }},
         upsert=True,
     )
@@ -2265,6 +2268,78 @@ def get_all_dayboosts(user_id: int) -> dict[str, int]:
         "nether_star": get_dayboost_count(user_id, "nether_star"),
         "black_shard": get_dayboost_count(user_id, "black_shard"),
     }
+
+
+# Jump system functions (per-guild counter + per-user daily tracking)
+def _get_jump_state_collection() -> Collection:
+    """Return the MongoDB collection used to store per-guild jump state."""
+    global _client, _jump_state_collection
+    if _client is None:
+        _get_users_collection()
+    if _jump_state_collection is not None:
+        return _jump_state_collection
+    db_name = os.getenv("MONGODB_DB_NAME", "slashgather")
+    _jump_state_collection = _client[db_name]["jump_state"]
+    return _jump_state_collection
+
+
+def get_jump_counter(guild_id: int) -> int:
+    """Get the current global jump counter for a guild (jumps since last branch break)."""
+    col = _get_jump_state_collection()
+    doc = col.find_one({"_id": int(guild_id)})
+    return int(doc.get("jump_counter", 0)) if doc else 0
+
+
+def increment_jump_counter(guild_id: int) -> int:
+    """Increment the global jump counter for a guild. Returns the new counter value."""
+    col = _get_jump_state_collection()
+    result = col.find_one_and_update(
+        {"_id": int(guild_id)},
+        {"$inc": {"jump_counter": 1}},
+        upsert=True,
+        return_document=True,
+    )
+    return int(result.get("jump_counter", 1))
+
+
+def reset_jump_counter(guild_id: int) -> None:
+    """Reset the global jump counter for a guild (after a branch break)."""
+    col = _get_jump_state_collection()
+    col.update_one(
+        {"_id": int(guild_id)},
+        {"$set": {"jump_counter": 0}},
+        upsert=True,
+    )
+
+
+def get_user_jump_data(user_id: int) -> dict:
+    """Get a user's jump tracking data (daily count and date)."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"jump_today_count": 1, "jump_today_date": 1, "total_jumps": 1})
+    if not doc:
+        return {"jump_today_count": 0, "jump_today_date": "", "total_jumps": 0}
+    return {
+        "jump_today_count": int(doc.get("jump_today_count", 0)),
+        "jump_today_date": str(doc.get("jump_today_date", "")),
+        "total_jumps": int(doc.get("total_jumps", 0)),
+    }
+
+
+def set_user_jump_data(user_id: int, count: int, date_str: str, *, increment_total: bool = False) -> None:
+    """Set a user's daily jump count and date. If increment_total, also bump total_jumps by 1."""
+    users = _get_users_collection()
+    update: dict = {"$set": {"jump_today_count": int(count), "jump_today_date": str(date_str)}}
+    if increment_total:
+        update["$inc"] = {"total_jumps": 1}
+    users.update_one({"_id": int(user_id)}, update, upsert=True)
+
+
+def get_user_total_jumps(user_id: int) -> int:
+    """Get a user's all-time total jump count."""
+    users = _get_users_collection()
+    doc = users.find_one({"_id": int(user_id)}, {"total_jumps": 1})
+    return int(doc.get("total_jumps", 0)) if doc else 0
 
 
 # Achievement functions
