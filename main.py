@@ -131,6 +131,7 @@ from database import (
     perform_batch_gather_update,
     get_user_tree_rings,
     increment_tree_rings,
+    get_tree_ring_interval,
     recalculate_user_tree_rings,
     recalculate_guild_tree_rings,
     get_bloom_multiplier,
@@ -717,16 +718,16 @@ SHOES_UPGRADES = [
 ]
 
 GLOVES_UPGRADES = [
-    {"name": "Paper Gloves", "chain_chance": 0.01},
-    {"name": "Oven Mitts", "chain_chance": 0.02},
-    {"name": "Latex Gloves", "chain_chance": 0.04},
-    {"name": "Surgical Gloves", "chain_chance": 0.065},
-    {"name": "Green Thumb Gloves", "chain_chance": 0.10},
-    {"name": "Astral Gloves", "chain_chance": 0.14},
-    {"name": "Spectral Gloves", "chain_chance": 0.1875},
-    {"name": "Luminite Mitts", "chain_chance": 0.24},
-    {"name": "Plutonium Hands", "chain_chance": 0.30},
-    {"name": "Galaxial Gloves", "chain_chance": 0.35},
+    {"name": "Paper Gloves", "chain_chance": 0.005},
+    {"name": "Oven Mitts", "chain_chance": 0.01},
+    {"name": "Latex Gloves", "chain_chance": 0.02},
+    {"name": "Surgical Gloves", "chain_chance": 0.035},
+    {"name": "Green Thumb Gloves", "chain_chance": 0.05},
+    {"name": "Astral Gloves", "chain_chance": 0.07},
+    {"name": "Spectral Gloves", "chain_chance": 0.10},
+    {"name": "Luminite Mitts", "chain_chance": 0.13},
+    {"name": "Plutonium Hands", "chain_chance": 0.16},
+    {"name": "Galaxial Gloves", "chain_chance": 0.20},
 ]
 
 SOIL_UPGRADES = [
@@ -760,16 +761,16 @@ HARVEST_CAR_UPGRADES = [
 HARVEST_CAR_PRICES = [1500, 2000, 5000, 20000, 100000, 200000, 1000000, 2000000, 6000000, 15000000]
 
 HARVEST_CHAIN_UPGRADES = [
-    {"name": "Winter", "chain_chance": 0.01},
-    {"name": "Spring", "chain_chance": 0.02},
-    {"name": "Great Season", "chain_chance": 0.03},
-    {"name": "Amazing Season", "chain_chance": 0.04},
-    {"name": "Bountiful Season", "chain_chance": 0.05},
-    {"name": "Floraltastic Season", "chain_chance": 0.075},
-    {"name": "Astralicious Season", "chain_chance": 0.10},
-    {"name": "Spectral Season", "chain_chance": 0.14},
-    {"name": "Galaxial Season", "chain_chance": 0.20},
-    {"name": "Universal Season", "chain_chance": 0.30},
+    {"name": "Winter", "chain_chance": 0.005},
+    {"name": "Spring", "chain_chance": 0.01},
+    {"name": "Great Season", "chain_chance": 0.015},
+    {"name": "Amazing Season", "chain_chance": 0.02},
+    {"name": "Bountiful Season", "chain_chance": 0.03},
+    {"name": "Floraltastic Season", "chain_chance": 0.04},
+    {"name": "Astralicious Season", "chain_chance": 0.06},
+    {"name": "Spectral Season", "chain_chance": 0.08},
+    {"name": "Galaxial Season", "chain_chance": 0.11},
+    {"name": "Universal Season", "chain_chance": 0.15},
 ]
 
 HARVEST_CHAIN_PRICES = [1000, 5000, 15000, 50000, 100000, 200000, 1000000, 5000000, 10000000, 20000000]
@@ -810,6 +811,18 @@ HARVEST_COOLDOWN_PRICES = [5000, 50000, 100000, 500000, 1000000, 2500000, 500000
 
 IMBUE_HOE_COST = 750_000
 IMBUE_TRACTOR_COST = 4_000_000
+IMBUE_SCALING_THRESHOLD = 500_000_000  # $500M — above this, imbue costs scale with balance
+IMBUE_HOE_SCALING_RATE = 0.005         # 0.5% of balance
+IMBUE_TRACTOR_SCALING_RATE = 0.025     # 2.5% of balance
+
+
+def get_imbue_cost(tool_type: str, balance: float) -> float:
+    """Return the imbue cost for the given tool type and user balance.
+    Above $500M, costs scale as a percentage of total balance."""
+    if balance > IMBUE_SCALING_THRESHOLD:
+        rate = IMBUE_HOE_SCALING_RATE if tool_type == "hoe" else IMBUE_TRACTOR_SCALING_RATE
+        return round(balance * rate, 2)
+    return IMBUE_HOE_COST if tool_type == "hoe" else IMBUE_TRACTOR_COST
 
 # Rarity weights (sum to 100 — each weight IS the % chance)
 ENCHANTMENT_RARITIES = [
@@ -904,10 +917,10 @@ def _to_roman(num):
 
 def _make_hoe_enchant(name, rarity, description, resonance=0, prosperity=0, renewal=0, abundance=0):
     """Create a standard hoe imbuement from level values.
-    Hoe formulas: chain=resonance*5%, money=prosperity*20%, cooldown=renewal*1s, crit=abundance*2.5%"""
+    Hoe formulas: chain=resonance*3%, money=prosperity*20%, cooldown=renewal*1s, crit=abundance*2.5%"""
     return {
         "name": name, "rarity": rarity, "description": description,
-        "chain_chance": resonance * 0.05,
+        "chain_chance": resonance * 0.03,
         "money_bonus": prosperity * 0.20,
         "cooldown_reduction": renewal,  # seconds (positive = faster)
         "critical_chance": abundance * 0.025,
@@ -931,10 +944,10 @@ def _make_custom_hoe_enchant(name, rarity, description, chain_chance=0, money_bo
 
 def _make_tractor_enchant(name, rarity, description, resonance=0, prosperity=0, renewal=0, natures_favor=0):
     """Create a standard tractor imbuement from level values.
-    Tractor formulas: chain=resonance*2.5%, money=prosperity*10%, cooldown=renewal*30s, plants=natures_favor*1"""
+    Tractor formulas: chain=resonance*1.5%, money=prosperity*10%, cooldown=renewal*30s, plants=natures_favor*1"""
     return {
         "name": name, "rarity": rarity, "description": description,
-        "chain_chance": resonance * 0.025,
+        "chain_chance": resonance * 0.015,
         "money_bonus": prosperity * 0.10,
         "cooldown_reduction": renewal * 30,  # seconds
         "critical_chance": 0,
@@ -1012,46 +1025,46 @@ HOE_ENCHANTMENTS = {
     ],
     "NETHERITE": [
         _make_custom_hoe_enchant("GRANDMASTER'S FURROW", "NETHERITE", "This tool once belonged to a valiant hero!",
-            critical_chance=0.15, money_bonus=3.00, chain_chance=0.15, cooldown_reduction=10,
+            critical_chance=0.15, money_bonus=3.00, chain_chance=0.09, cooldown_reduction=10,
             display_levels={"abundance": 6, "prosperity": 15, "resonance": 3, "renewal": 10}),
         _make_custom_hoe_enchant("EDEN'S GENESIS", "NETHERITE", "A holy hoe, one who gave birth to an ancient garden!",
             critical_chance=0.20, money_bonus=4.00,
             display_levels={"abundance": 8, "prosperity": 20}),
         _make_custom_hoe_enchant("CINDER'S EMBRACE", "NETHERITE", "Warm embers linger in every cut your hoe makes!",
-            critical_chance=0.12, money_bonus=2.80, chain_chance=0.12, cooldown_reduction=8,
+            critical_chance=0.12, money_bonus=2.80, chain_chance=0.06, cooldown_reduction=8,
             display_levels={"abundance": 5, "prosperity": 14, "resonance": 2, "renewal": 8}),
         _make_custom_hoe_enchant("HOLLOW HARVEST", "NETHERITE", "Your hoe reaps what grows in the quiet between worlds!",
-            critical_chance=0.18, money_bonus=3.50, chain_chance=0.10, cooldown_reduction=12,
+            critical_chance=0.18, money_bonus=3.50, chain_chance=0.06, cooldown_reduction=12,
             display_levels={"abundance": 7, "prosperity": 17, "resonance": 2, "renewal": 12}),
     ],
     "LUMINITE": [
         _make_custom_hoe_enchant("EARTHSHAPER", "LUMINITE", "This tool can shape the earth to its will!",
-            critical_chance=0.20, money_bonus=3.00, chain_chance=0.15, cooldown_reduction=10,
+            critical_chance=0.20, money_bonus=3.00, chain_chance=0.09, cooldown_reduction=10,
             display_levels={"abundance": 6, "prosperity": 15, "resonance": 3, "renewal": 10}),
         _make_custom_hoe_enchant("AURORABORN RELIC", "LUMINITE", "An ancient tool born out of heavenly lights!",
-            critical_chance=0.05, money_bonus=5.00, chain_chance=0.10, cooldown_reduction=20,
+            critical_chance=0.05, money_bonus=5.00, chain_chance=0.06, cooldown_reduction=20,
             display_levels={"abundance": 2, "prosperity": 25, "resonance": 2, "renewal": 20}),
         _make_custom_hoe_enchant("STARCRASH TILL", "LUMINITE", "Your hoe tills soil that remembers falling stars!",
-            critical_chance=0.18, money_bonus=3.80, chain_chance=0.14, cooldown_reduction=14,
+            critical_chance=0.18, money_bonus=3.80, chain_chance=0.09, cooldown_reduction=14,
             display_levels={"abundance": 7, "prosperity": 19, "resonance": 3, "renewal": 14}),
         _make_custom_hoe_enchant("LIMINAL FURROW", "LUMINITE", "Your hoe works the threshold between day and night!",
-            critical_chance=0.15, money_bonus=4.20, chain_chance=0.12, cooldown_reduction=18,
+            critical_chance=0.15, money_bonus=4.20, chain_chance=0.06, cooldown_reduction=18,
             display_levels={"abundance": 6, "prosperity": 21, "resonance": 2, "renewal": 18}),
     ],
     "CELESTIAL": [
         _make_custom_hoe_enchant("CULTISCYTHE OF THE LIGHTBRINGER", "CELESTIAL", "Razor-sharp & blessed by the sun!",
-            critical_chance=0.225, money_bonus=8.00, chain_chance=0.20, cooldown_reduction=15,
+            critical_chance=0.225, money_bonus=8.00, chain_chance=0.12, cooldown_reduction=15,
             display_levels={"abundance": 7, "prosperity": 40, "resonance": 4, "renewal": 9}),
         _make_custom_hoe_enchant("NOONSTRIKE", "CELESTIAL", "Your hoe strikes with the weight of the high sun!",
-            critical_chance=0.20, money_bonus=7.50, chain_chance=0.18, cooldown_reduction=18,
+            critical_chance=0.20, money_bonus=7.50, chain_chance=0.12, cooldown_reduction=18,
             display_levels={"abundance": 8, "prosperity": 37, "resonance": 4, "renewal": 18}),
         _make_custom_hoe_enchant("PLANTA MAXIMA LUNAE", "CELESTIAL", "The moon's greatest plant blesses every seed you sow!",
-            critical_chance=0.22, money_bonus=8.50, chain_chance=0.19, cooldown_reduction=16,
+            critical_chance=0.22, money_bonus=8.50, chain_chance=0.12, cooldown_reduction=16,
             display_levels={"abundance": 9, "prosperity": 42, "resonance": 4, "renewal": 16}),
     ],
     "SECRET": [
         _make_custom_hoe_enchant("FLORAL BANE OF VEGETABLES", "SECRET", "The ultimate hoe for /gather!",
-            critical_chance=0.30, money_bonus=16.00, chain_chance=0.25, cooldown_reduction=25,
+            critical_chance=0.30, money_bonus=16.00, chain_chance=0.15, cooldown_reduction=25,
             display_levels={"abundance": 12, "prosperity": 80, "resonance": 5, "renewal": 25}),
     ],
 }
@@ -1113,46 +1126,46 @@ TRACTOR_ENCHANTMENTS = {
     ],
     "NETHERITE": [
         _make_custom_tractor_enchant("ASHEN COLOSSUS", "NETHERITE", "A tractor to plow through volcanic lava, rock, and ash!",
-            money_bonus=1.70, chain_chance=0.075, cooldown_reduction=300, additional_plants=4,
+            money_bonus=1.70, chain_chance=0.045, cooldown_reduction=300, additional_plants=4,
             display_levels={"prosperity": 17, "resonance": 3, "renewal": 10, "natures_favor": 4}),
         _make_custom_tractor_enchant("DEERE OF EDEN", "NETHERITE", "A holy tractor, one who tilled an ancient garden!",
             additional_plants=5, money_bonus=2.00,
             display_levels={"natures_favor": 5, "prosperity": 20}),
         _make_custom_tractor_enchant("EMBERKISSED DRIVESHAFT", "NETHERITE", "Your tractor runs on eternal embers!",
-            money_bonus=1.50, chain_chance=0.065, cooldown_reduction=270, additional_plants=3,
+            money_bonus=1.50, chain_chance=0.03, cooldown_reduction=270, additional_plants=3,
             display_levels={"prosperity": 15, "resonance": 2, "renewal": 9, "natures_favor": 3}),
         _make_custom_tractor_enchant("ESSENCE OF THE VOID", "NETHERITE", "Your tractor plows from the edge of the void!",
-            money_bonus=1.90, chain_chance=0.085, cooldown_reduction=330, additional_plants=4,
+            money_bonus=1.90, chain_chance=0.045, cooldown_reduction=330, additional_plants=4,
             display_levels={"prosperity": 19, "resonance": 3, "renewal": 11, "natures_favor": 4}),
     ],
     "LUMINITE": [
         _make_custom_tractor_enchant("RIG OF RADIANCE", "LUMINITE", "This tractor radiates solar energy!",
-            money_bonus=2.50, chain_chance=0.10, cooldown_reduction=420,
+            money_bonus=2.50, chain_chance=0.06, cooldown_reduction=420,
             display_levels={"prosperity": 25, "resonance": 4, "renewal": 14}),
         _make_custom_tractor_enchant("ABYSSAL OVERDRIVE", "LUMINITE", "Your engine is powered from within the abyss!",
-            money_bonus=2.40, chain_chance=0.05, cooldown_reduction=300, additional_plants=6,
+            money_bonus=2.40, chain_chance=0.03, cooldown_reduction=300, additional_plants=6,
             display_levels={"prosperity": 25, "resonance": 2, "renewal": 10, "natures_favor": 6}),
         _make_custom_tractor_enchant("STARDUST GEAR RATIO", "LUMINITE", "Your tractor is woven from stardust!",
-            money_bonus=2.80, chain_chance=0.08, cooldown_reduction=390, additional_plants=5,
+            money_bonus=2.80, chain_chance=0.045, cooldown_reduction=390, additional_plants=5,
             display_levels={"prosperity": 28, "resonance": 3, "renewal": 13, "natures_favor": 5}),
         _make_custom_tractor_enchant("TWILIGHTED DUSK TO DAWN", "LUMINITE", "Your tractor runs between day and night!",
-            money_bonus=2.60, chain_chance=0.09, cooldown_reduction=360, additional_plants=5,
+            money_bonus=2.60, chain_chance=0.06, cooldown_reduction=360, additional_plants=5,
             display_levels={"prosperity": 26, "resonance": 4, "renewal": 12, "natures_favor": 5}),
     ],
     "CELESTIAL": [
         _make_custom_tractor_enchant("TRACTIC SUPERNOVA CORE", "CELESTIAL", "Blessed by the cosmos!",
-            money_bonus=4.50, chain_chance=0.125, cooldown_reduction=450, additional_plants=10,
+            money_bonus=4.50, chain_chance=0.075, cooldown_reduction=450, additional_plants=10,
             display_levels={"prosperity": 45, "resonance": 5, "renewal": 15, "natures_favor": 10}),
         _make_custom_tractor_enchant("SUNSPOT SPARKED ENGINE", "CELESTIAL", "Your tractor is forged in the heart of the sun!",
-            money_bonus=4.20, chain_chance=0.12, cooldown_reduction=480, additional_plants=8,
+            money_bonus=4.20, chain_chance=0.075, cooldown_reduction=480, additional_plants=8,
             display_levels={"prosperity": 42, "resonance": 5, "renewal": 16, "natures_favor": 8}),
         _make_custom_tractor_enchant("ECLIPSED PLOWTHROUGH TREADS", "CELESTIAL", "Your tractor plows through the shadow of the eclipse!",
-            money_bonus=4.80, chain_chance=0.13, cooldown_reduction=420, additional_plants=9,
+            money_bonus=4.80, chain_chance=0.075, cooldown_reduction=420, additional_plants=9,
             display_levels={"prosperity": 48, "resonance": 5, "renewal": 14, "natures_favor": 9}),
     ],
     "SECRET": [
         _make_custom_tractor_enchant("PROTOTYPE 13: ORBITAL \u03A9", "SECRET", "The ultimate tractor for /harvest!",
-            money_bonus=8.50, chain_chance=0.15, cooldown_reduction=480, additional_plants=10,
+            money_bonus=8.50, chain_chance=0.09, cooldown_reduction=480, additional_plants=10,
             display_levels={"prosperity": 85, "resonance": 6, "renewal": 16, "natures_favor": 10}),
     ],
 }
@@ -7828,7 +7841,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.1.1"
+            name="running /gather on V1.1.2"
         )
     )
     try:
@@ -10704,7 +10717,7 @@ async def gather(interaction: discord.Interaction):
                 color=discord.Color.orange())
             embed.add_field(name="**VALUE**", value=f"**{format_money(gather_result['base_value'])}**", inline=True)
             embed.add_field(name="**RIPENESS**", value=f"{rip_emoji} **{gather_result['ripeness'].upper()}**".strip(), inline=True)
-            embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'NO'}", inline=False)
+            embed.add_field(name="GMO?", value=f"{'YES ✨' if gather_result['is_gmo'] else 'NO'}", inline=False)
 
             bloom_count = full_data.get("bloom_count", 0)
             if bloom_count > 0 and gather_result.get('extra_money_from_bloom', 0) > 0:
@@ -10725,10 +10738,6 @@ async def gather(interaction: discord.Interaction):
                 embed.add_field(name="💧 **WATER STREAK MULTI**",
                     value=f"+{daily_bonus_percent:.2f}% - **+${gather_result['extra_money_from_daily']:,.2f}**", inline=False)
 
-            if hoe_enc and hoe_name and hoe_rarity_display:
-                embed.add_field(name="\u2728 **IMBUEMENT**", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
-            embed.add_field(name="\U0001f4a5 **CRITICAL MULTIPLIER**",
-                value=f"{format_money(pre_crit_value)} \u2192 **{format_money(gather_result['value'])}**", inline=False)
             if gather_result.get('extra_money_from_beta_tester', 0) > 0:
                 beta_percent = (gather_result['beta_tester_multiplier'] - 1.0) * 100
                 embed.add_field(name="🧪 **BETA TESTER**",
@@ -10754,7 +10763,7 @@ async def gather(interaction: discord.Interaction):
                 color=discord.Color.green())
             embed.add_field(name="**VALUE**", value=f"**{format_money(gather_result['base_value'])}**", inline=True)
             embed.add_field(name="**RIPENESS**", value=f"{rip_emoji} **{gather_result['ripeness'].upper()}**".strip(), inline=True)
-            embed.add_field(name="GMO?", value=f"{'Yes ✨' if gather_result['is_gmo'] else 'NO'}", inline=False)
+            embed.add_field(name="GMO?", value=f"{'YES ✨' if gather_result['is_gmo'] else 'NO'}", inline=False)
 
             bloom_count = full_data.get("bloom_count", 0)
             if bloom_count > 0 and gather_result.get('extra_money_from_bloom', 0) > 0:
@@ -10845,6 +10854,12 @@ async def gather(interaction: discord.Interaction):
             )
 
 
+        # Critical multiplier displayed last (before totals)
+        if is_crit:
+            pre_crit_value = gather_result['value'] / 2
+            embed.add_field(name="\U0001f4a5 **CRITICAL MULTIPLIER**",
+                value=f"{format_money(pre_crit_value)} \u2192 **{format_money(gather_result['value'])}**", inline=False)
+
         # Always show TOTAL and NEW BALANCE, regardless of GAMER MULTI
         embed.add_field(name="\U0001f4b0 **TOTAL**", value=f"**{format_money(gather_result['value'])}**", inline=True)
         embed.add_field(name="\U0001f4b5 **NEW BALANCE**", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
@@ -10869,7 +10884,7 @@ async def gather(interaction: discord.Interaction):
         # Chain message (must be after the main embed)
         if chain_triggered:
             await safe_interaction_response(interaction, interaction.followup.send,
-                f"🔗🔗 **CHAIN!** Your cooldown has been reset! Gather again! 🔗🔗")
+                f"🔗🔗 ***CHAIN! {interaction.user.mention}'S COOLDOWN IS RESET! GATHER AGAIN!*** 🔗🔗")
 
         # Auto-log to #rares for Legendary/Netherite/Luminite/Celestial/Mikellion (GMO or not)
         rare_label, _ = _plant_rare_label(gather_result.get("ripeness", ""), gather_result.get("is_gmo", False))
@@ -12597,7 +12612,7 @@ async def harvest(interaction: discord.Interaction):
         # Chain message (must be after the main embed)
         if chain_triggered:
             await safe_interaction_response(interaction, interaction.followup.send,
-                f"🔗🔗 **CHAIN!** Your harvest cooldown has been reset! Harvest again! 🔗🔗")
+                f"🔗🔗 ***CHAIN! {interaction.user.mention}'S COOLDOWN IS RESET! HARVEST AGAIN!*** 🔗🔗")
 
         # Auto-log to #rares for any Legendary/Netherite/Luminite/Celestial/Mikellion (GMO or not)
         area_tag = "[" + channel_name.upper().replace("-", " ") + "]"
@@ -12904,18 +12919,18 @@ async def bloom(interaction: discord.Interaction):
             title=f"🌸 {interaction.user.display_name} wants to Bloom!",
             color=discord.Color.gold()
         )
-        embed.add_field(name="📊 Plants Needed", value=f"**{plants_needed:,}**", inline=True)
-        embed.add_field(name="💰 Money needed", value=f"**${money_needed:,.0f}**", inline=True)
-        embed.add_field(name="ℹ️ What is /bloom?", value=what_bloom_does, inline=False)
+        embed.add_field(name="📊 **PLANTS NEEDED**", value=f"**{plants_needed:,}**", inline=True)
+        embed.add_field(name="💰 **MONEY NEEDED**", value=f"**${money_needed:,.0f}**", inline=True)
+        embed.add_field(name="ℹ️ **WHAT IS /bloom?**", value=what_bloom_does, inline=False)
         if can_bloom:
             embed.add_field(name="✅ Ready", value="You meet all requirements. Click **Bloom!** below to confirm.", inline=False)
         else:
             if not has_planter_x:
-                embed.add_field(name="❌ Requirement", value="You must be **PLANTER X**", inline=False)
+                embed.add_field(name="❌ **REQUIREMENT**", value="You must be **PLANTER X**", inline=False)
             elif plants_needed > 0:
-                embed.add_field(name="❌ Requirement", value=f"Gather **{plants_needed:,}** more plants this cycle to reach PLANTER X.", inline=False)
+                embed.add_field(name="❌ **REQUIREMENT**", value=f"Gather **{plants_needed:,}** more plants this cycle to reach PLANTER X.", inline=False)
             else:
-                embed.add_field(name="❌ Requirement", value=f"Not enough money! Earn **${money_needed:,.2f}** more to /bloom!", inline=False)
+                embed.add_field(name="❌ **REQUIREMENT**", value=f"Not enough money! Earn **${money_needed:,.2f}** more to /bloom!", inline=False)
 
         if can_bloom:
             view = BloomConfirmView(user_id=user_id)
@@ -13396,9 +13411,11 @@ def _build_daily_shop_embed_and_view(offerings: list, date_est: str, user_id: in
     tree_ring_emoji = "<:TreeRing:1474244868288282817>"
     if tree_rings is None:
         tree_rings = get_user_tree_rings(user_id)
+    interval = get_tree_ring_interval(user_id)
+    interval_line = f"\n🌱 **1 Tree Ring every {interval} plants**" if interval != 100 else ""
     embed = discord.Embed(
         title="🛒 **DAILY SHOP**",
-        description=f"{tree_ring_emoji} Your Tree Rings: **{tree_rings}**",
+        description=f"{tree_ring_emoji} Your Tree Rings: **{tree_rings}**{interval_line}",
         color=discord.Color.green()
     )
     for item_id in offerings:
@@ -13969,87 +13986,87 @@ class BasketUpgradeView(discord.ui.View):
         
         embed = discord.Embed(
             title="🛒 **GEAR UPGRADE SHOP**",
-            description=f"💰 Your Balance: **${balance:,.2f}**\n\nChoose an upgrade path to purchase!",
+            description=f"💰 **YOUR BALANCE:** **${balance:,.2f}**\n\nChoose an upgrade path to purchase!",
             color=discord.Color.gold()
         )
-        
+
         def _upgrade_bar(tier: int, max_tier: int = 10) -> str:
             return PROGRESS_Y * tier + PROGRESS_N * (max_tier - tier)
 
         # Path 1: Baskets (Money Multiplier)
         basket_tier = upgrades["basket"]
-        current_basket = "No Basket" if basket_tier == 0 else BASKET_UPGRADES[basket_tier - 1]["name"]
+        current_basket = "No Basket" if basket_tier == 0 else BASKET_UPGRADES[basket_tier - 1]["name"].upper()
         current_multiplier = 1.0 if basket_tier == 0 else BASKET_UPGRADES[basket_tier - 1]["multiplier"]
         bar_basket = _upgrade_bar(basket_tier)
         if basket_tier < 10:
-            next_basket = BASKET_UPGRADES[basket_tier]["name"]
+            next_basket = BASKET_UPGRADES[basket_tier]["name"].upper()
             next_multiplier = BASKET_UPGRADES[basket_tier]["multiplier"]
             next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[basket_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            basket_text = f"{bar_basket}\n**CURRENT:** {current_basket} ({current_multiplier}x money)\n**NEXT:** {next_basket} ({next_multiplier}x money)\n**COST:** ${next_cost:,.2f} {can_afford}"
+            basket_text = f"{bar_basket}\n**CURRENT:** {current_basket} (**{current_multiplier}x MONEY**)\n**NEXT:** {next_basket} (**{next_multiplier}x MONEY**)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
-            basket_text = f"{bar_basket}\n**CURRENT:** {current_basket} ({current_multiplier}x money)"
-        
+            basket_text = f"{bar_basket}\n**CURRENT:** {current_basket} (**{current_multiplier}x MONEY**)"
+
         embed.add_field(
             name="🧺 PATH 1: BASKETS",
             value=basket_text,
             inline=False
         )
-        
+
         # Path 2: Shoes (Cooldown Reduction)
         shoes_tier = upgrades["shoes"]
-        current_shoes = "Bare Feet" if shoes_tier == 0 else SHOES_UPGRADES[shoes_tier - 1]["name"]
+        current_shoes = "Bare Feet" if shoes_tier == 0 else SHOES_UPGRADES[shoes_tier - 1]["name"].upper()
         current_reduction = 0 if shoes_tier == 0 else SHOES_UPGRADES[shoes_tier - 1]["reduction"]
         bar_shoes = _upgrade_bar(shoes_tier)
         if shoes_tier < 10:
-            next_shoes = SHOES_UPGRADES[shoes_tier]["name"]
+            next_shoes = SHOES_UPGRADES[shoes_tier]["name"].upper()
             next_reduction = SHOES_UPGRADES[shoes_tier]["reduction"]
             next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[shoes_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            shoes_text = f"{bar_shoes}\n**CURRENT:** {current_shoes} (-{current_reduction}s cooldown)\n**NEXT:** {next_shoes} (-{next_reduction}s cooldown)\n**COST:** ${next_cost:,.2f} {can_afford}"
+            shoes_text = f"{bar_shoes}\n**CURRENT:** {current_shoes} (**-{current_reduction}s COOLDOWN**)\n**NEXT:** {next_shoes} (**-{next_reduction}s COOLDOWN**)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
-            shoes_text = f"{bar_shoes}\n**CURRENT:** {current_shoes} (-{current_reduction}s cooldown)"
-        
+            shoes_text = f"{bar_shoes}\n**CURRENT:** {current_shoes} (**-{current_reduction}s COOLDOWN**)"
+
         embed.add_field(
             name="👟 PATH 2: RUNNING SHOES",
             value=shoes_text,
             inline=False
         )
-        
+
         # Path 3: Gloves (Chain Chance)
         gloves_tier = upgrades["gloves"]
-        current_gloves = "Bare Hands" if gloves_tier == 0 else GLOVES_UPGRADES[gloves_tier - 1]["name"]
+        current_gloves = "Bare Hands" if gloves_tier == 0 else GLOVES_UPGRADES[gloves_tier - 1]["name"].upper()
         current_chain = 0 if gloves_tier == 0 else round(GLOVES_UPGRADES[gloves_tier - 1]["chain_chance"] * 100, 2)
         bar_gloves = _upgrade_bar(gloves_tier)
         if gloves_tier < 10:
-            next_gloves = GLOVES_UPGRADES[gloves_tier]["name"]
+            next_gloves = GLOVES_UPGRADES[gloves_tier]["name"].upper()
             next_chain = round(GLOVES_UPGRADES[gloves_tier]["chain_chance"] * 100, 2)
             next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[gloves_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            gloves_text = f"{bar_gloves}\n**CURRENT:** {current_gloves} ({current_chain}% chain chance)\n**NEXT:** {next_gloves} ({next_chain}% chain chance)\n**COST:** ${next_cost:,.2f} {can_afford}"
+            gloves_text = f"{bar_gloves}\n**CURRENT:** {current_gloves} (**+{current_chain}% CHAIN CHANCE**)\n**NEXT:** {next_gloves} (**+{next_chain}% CHAIN CHANCE**)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
-            gloves_text = f"{bar_gloves}\n**CURRENT:** {current_gloves} ({current_chain}% chain chance)"
-        
+            gloves_text = f"{bar_gloves}\n**CURRENT:** {current_gloves} (**+{current_chain}% CHAIN CHANCE**)"
+
         embed.add_field(
             name="🧤 PATH 3: GLOVES",
             value=gloves_text,
             inline=False
         )
-        
+
         # Path 4: Soil (GMO Chance) — round % to avoid float display
         soil_tier = upgrades["soil"]
-        current_soil = "Regular Soil" if soil_tier == 0 else SOIL_UPGRADES[soil_tier - 1]["name"]
+        current_soil = "Regular Soil" if soil_tier == 0 else SOIL_UPGRADES[soil_tier - 1]["name"].upper()
         current_gmo = 0 if soil_tier == 0 else round(SOIL_UPGRADES[soil_tier - 1]["gmo_boost"] * 100, 1)
         bar_soil = _upgrade_bar(soil_tier)
         if soil_tier < 10:
-            next_soil = SOIL_UPGRADES[soil_tier]["name"]
+            next_soil = SOIL_UPGRADES[soil_tier]["name"].upper()
             next_gmo = round(SOIL_UPGRADES[soil_tier]["gmo_boost"] * 100, 1)
             next_cost = bloom_scaled_price(self.user_id, UPGRADE_PRICES[soil_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            soil_text = f"{bar_soil}\n**CURRENT:** {current_soil} (+{current_gmo}% GMO chance)\n**NEXT:** {next_soil} (+{next_gmo}% GMO chance)\n**COST:** ${next_cost:,.2f} {can_afford}"
+            soil_text = f"{bar_soil}\n**CURRENT:** {current_soil} (**+{current_gmo}% GMO CHANCE**)\n**NEXT:** {next_soil} (**+{next_gmo}% GMO CHANCE**)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
-            soil_text = f"{bar_soil}\n**CURRENT:** {current_soil} (+{current_gmo}% GMO chance)"
-        
+            soil_text = f"{bar_soil}\n**CURRENT:** {current_soil} (**+{current_gmo}% GMO CHANCE**)"
+
         embed.add_field(
             name="🌱 PATH 4: SOIL",
             value=soil_text,
@@ -14181,79 +14198,79 @@ class HarvestUpgradeView(discord.ui.View):
         
         embed = discord.Embed(
             title="🚜 **HARVEST UPGRADE SHOP**",
-            description=f"💰 Your Balance: **${balance:,.2f}**\n\nChoose an upgrade path to purchase!",
+            description=f"💰 **YOUR BALANCE:** **${balance:,.2f}**\n\nChoose an upgrade path to purchase!",
             color=discord.Color.green()
         )
-        
+
         def _upgrade_bar(tier: int, max_tier: int = 10) -> str:
             return PROGRESS_Y * tier + PROGRESS_N * (max_tier - tier)
-        
+
         # Path 1: Car (Extra Items)
         car_tier = upgrades["car"]
-        current_car = "Just Yourself" if car_tier == 0 else HARVEST_CAR_UPGRADES[car_tier - 1]["name"]
+        current_car = "Just Yourself" if car_tier == 0 else HARVEST_CAR_UPGRADES[car_tier - 1]["name"].upper()
         current_extra = 0 if car_tier == 0 else HARVEST_CAR_UPGRADES[car_tier - 1]["extra_items"]
         bar_car = _upgrade_bar(car_tier)
         if car_tier < 10:
-            next_car = HARVEST_CAR_UPGRADES[car_tier]["name"]
+            next_car = HARVEST_CAR_UPGRADES[car_tier]["name"].upper()
             next_extra = HARVEST_CAR_UPGRADES[car_tier]["extra_items"]
             next_cost = bloom_scaled_price(self.user_id, HARVEST_CAR_PRICES[car_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            car_text = f"{bar_car}\n**CURRENT:** {current_car} (+{current_extra} extra items)\n**NEXT:** {next_car} (+{next_extra} extra items)\n**COST:** ${next_cost:,.2f} {can_afford}"
+            car_text = f"{bar_car}\n**CURRENT:** {current_car} (**+{current_extra} EXTRA ITEMS**)\n**NEXT:** {next_car} (**+{next_extra} EXTRA ITEMS**)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
-            car_text = f"{bar_car}\n**CURRENT:** {current_car} (+{current_extra} extra items)"
-        
+            car_text = f"{bar_car}\n**CURRENT:** {current_car} (**+{current_extra} EXTRA ITEMS**)"
+
         embed.add_field(
             name="🚗 PATH 1: VEHICLE",
             value=car_text,
             inline=False
         )
-        
+
         # Path 2: Chain Chance (Season) — round % to avoid float display
         chain_tier = upgrades["chain"]
-        current_season = "No Season" if chain_tier == 0 else HARVEST_CHAIN_UPGRADES[chain_tier - 1]["name"]
+        current_season = "No Season" if chain_tier == 0 else HARVEST_CHAIN_UPGRADES[chain_tier - 1]["name"].upper()
         current_chain = 0 if chain_tier == 0 else round(HARVEST_CHAIN_UPGRADES[chain_tier - 1]["chain_chance"] * 100, 1)
         bar_chain = _upgrade_bar(chain_tier)
         if chain_tier < 10:
-            next_season = HARVEST_CHAIN_UPGRADES[chain_tier]["name"]
+            next_season = HARVEST_CHAIN_UPGRADES[chain_tier]["name"].upper()
             next_chain = round(HARVEST_CHAIN_UPGRADES[chain_tier]["chain_chance"] * 100, 1)
             next_cost = bloom_scaled_price(self.user_id, HARVEST_CHAIN_PRICES[chain_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            chain_text = f"{bar_chain}\n**CURRENT:** {current_season} ({current_chain}% chain chance)\n**NEXT:** {next_season} ({next_chain}% chain chance)\n**COST:** ${next_cost:,.2f} {can_afford}"
+            chain_text = f"{bar_chain}\n**CURRENT:** {current_season} (**+{current_chain}% CHAIN CHANCE**)\n**NEXT:** {next_season} (**+{next_chain}% CHAIN CHANCE**)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
-            chain_text = f"{bar_chain}\n**CURRENT:** {current_season} ({current_chain}% chain chance)"
-        
+            chain_text = f"{bar_chain}\n**CURRENT:** {current_season} (**+{current_chain}% CHAIN CHANCE**)"
+
         embed.add_field(
             name="🌾 PATH 2: YIELD",
             value=chain_text,
             inline=False
         )
-        
+
         # Path 3: Fertilizer (Money Multiplier) — round % to avoid float display
         fertilizer_tier = upgrades["fertilizer"]
-        current_fertilizer = "No Fertilizer" if fertilizer_tier == 0 else HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["name"]
+        current_fertilizer = "No Fertilizer" if fertilizer_tier == 0 else HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["name"].upper()
         current_multiplier = 0 if fertilizer_tier == 0 else round(HARVEST_FERTILIZER_UPGRADES[fertilizer_tier - 1]["multiplier"] * 100, 1)
         bar_fertilizer = _upgrade_bar(fertilizer_tier)
         if fertilizer_tier < 10:
-            next_fertilizer = HARVEST_FERTILIZER_UPGRADES[fertilizer_tier]["name"]
+            next_fertilizer = HARVEST_FERTILIZER_UPGRADES[fertilizer_tier]["name"].upper()
             next_multiplier = round(HARVEST_FERTILIZER_UPGRADES[fertilizer_tier]["multiplier"] * 100, 1)
             next_cost = bloom_scaled_price(self.user_id, HARVEST_FERTILIZER_PRICES[fertilizer_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
-            fertilizer_text = f"{bar_fertilizer}\n**CURRENT:** {current_fertilizer} (+{current_multiplier}% money)\n**NEXT:** {next_fertilizer} (+{next_multiplier}% money)\n**COST:** ${next_cost:,.2f} {can_afford}"
+            fertilizer_text = f"{bar_fertilizer}\n**CURRENT:** {current_fertilizer} (**+{current_multiplier}% MONEY**)\n**NEXT:** {next_fertilizer} (**+{next_multiplier}% MONEY**)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
-            fertilizer_text = f"{bar_fertilizer}\n**CURRENT:** {current_fertilizer} (+{current_multiplier}% money)"
-        
+            fertilizer_text = f"{bar_fertilizer}\n**CURRENT:** {current_fertilizer} (**+{current_multiplier}% MONEY**)"
+
         embed.add_field(
             name="💩 PATH 3: FERTILIZER",
             value=fertilizer_text,
             inline=False
         )
-        
+
         # Path 4: Cooldown Reduction (Workers)
         cooldown_tier = upgrades["cooldown"]
-        current_workers = "No Workers" if cooldown_tier == 0 else HARVEST_COOLDOWN_UPGRADES[cooldown_tier - 1]["name"]
+        current_workers = "No Workers" if cooldown_tier == 0 else HARVEST_COOLDOWN_UPGRADES[cooldown_tier - 1]["name"].upper()
         current_reduction = 0 if cooldown_tier == 0 else HARVEST_COOLDOWN_UPGRADES[cooldown_tier - 1]["reduction"]
         if cooldown_tier < 10:
-            next_workers = HARVEST_COOLDOWN_UPGRADES[cooldown_tier]["name"]
+            next_workers = HARVEST_COOLDOWN_UPGRADES[cooldown_tier]["name"].upper()
             next_reduction = HARVEST_COOLDOWN_UPGRADES[cooldown_tier]["reduction"]
             next_cost = bloom_scaled_price(self.user_id, HARVEST_COOLDOWN_PRICES[cooldown_tier])
             can_afford = "✅" if balance >= next_cost else "❌"
@@ -14274,7 +14291,7 @@ class HarvestUpgradeView(discord.ui.View):
                     reduction_text = f"-{hours}h {minutes}m"
                 else:
                     reduction_text = f"-{hours}h"
-            
+
             if current_reduction < 60:
                 current_reduction_text = f"-{current_reduction}s"
             elif current_reduction < 3600:
@@ -14291,9 +14308,9 @@ class HarvestUpgradeView(discord.ui.View):
                     current_reduction_text = f"-{hours}h {minutes}m"
                 else:
                     current_reduction_text = f"-{hours}h"
-            
+
             bar_cooldown = _upgrade_bar(cooldown_tier)
-            cooldown_text = f"{bar_cooldown}\n**CURRENT:** {current_workers} ({current_reduction_text} cooldown)\n**NEXT:** {next_workers} ({reduction_text} cooldown)\n**COST:** ${next_cost:,.2f} {can_afford}"
+            cooldown_text = f"{bar_cooldown}\n**CURRENT:** {current_workers} (**{current_reduction_text} COOLDOWN**)\n**NEXT:** {next_workers} (**{reduction_text} COOLDOWN**)\n**COST:** ${next_cost:,.2f} {can_afford}"
         else:
             bar_cooldown = _upgrade_bar(cooldown_tier)
             if current_reduction < 60:
@@ -14312,8 +14329,8 @@ class HarvestUpgradeView(discord.ui.View):
                     current_reduction_text = f"-{hours}h {minutes}m"
                 else:
                     current_reduction_text = f"-{hours}h"
-            cooldown_text = f"{bar_cooldown}\n**CURRENT:** {current_workers} ({current_reduction_text} cooldown)"
-        
+            cooldown_text = f"{bar_cooldown}\n**CURRENT:** {current_workers} (**{current_reduction_text} COOLDOWN**)"
+
         embed.add_field(
             name="⚡ PATH 4: COOLDOWN REDUCTION",
             value=cooldown_text,
@@ -14439,7 +14456,7 @@ class ImbueView(discord.ui.View):
     """View with Replace / Keep Current Imbuement / Recast buttons for the /imbue command."""
 
     def __init__(self, user_id: int, tool_type: str, rolled_enchant: dict, current_enchant: dict | None,
-                 channel: discord.abc.Messageable, user_name: str, timeout=60):
+                 channel: discord.abc.Messageable, user_name: str, timeout=60, cost: float = None):
         super().__init__(timeout=timeout)
         self.user_id = user_id
         self.tool_type = tool_type  # "hoe" or "tractor"
@@ -14447,7 +14464,7 @@ class ImbueView(discord.ui.View):
         self.current_enchant = current_enchant
         self.channel = channel  # For public announcement
         self.user_name = user_name
-        self.cost = IMBUE_HOE_COST if tool_type == "hoe" else IMBUE_TRACTOR_COST
+        self.cost = cost if cost is not None else (IMBUE_HOE_COST if tool_type == "hoe" else IMBUE_TRACTOR_COST)
         # Guard: only one Replace can post to #imbue/#rares (prevents double-click or duplicate delivery)
         self._replace_done = False
         # First-ever roll: user had no imbuement — cannot "keep" nothing; hide only "Keep Current"
@@ -14618,6 +14635,10 @@ class ImbueView(discord.ui.View):
                 "\u274c This isn't your imbuement menu!", ephemeral=True)
             return
 
+        # Recalculate cost based on current balance (scaling kicks in above $500M)
+        current_bal = await asyncio.to_thread(get_user_balance, self.user_id)
+        self.cost = get_imbue_cost(self.tool_type, current_bal)
+
         # Atomic deduction in thread so event loop stays responsive
         success, new_balance = await asyncio.to_thread(atomic_deduct_balance, self.user_id, self.cost)
         if not success:
@@ -14669,7 +14690,9 @@ async def imbue(interaction: discord.Interaction, tool: app_commands.Choice[str]
 
         user_id = interaction.user.id
         tool_type = tool.value  # "hoe" or "tractor"
-        cost = IMBUE_HOE_COST if tool_type == "hoe" else IMBUE_TRACTOR_COST
+        # Dynamic cost: scales with balance above $500M
+        current_bal = await asyncio.to_thread(get_user_balance, user_id)
+        cost = get_imbue_cost(tool_type, current_bal)
 
         # Per-user lock prevents concurrent imbue operations
         if user_id not in _imbue_locks:
@@ -14702,6 +14725,7 @@ async def imbue(interaction: discord.Interaction, tool: app_commands.Choice[str]
                     channel=interaction.channel,
                     user_name=interaction.user.name,
                     timeout=60,
+                    cost=cost,
                 )
                 embed = view._build_embed(balance_override=new_balance)
 
@@ -15132,29 +15156,24 @@ class GpuView(discord.ui.View):
         
         embed = discord.Embed(
             title=f"🖥️ {gpu_name}",
-            description=f"💰 Balance: **${balance:,.2f}**\n\nBuy GPUs to boost your mining!",
+            description=f"💰 BALANCE: **${balance:,.2f}**\n\nBuy GPUs to boost your mining!",
             color=discord.Color.blue()
         )
-        
+
         embed.add_field(
-            name="Mining Boost",
+            name="**MINING BOOST**",
             value=f"**+{gpu_info['percent_increase']}%**",
             inline=True
         )
         embed.add_field(
-            name="Time Boost",
+            name="**ADDED TIME**",
             value=f"**+{gpu_info['seconds_increase']}** seconds",
             inline=True
         )
         embed.add_field(
-            name="Price",
+            name="**COST**",
             value=f"**${price:,.2f}** {'✅' if balance >= price else '❌'}",
             inline=True
-        )
-        embed.add_field(
-            name="Status",
-            value="**OWNED** ✅" if already_owned else "**Available**",
-            inline=False
         )
         
         embed.set_footer(text=f"Page {page + 1} of {self.total_pages}")
@@ -15178,7 +15197,7 @@ class GpuView(discord.ui.View):
         if already_owned:
             # Already owned
             self.buy_button.disabled = True
-            self.buy_button.label = "Already Owned"
+            self.buy_button.label = "ALREADY OWNED"
             self.buy_button.style = discord.ButtonStyle.secondary
         elif balance < price:
             # Can't afford
@@ -15191,7 +15210,7 @@ class GpuView(discord.ui.View):
             self.buy_button.label = "BUY"
             self.buy_button.style = discord.ButtonStyle.success
     
-    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, row=0)
     async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if interaction.user.id != self.user_id:
@@ -15218,7 +15237,7 @@ class GpuView(discord.ui.View):
             except:
                 pass
 
-    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, row=0)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if interaction.user.id != self.user_id:
@@ -17046,8 +17065,8 @@ async def give(
             embed = discord.Embed(
                 title="🎉 Giveaway – Imbue",
                 description=(
-                    f"{user.mention} has been given the **{attunement['name']}** "
-                    f"{rarity_emoji} imbue for their **{tool_label}**!"
+                    f"{user.mention} has been given the "
+                    f"{rarity_emoji} **{attunement['name']}** imbue for their **{tool_label}**!"
                 ),
                 color=RARITY_COLORS.get(rarity_upper, discord.Color.gold().value)
             )
@@ -17249,7 +17268,7 @@ async def _giveaway_end_task(
                 if not DAILY_SHOP_ITEM_IDS:
                     await channel.send(
                         f"🫐 Giveaway ended, but no Daily Shop items are configured. "
-                        f"{w.mention} would have won a random item. Please contact @danny."
+                        f"{w.mention} would have won a random item. Please contact <@{GIVEAWAY_CLAIM_USER_ID}>."
                     )
                     continue
                 item_id = random.choice(DAILY_SHOP_ITEM_IDS)
@@ -17261,7 +17280,7 @@ async def _giveaway_end_task(
                     print(f"[Giveaway] Error applying prize to {w.id}: {e}")
                 await channel.send(
                     f"🎁 Congratulations {w.mention}! You won: **{item_display}**\n"
-                    f"Contact @danny to claim your prize!"
+                    f"Contact {danny_mention} to claim your prize!"
                 )
             else:
                 try:
@@ -17270,7 +17289,7 @@ async def _giveaway_end_task(
                     print(f"[Giveaway] Error applying prize to {w.id}: {e}")
                 await channel.send(
                     f"🎁 Congratulations {w.mention}! You won: **{prize_display}**\n"
-                    f"Contact @danny to claim your prize!"
+                    f"Contact {danny_mention} to claim your prize!"
                 )
         # If we reached here without early return, mark this giveaway as resolved.
         mark_giveaway_resolved(message_id)
@@ -17284,7 +17303,7 @@ async def _giveaway_end_task(
             try:
                 await channel.send(
                     "🫐 Giveaway ended, but an unexpected error occurred while selecting winners. "
-                    "Please contact @danny to resolve this manually."
+                    f"Please contact <@{GIVEAWAY_CLAIM_USER_ID}> to resolve this manually."
                 )
             except Exception:
                 # At this point there's nothing more we can safely do.
@@ -17766,7 +17785,7 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
     if not leaderboard_text:
         leaderboard_text = "No data available"
     
-    embed.add_field(name="Top 10 Rankings", value=leaderboard_text, inline=False)
+    embed.add_field(name="\u200b", value=leaderboard_text, inline=False)
     embed.set_footer(text=f"Total: {len(leaderboard_data)} users")
     embed.timestamp = discord.utils.utcnow()
     
@@ -18860,7 +18879,19 @@ async def gardener_background_task():
                                                 items_display = "\n".join(lines) or "No items"
                                                 # Discord embed field value limit is 1024 characters
                                                 if len(items_display) > 1024:
-                                                    items_display = items_display[:1021] + "..."
+                                                    # Truncate at line boundaries to avoid cutting mid-emoji or mid-text
+                                                    truncated_lines = []
+                                                    total_len = 0
+                                                    for line in lines:
+                                                        # +1 for the newline character
+                                                        if total_len + len(line) + 1 + 20 > 1024:  # reserve space for "...and X more"
+                                                            break
+                                                        truncated_lines.append(line)
+                                                        total_len += len(line) + 1
+                                                    remaining = len(lines) - len(truncated_lines)
+                                                    if remaining > 0:
+                                                        truncated_lines.append(f"*...and {remaining} more*")
+                                                    items_display = "\n".join(truncated_lines)
                                                 embed.add_field(name="📦 Items Harvested", value=items_display, inline=False)
                                                 embed.add_field(name="💰 **TOTAL**", value=f"**${total_value:,.2f}**", inline=True)
                                                 embed.add_field(name="💵 **NEW BALANCE**", value=f"**${current_balance:,.2f}**", inline=True)
@@ -18896,13 +18927,13 @@ async def gardener_background_task():
                                                     gather_color = PREMIUM_GARDENER_GATHER_COLORS.get(gardener_id, discord.Color.green()) if is_premium_gardener else discord.Color.green()
                                                     gardener_emoji = PREMIUM_GARDENER_EMOJI.get(gardener_id, "🌿") if is_premium_gardener else "🌿"
                                                     embed = discord.Embed(
-                                                        title=f"{gardener_emoji} {user_name}'s Gardener gathered!",
-                                                        description=f"{desc_prefix}Their gardener found a **{gather_result['name']}**!",
+                                                        title=f"{gardener_emoji} {user_name}'s GARDENER GATHERED!",
+                                                        description=f"{desc_prefix}**{gather_result['name']}**",
                                                         color=gather_color
                                                     )
                                                     embed.add_field(name="**VALUE**", value=f"**${gather_result['base_value']:.2f}**", inline=True)
                                                     embed.add_field(name="**RIPENESS**", value=f"{rip_em} **{gather_result['ripeness'].upper()}**".strip(), inline=True)
-                                                    embed.add_field(name="GMO?", value="Yes ✨" if gather_result['is_gmo'] else "NO", inline=False)
+                                                    embed.add_field(name="GMO?", value="YES ✨" if gather_result['is_gmo'] else "NO", inline=False)
                                                     await lawn_channel.send(embed=embed)
                                                     # Hidden achievement: One in a Mikellion (gardener gathered Mikellion)
                                                     if gather_result.get("ripeness") == "Mikellion" and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
@@ -19013,13 +19044,13 @@ async def secret_gardener_background_task():
                                             rip_em = get_ripeness_imbue_emoji(gather_result.get("ripeness", ""))
                                             desc_prefix = f"{rip_em} " if rip_em else ""
                                             embed = discord.Embed(
-                                                title=f"\U0001f33f\u2728 {user_name}'s Secret Gardener gathered!",
-                                                description=f"{desc_prefix}The Secret Gardener found a **{gather_result['name']}**!",
+                                                title=f"\U0001f33f\u2728 {user_name}'s SECRET GARDENER GATHERED!",
+                                                description=f"{desc_prefix}**{gather_result['name']}**",
                                                 color=discord.Color.purple()
                                             )
                                             embed.add_field(name="**VALUE**", value=f"**${gather_result['base_value']:,.2f}**", inline=True)
                                             embed.add_field(name="**RIPENESS**", value=f"{rip_em} **{gather_result['ripeness'].upper()}**".strip(), inline=True)
-                                            embed.add_field(name="GMO?", value="Yes \u2728" if gather_result['is_gmo'] else "NO", inline=False)
+                                            embed.add_field(name="GMO?", value="YES \u2728" if gather_result['is_gmo'] else "NO", inline=False)
                                             await lawn_channel.send(embed=embed)
                                             # Hidden achievement: One in a Mikellion (secret gardener gathered Mikellion)
                                             if gather_result.get("ripeness") == "Mikellion" and unlock_hidden_achievement(user_id, "one_in_a_mikellion"):
