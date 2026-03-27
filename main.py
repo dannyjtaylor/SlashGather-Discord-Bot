@@ -648,7 +648,7 @@ GARDENER_NAMES = {
     1: "GIUSEPPE",
     2: "JOSE",
     3: "ESTEBAN",
-    4: "ADRIANA BOTTEGA ROMINA MENDOZA",
+    4: "ADRIANA ROMINA MENDOZA BOTTEGA",
     5: "Gardener #5",
 }
 
