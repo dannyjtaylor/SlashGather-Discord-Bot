@@ -476,12 +476,12 @@ async def send_achievement_notification(interaction: discord.Interaction, achiev
         boost_percent = level_data["boost"] * 100
         
         embed = discord.Embed(
-            title="\U0001f3c6 Achievement Unlocked!",
+            title="\U0001f3c6 ACHIEVEMENT UNLOCKED!",
             description=f"**{achievement_display_name}**\n{achievement_description}",
             color=discord.Color.gold()
         )
         if boost_percent > 0:
-            embed.add_field(name="\U0001f4b0 Boost", value=f"**+{boost_percent:.1f}%**", inline=False)
+            embed.add_field(name="**\U0001f4b0 BOOST**", value=f"**+{boost_percent:.1f}%**", inline=False)
         
         try:
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -500,12 +500,12 @@ async def send_hidden_achievement_notification(interaction: discord.Interaction,
     boost_percent = achievement_data["boost"] * 100
     
     embed = discord.Embed(
-        title="\U0001f3c6 Hidden Achievement Unlocked!",
+        title="\U0001f3c6 HIDDEN ACHIEVEMENT UNLOCKED!",
         description=f"**{achievement_name}**\n{achievement_description}",
         color=discord.Color.gold()
     )
     if boost_percent > 0:
-        embed.add_field(name="\U0001f4b0 Boost", value=f"**+{boost_percent:.1f}%**", inline=False)
+        embed.add_field(name="**\U0001f4b0 BOOST**", value=f"**+{boost_percent:.1f}%**", inline=False)
     
     try:
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -524,12 +524,12 @@ async def send_achievement_notification_async(channel, user_mention: str, achiev
         achievement_description = level_data["description"]
         boost_percent = level_data["boost"] * 100
         embed = discord.Embed(
-            title="\U0001f3c6 Achievement Unlocked!",
+            title="\U0001f3c6 ACHIEVEMENT UNLOCKED!",
             description=f"{user_mention}\n\n**{achievement_display_name}**\n{achievement_description}",
             color=discord.Color.gold()
         )
         if boost_percent > 0:
-            embed.add_field(name="\U0001f4b0 Boost", value=f"**+{boost_percent:.1f}%**", inline=False)
+            embed.add_field(name="**\U0001f4b0 BOOST**", value=f"**+{boost_percent:.1f}%**", inline=False)
         try:
             await channel.send(embed=embed)
         except Exception as e:
@@ -548,12 +548,12 @@ async def send_hidden_achievement_notification_async(channel, user_mention: str,
     boost_percent = achievement_data["boost"] * 100
     
     embed = discord.Embed(
-        title="\U0001f3c6 Hidden Achievement Unlocked!",
+        title="\U0001f3c6 HIDDEN ACHIEVEMENT UNLOCKED!",
         description=f"{user_mention}\n\n**{achievement_name}**\n{achievement_description}",
         color=discord.Color.gold()
     )
     if boost_percent > 0:
-        embed.add_field(name="\U0001f4b0 Boost", value=f"**+{boost_percent:.1f}%**", inline=False)
+        embed.add_field(name="**\U0001f4b0 BOOST**", value=f"**+{boost_percent:.1f}%**", inline=False)
     
     try:
         await channel.send(embed=embed)
@@ -572,12 +572,12 @@ async def send_hidden_achievement_notification_dm(user_id: int, achievement_key:
     boost_percent = achievement_data["boost"] * 100
     
     embed = discord.Embed(
-        title="\U0001f3c6 Hidden Achievement Unlocked!",
+        title="\U0001f3c6 HIDDEN ACHIEVEMENT UNLOCKED!",
         description=f"**{achievement_name}**\n{achievement_description}",
         color=discord.Color.gold()
     )
     if boost_percent > 0:
-        embed.add_field(name="\U0001f4b0 Boost", value=f"**+{boost_percent:.1f}%**", inline=False)
+        embed.add_field(name="**\U0001f4b0 BOOST**", value=f"**+{boost_percent:.1f}%**", inline=False)
     
     try:
         user = bot.get_user(user_id) or await bot.fetch_user(user_id)
@@ -602,12 +602,12 @@ async def send_achievement_notification_dm(user_id: int, achievement_name: str, 
         boost_percent = level_data["boost"] * 100
         
         embed = discord.Embed(
-            title="\U0001f3c6 Achievement Unlocked!",
+            title="\U0001f3c6 ACHIEVEMENT UNLOCKED!",
             description=f"**{achievement_display_name}**\n{achievement_description}",
             color=discord.Color.gold()
         )
         if boost_percent > 0:
-            embed.add_field(name="\U0001f4b0 Boost", value=f"**+{boost_percent:.1f}%**", inline=False)
+            embed.add_field(name="**\U0001f4b0 BOOST**", value=f"**+{boost_percent:.1f}%**", inline=False)
         
         try:
             user = bot.get_user(user_id) or await bot.fetch_user(user_id)
@@ -642,6 +642,15 @@ COINFLIP_LOSS_COOLDOWN = 10  # seconds before next /coinflip after losing
 # In production, these should be: HOURLY_EVENT_INTERVAL = 3600, DAILY_EVENT_INTERVAL = 86400
 HOURLY_EVENT_INTERVAL = 3600 # Seconds between hourly event checks (default: 3600 = 1 hour)
 DAILY_EVENT_INTERVAL = 86400 # Seconds between daily event checks (default: 86400 = 24 hours)
+
+# Gardener names (by slot ID)
+GARDENER_NAMES = {
+    1: "GIUSEPPE",
+    2: "JOSE",
+    3: "ESTEBAN",
+    4: "ADRIANA BOTTEGA ROMINA MENDOZA",
+    5: "Gardener #5",
+}
 
 # Gardener prices
 GARDENER_PRICES = [1000, 10000, 50000, 100000, 250000]
@@ -4803,6 +4812,8 @@ DAILY_EVENTS = [
 active_roulette_games = {}
 user_active_games = {} # user id -> game id
 active_roulette_channel_games = {} # to map channel id to game id, so we can have one game per channel
+ROULETTE_GAME_MAX_LIFETIME = 600  # 10 minutes max per game (prevents stale/stuck games)
+
 class RouletteGame:
     def __init__(self, game_id, host_id, host_name, bullets, bet_amount, max_players):
         self.game_id = game_id
@@ -4819,6 +4830,8 @@ class RouletteGame:
         self.turn_index = 0
         self.player_order = [host_id]
         self.game_started = False
+        self.created_at = time.time()
+        self.channel_id = None  # Set when game is created in /russian command
 
     #add player to game
     def add_player(self, player_id: int, player_name: str):
@@ -4983,6 +4996,21 @@ async def play_roulette_round(channel, game_id):
     if game_id not in active_roulette_games:
         return
     game = active_roulette_games[game_id]
+
+    # Safety: abort if game exceeded max lifetime (prevents infinite loops)
+    if time.time() - game.created_at > ROULETTE_GAME_MAX_LIFETIME:
+        _force_cleanup_roulette_game(game_id, refund=True)
+        try:
+            embed = discord.Embed(
+                title="⏰ GAME TIMED OUT ⏰",
+                description="This Russian Roulette game has been automatically ended due to exceeding the time limit.\n\n**All remaining players have been refunded.**",
+                color=discord.Color.orange()
+            )
+            await channel.send(embed=embed)
+        except Exception:
+            pass
+        return
+
     alive_players = game.get_alive_players()
 
     #check if  game should end, check if everyone died
@@ -5393,7 +5421,7 @@ class RouletteJoinView(discord.ui.View):
             
             # Update the message to show cancellation
             embed = discord.Embed(
-                title="❌ Game Cancelled",
+                title="❌ GAME CANCELLED",
                 description=f"**{game.host_name}** cancelled the game.\n\nAll bets have been refunded.",
                 color=discord.Color.red()
             )
@@ -5558,45 +5586,49 @@ class RouletteContinueView(discord.ui.View):
         # Auto-cash out when timeout expires
         if self.game_id not in active_roulette_games:
             return
-        
+
         game = active_roulette_games[self.game_id]
         current_player_id = game.get_current_player()
-        
+
         if current_player_id is None:
             return
-        
+
         # Check if player is still alive (hasn't already been eliminated)
         if current_player_id not in game.players or not game.players[current_player_id]['alive']:
             return
-        
-        # Get the message channel - we need to find it from the game
-        channel = None
-        for ch_id, tracked_game_id in active_roulette_channel_games.items():
-            if tracked_game_id == self.game_id:
-                channel = bot.get_channel(ch_id)
-                break
-        
+
+        # Get the message channel - try game.channel_id first, then fallback to channel_games map
+        channel = bot.get_channel(game.channel_id) if game.channel_id else None
         if channel is None:
+            for ch_id, tracked_game_id in active_roulette_channel_games.items():
+                if tracked_game_id == self.game_id:
+                    channel = bot.get_channel(ch_id)
+                    break
+
+        if channel is None:
+            # Channel not found — force-cleanup the stuck game so it doesn't block forever
+            print(f"RouletteContinueView timeout: channel not found for game {self.game_id}, force-cleaning up")
+            _force_cleanup_roulette_game(self.game_id, refund=True)
             return
-        
+
         # Cash out - player gets their stake back
         player = game.players[current_player_id]
         winnings = normalize_money(player['current_stake'])
-        
+
         # Add winnings to player balance
         current_balance = get_user_balance(current_player_id)
         current_balance = normalize_money(current_balance)
         new_balance = normalize_money(current_balance + winnings)
         update_user_balance(current_player_id, new_balance)
-        
+
         # Remove from active games
         if current_player_id in user_active_games:
             del user_active_games[current_player_id]
-        
+
         # Mark player as eliminated (cashed out)
         game.players[current_player_id]['alive'] = False
         game.players[current_player_id]['cashed_out'] = True
-        
+
         embed = discord.Embed(
             title="💰 AUTO CASHED OUT! 💰",
             description=f"**{player['name']}** timed out and was automatically cashed out!",
@@ -5610,15 +5642,15 @@ class RouletteContinueView(discord.ui.View):
         )
         embed.add_field(name="📈 Multiplier Achieved", value=f"{game.calculate_total_multiplier(player['rounds_survived']):.2f}x", inline=True)
         embed.add_field(name="🎯 Rounds Survived", value=f"{player['rounds_survived']}", inline=True)
-        
+
         await channel.send(embed=embed)
-        
+
         # Check russian roulette achievement (auto-cashout = game completed)
         await check_russian_roulette_achievement(current_player_id)
-        
+
         # Check if game ends
         alive_count = len(game.get_alive_players())
-        
+
         if alive_count == 0 or (alive_count == 1 and game.max_players > 1):
             await asyncio.sleep(2)
             await end_roulette_game(channel, self.game_id)
@@ -5757,6 +5789,72 @@ async def end_roulette_game(channel, game_id):
         if tracked_game_id == game_id:
             del active_roulette_channel_games[channel_id]
             break
+
+
+def _force_cleanup_roulette_game(game_id: str, refund: bool = True):
+    """Force-cleanup a stuck/stale roulette game. Refunds all alive players and removes all tracking."""
+    if game_id not in active_roulette_games:
+        return
+    game = active_roulette_games[game_id]
+    if refund:
+        for player_id, data in game.players.items():
+            if data["alive"] and not data.get("cashed_out", False):
+                try:
+                    current_balance = get_user_balance(player_id)
+                    current_balance = normalize_money(current_balance)
+                    refund_amount = normalize_money(data["current_stake"])
+                    new_balance = normalize_money(current_balance + refund_amount)
+                    update_user_balance(player_id, new_balance)
+                except Exception as e:
+                    print(f"Error refunding player {player_id} during force cleanup: {e}")
+    # Remove all players from active games tracker
+    for player_id in game.players.keys():
+        if player_id in user_active_games:
+            del user_active_games[player_id]
+    # Remove game
+    del active_roulette_games[game_id]
+    for ch_id, tracked_game_id in list(active_roulette_channel_games.items()):
+        if tracked_game_id == game_id:
+            del active_roulette_channel_games[ch_id]
+            break
+    print(f"Force-cleaned up roulette game {game_id} (refund={refund})")
+
+
+async def roulette_stale_game_cleanup():
+    """Background task: clean up roulette games that exceed ROULETTE_GAME_MAX_LIFETIME (stuck/abandoned)."""
+    await bot.wait_until_ready()
+    await asyncio.sleep(30)
+    while not bot.is_closed():
+        try:
+            now = time.time()
+            stale_game_ids = [
+                gid for gid, game in active_roulette_games.items()
+                if now - game.created_at > ROULETTE_GAME_MAX_LIFETIME
+            ]
+            for game_id in stale_game_ids:
+                game = active_roulette_games.get(game_id)
+                if not game:
+                    continue
+                channel = bot.get_channel(game.channel_id) if game.channel_id else None
+                if channel is None:
+                    for ch_id, tracked_gid in active_roulette_channel_games.items():
+                        if tracked_gid == game_id:
+                            channel = bot.get_channel(ch_id)
+                            break
+                _force_cleanup_roulette_game(game_id, refund=True)
+                if channel:
+                    try:
+                        embed = discord.Embed(
+                            title="⏰ GAME TIMED OUT ⏰",
+                            description="This Russian Roulette game has been automatically ended due to inactivity.\n\n**All remaining players have been refunded.**",
+                            color=discord.Color.orange()
+                        )
+                        await channel.send(embed=embed)
+                    except Exception as e:
+                        print(f"Error sending stale game cleanup message: {e}")
+        except Exception as e:
+            print(f"Error in roulette_stale_game_cleanup: {e}")
+        await asyncio.sleep(60)
 
 
 # --- GATHEMON (Turn-based Pokémon battle for plants) ---
@@ -7730,7 +7828,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.1.0"
+            name="running /gather on V1.1.1"
         )
     )
     try:
@@ -7846,6 +7944,8 @@ async def on_ready():
     print("Started irrigation auto-water task")
     bot.loop.create_task(mongodb_keepalive_task())
     print("Started MongoDB keepalive task")
+    bot.loop.create_task(roulette_stale_game_cleanup())
+    print("Started roulette stale game cleanup task")
 
     # Cache invites for invite tracking (needs "Manage Server" permission)
     global _invite_cache
@@ -8245,12 +8345,12 @@ async def _gather_post_response(interaction: discord.Interaction, user_id: int,
                     except Exception as e:
                         print(f"Error assigning bloom rank role to user {user_id}: {e}")
                     rankup_embed = discord.Embed(
-                        title="🌱 Rank Up!",
+                        title="🌱 RANK UP!",
                         description=f"{interaction.user.mention} advanced to **PLANTER I** and is ranked **PINE I**!",
                         color=discord.Color.gold())
                 else:
                     rankup_embed = discord.Embed(
-                        title="🌱 Rank Up!",
+                        title="🌱 RANK UP!",
                         description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
                         color=discord.Color.gold())
                 await safe_interaction_response(interaction, interaction.followup.send, embed=rankup_embed)
@@ -12177,12 +12277,12 @@ async def _harvest_post_response(interaction: discord.Interaction, user_id: int,
                     except Exception as e:
                         print(f"Error assigning bloom rank role to user {user_id}: {e}")
                     rankup_embed = discord.Embed(
-                        title="🌾 Rank Up!",
+                        title="🌾 RANK UP!",
                         description=f"{interaction.user.mention} advanced to **PLANTER I** and is ranked **PINE I**!",
                         color=discord.Color.gold())
                 else:
                     rankup_embed = discord.Embed(
-                        title="🌾 Rank Up!",
+                        title="🌾 RANK UP!",
                         description=f"{interaction.user.mention} advanced from **{old_role or 'PLANTER I'}** to **{new_role}**!",
                         color=discord.Color.gold())
                 await safe_interaction_response(interaction, interaction.followup.send, embed=rankup_embed)
@@ -13297,7 +13397,7 @@ def _build_daily_shop_embed_and_view(offerings: list, date_est: str, user_id: in
     if tree_rings is None:
         tree_rings = get_user_tree_rings(user_id)
     embed = discord.Embed(
-        title="🛒 Daily Shop",
+        title="🛒 **DAILY SHOP**",
         description=f"{tree_ring_emoji} Your Tree Rings: **{tree_rings}**",
         color=discord.Color.green()
     )
@@ -13422,7 +13522,7 @@ async def inviteawards(interaction: discord.Interaction, action: app_commands.Ch
                     await send_hidden_achievement_notification(interaction, "social_butterfly")
             
             embed = discord.Embed(
-                title="🎁 Invite Reward Claimed!",
+                title="🎁 **INVITE REWARD CLAIMED!**",
                 description=f"**Tier {next_tier}** — {reward_msg}",
                 color=discord.Color.green()
             )
@@ -13510,7 +13610,7 @@ class DailyShopBuyButton(discord.ui.Button):
             tree_ring_emoji = "<:TreeRing:1474244868288282817>"
             tree_rings = await asyncio.to_thread(get_user_tree_rings, user_id)
             done_embed = discord.Embed(
-                title="🛒 Daily Shop",
+                title="🛒 **DAILY SHOP**",
                 description=f"You've bought everything available for you today! You own all items currently on offer.\n\n{tree_ring_emoji} Your Tree Rings: **{tree_rings}**",
                 color=discord.Color.gold()
             )
@@ -13572,7 +13672,7 @@ class DailyShopInventoryButton(discord.ui.Button):
             inv = await asyncio.to_thread(get_user_shop_inventory, user_id)
             if not inv:
                 embed = discord.Embed(
-                    title="🛒 Your Shop Inventory",
+                    title="🛒 **YOUR SHOP INVENTORY**",
                     description="Items you've purchased from the Daily Shop.",
                     color=discord.Color.gold()
                 )
@@ -13627,7 +13727,7 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
             # No items: single simple embed
             if not inv:
                 embed = discord.Embed(
-                    title="🛒 Daily Shop – Your Inventory",
+                    title="🛒 **DAILY SHOP – YOUR INVENTORY**",
                     description=f"{interaction.user.mention}'s purchased items (Tree Ring shop)",
                     color=discord.Color.gold()
                 )
@@ -13666,7 +13766,7 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
             tree_ring_emoji = "<:TreeRing:1474244868288282817>"
             tree_rings = data["tree_rings"]
             embed = discord.Embed(
-                title="🛒 Daily Shop",
+                title="🛒 **DAILY SHOP**",
                 description=f"You already own **all** Daily Shop items! There's nothing new for you today. Check back after the next refresh.\n\n{tree_ring_emoji} Your Tree Rings: **{tree_rings}**",
                 color=discord.Color.gold()
             )
@@ -13868,7 +13968,7 @@ class BasketUpgradeView(discord.ui.View):
         balance = get_user_balance(self.user_id)
         
         embed = discord.Embed(
-            title="🛒 Gear Upgrade Shop",
+            title="🛒 **GEAR UPGRADE SHOP**",
             description=f"💰 Your Balance: **${balance:,.2f}**\n\nChoose an upgrade path to purchase!",
             color=discord.Color.gold()
         )
@@ -14080,7 +14180,7 @@ class HarvestUpgradeView(discord.ui.View):
         balance = get_user_balance(self.user_id)
         
         embed = discord.Embed(
-            title="🚜 Harvest Upgrade Shop",
+            title="🚜 **HARVEST UPGRADE SHOP**",
             description=f"💰 Your Balance: **${balance:,.2f}**\n\nChoose an upgrade path to purchase!",
             color=discord.Color.green()
         )
@@ -14447,7 +14547,7 @@ class ImbueView(discord.ui.View):
 
         # Update the message (use followup since we deferred)
         confirm_embed = discord.Embed(
-            title="\u2705 Imbuement Replaced!",
+            title="\u2705 **IMBUEMENT REPLACED!**",
             description=f"Your {self.tool_type} has been enchanted with **{self.rolled_enchant['name']}**!",
             color=discord.Color.green(),
         )
@@ -14471,7 +14571,7 @@ class ImbueView(discord.ui.View):
                 try:
                     await interaction.followup.send(
                         embed=discord.Embed(
-                            title="🏆 Hidden Achievement Unlocked!",
+                            title="🏆 HIDDEN ACHIEVEMENT UNLOCKED!",
                             description=f"**High Reroller**\nGet an imbue enchantment that is NETHERITE, LUMINITE, CELESTIAL, or SECRET",
                             color=discord.Color.gold()
                         ),
@@ -14497,7 +14597,7 @@ class ImbueView(discord.ui.View):
             child.disabled = True
 
         keep_embed = discord.Embed(
-            title="\U0001f6e1\ufe0f Imbuement Kept",
+            title="\U0001f6e1\ufe0f **IMBUEMENT KEPT**",
             description="You kept your current imbuement.",
             color=discord.Color.light_grey(),
         )
@@ -14679,7 +14779,7 @@ class HireView(discord.ui.View):
         gardener_chance = GARDENER_CHANCES.get(slot_id, 0.05) * 100
         description_text = f"💰 **BALANCE:** **${balance:,.2f}**\n\nHire gardeners to automatically gather items for you! This gardener has a **{gardener_chance:.0f}%** chance to gather every minute."
         embed = discord.Embed(
-            title=f"🌱 **GIUSEPPE**" if slot_id == 1 else f"🌱 **JOSE**" if slot_id == 2 else f"🌱 **ESTEBAN**" if slot_id == 3 else f"🌱 Gardener #{slot_id}",
+            title=f"🌱 **{GARDENER_NAMES.get(slot_id, f'Gardener #{slot_id}')}**",
             description=description_text,
             color=discord.Color.green()
         )
@@ -14709,7 +14809,7 @@ class HireView(discord.ui.View):
         sg_unlocked = has_secret_gardener(self.user_id)
         sg_harvest = has_secret_gardener_harvest(self.user_id)
         embed = discord.Embed(
-            title="\U0001f331\u2728 Secret Gardener",
+            title="\U0001f331\u2728 **SECRET GARDENER**",
             description="A mysterious gardener with incredible abilities!",
             color=discord.Color.purple() if sg_unlocked else discord.Color.dark_grey()
         )
@@ -14875,7 +14975,7 @@ class HireView(discord.ui.View):
 
             # Check if slot is already taken
             if slot_id in gardener_dict:
-                await interaction.followup.send(f"❌ Gardener #{slot_id} is already hired!", ephemeral=True)
+                await interaction.followup.send(f"❌ {GARDENER_NAMES.get(slot_id, f'Gardener #{slot_id}')} is already hired!", ephemeral=True)
                 return
 
             # Check if max gardeners reached
@@ -14902,7 +15002,8 @@ class HireView(discord.ui.View):
             achievement_unlocked = await asyncio.to_thread(check_maxed_out_achievement, self.user_id)
 
             # Send confirmation and update embed
-            await interaction.followup.send(f"✅ Hired **Gardener #{slot_id}** for ${price:,.2f}! They'll start gathering for you automatically.", ephemeral=True)
+            gardener_display = GARDENER_NAMES.get(slot_id, f"Gardener #{slot_id}")
+            await interaction.followup.send(f"✅ Hired **{gardener_display}** for ${price:,.2f}! They'll start gathering for you automatically.", ephemeral=True)
 
             if achievement_unlocked:
                 await send_hidden_achievement_notification(interaction, "maxed_out")
@@ -15557,6 +15658,45 @@ async def endevent(interaction: discord.Interaction, password: str, event_type: 
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
+@bot.tree.command(name="endrussian", description="[ADMIN] End any active Russian Roulette game in this channel")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(password="Admin password")
+async def endrussian(interaction: discord.Interaction, password: str):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
+            return
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+
+        channel_id = interaction.channel.id
+        game_id = active_roulette_channel_games.get(channel_id)
+        if not game_id or game_id not in active_roulette_games:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ No active Russian Roulette game found in this channel.", ephemeral=True)
+            return
+
+        game = active_roulette_games[game_id]
+        player_count = len(game.players)
+        _force_cleanup_roulette_game(game_id, refund=True)
+
+        embed = discord.Embed(
+            title="🛑 RUSSIAN ROULETTE ENDED BY ADMIN 🛑",
+            description=f"**{interaction.user.display_name}** has ended the Russian Roulette game in this channel.\n\n**All remaining players have been refunded their current stakes.**",
+            color=discord.Color.red()
+        )
+        embed.add_field(name="**PLAYERS REFUNDED**", value=f"**{player_count}**", inline=True)
+        embed.add_field(name="**BET AMOUNT**", value=format_money(game.bet_amount), inline=True)
+        await interaction.channel.send(embed=embed)
+        await safe_interaction_response(interaction, interaction.followup.send, "✅ Game ended and players refunded.", ephemeral=True)
+        print(f"Admin {interaction.user.name} force-ended roulette game {game_id} in channel {channel_id}")
+    except Exception as e:
+        print(f"Error in endrussian command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
 # Spawn commands - Admin only. Split into spawn_animal and spawn_boss so each has ≤25 choices (Discord limit).
 def _spawn_animal_choices():
     choices = [app_commands.Choice(name=f"{a['emoji']} {a['name']}", value=a["name"].lower().replace(" ", "_")) for a in PVE_WILD_ANIMALS_SINGLE]
@@ -15875,13 +16015,13 @@ async def user_admin(interaction: discord.Interaction, password: str, member: di
         if shop_inv:
             shop_lines = [f"**{k}**: {v}" for k, v in shop_inv.items()]
             embed_shop = discord.Embed(
-                title=f"🛒 {display_name}'s Shop Inventory",
+                title=f"🛒 **{display_name.upper()}'S SHOP INVENTORY**",
                 description="\n".join(shop_lines)[:4000] or "—",
                 color=discord.Color.gold()
             )
         else:
             embed_shop = discord.Embed(
-                title=f"🛒 {display_name}'s Shop Inventory",
+                title=f"🛒 **{display_name.upper()}'S SHOP INVENTORY**",
                 description="*Empty.*",
                 color=discord.Color.gold()
             )
@@ -18775,11 +18915,11 @@ async def gardener_background_task():
                         except Exception as e:
                             print(f"Error processing gather for gardener {gardener_id} of user {user_id}: {e}")
             
-            # Small delay to avoid overwhelming the system
-            await asyncio.sleep(1)
+            # Stagger between users to avoid bursts that freeze the event loop on low-end hardware
+            await asyncio.sleep(0.5)
         except Exception as e:
             print(f"Error in gardener background task: {e}")
-        
+
         # Wait 60 seconds (1 minute) before next check
         await asyncio.sleep(60)
 
@@ -18890,11 +19030,11 @@ async def secret_gardener_background_task():
                                     break
                     except Exception as e:
                         print(f"Error processing secret gardener for user {user_id}: {e}")
-            
-            await asyncio.sleep(1)
+                # Stagger between users on low-end hardware
+                await asyncio.sleep(0.5)
         except Exception as e:
             print(f"Error in secret gardener background task: {e}")
-        
+
         await asyncio.sleep(60)
 
 
@@ -19251,9 +19391,13 @@ async def hourly_event_check():
                     # Event already active and valid, skip this hour
                     print(f"Skipping hourly event - event already active: {existing_hourly['event_name']} (ends at {existing_hourly.get('end_time', 0)})")
                 else:
-                    # Event found but expired, clean it up and proceed
-                    print(f"Found expired hourly event: {existing_hourly['event_name']}, cleaning up and proceeding")
-                    await asyncio.to_thread(clear_event, existing_hourly.get("event_id", ""))
+                    # Event found but expired — send end embed BEFORE clearing so it isn't lost
+                    print(f"Found expired hourly event: {existing_hourly['event_name']}, sending end embed and cleaning up")
+                    try:
+                        await _end_active_event_for_all_guilds(existing_hourly)
+                    except Exception as e:
+                        print(f"Error sending end embed for expired hourly event: {e}")
+                        await asyncio.to_thread(clear_event, existing_hourly.get("event_id", ""))
                     existing_hourly = None
 
             # Do not start hourly events during Solar Eclipse or Blood Moon
@@ -19382,9 +19526,13 @@ async def daily_event_check():
                     # Event already active and valid, skip this day
                     print(f"Skipping daily event - event already active: {existing_daily['event_name']} (ends at {existing_daily.get('end_time', 0)})")
                 else:
-                    # Event found but expired, clean it up and proceed
-                    print(f"Found expired daily event: {existing_daily['event_name']}, cleaning up and proceeding")
-                    await asyncio.to_thread(clear_event, existing_daily.get("event_id", ""))
+                    # Event found but expired — send end embed BEFORE clearing so it isn't lost
+                    print(f"Found expired daily event: {existing_daily['event_name']}, sending end embed and cleaning up")
+                    try:
+                        await _end_active_event_for_all_guilds(existing_daily)
+                    except Exception as e:
+                        print(f"Error sending end embed for expired daily event: {e}")
+                        await asyncio.to_thread(clear_event, existing_daily.get("event_id", ""))
                     existing_daily = None
 
             # Do not start daily events during Solar Eclipse or Blood Moon
@@ -19774,7 +19922,7 @@ class MiningView(discord.ui.View):
 
             # Add hidden achievement message if unlocked
             if self.blockchain_achievement_unlocked:
-                timeout_embed.add_field(name="🎉 Hidden Achievement Unlocked!", value="**Blockchain**", inline=False)
+                timeout_embed.add_field(name="🎉 HIDDEN ACHIEVEMENT UNLOCKED!", value="**Blockchain**", inline=False)
 
             timeout_embed.set_footer(text="Use /sell to sell your crypto")
         else:
@@ -20584,7 +20732,7 @@ async def portfolio(interaction: discord.Interaction):
                     price = crypto_prices.get(symbol, coin["base_price"])
                     value = crypto_values.get(symbol, 0.0)
                     embed.add_field(
-                        name=f"{coin['name']} ({symbol})",
+                        name=f"**{coin['name']} ({symbol})**",
                         value=f"**AMOUNT**: {amount:.4f}\n**VALUE**: ${value:.2f}",
                         inline=True
                     )
@@ -20605,7 +20753,7 @@ async def portfolio(interaction: discord.Interaction):
                     price = stock_prices.get(symbol, ticker["base_price"])
                     value = stock_values.get(symbol, 0.0)
                     embed.add_field(
-                        name=f"{ticker['name']} ({symbol})",
+                        name=f"**{ticker['name']} ({symbol})**",
                         value=f"**SHARES**: {shares:,}\n**VALUE**: ${value:.2f}",
                         inline=True
                     )
@@ -20749,7 +20897,7 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
             
             # Create success embed
             embed = discord.Embed(
-                title="✅ Purchase Successful!",
+                title="✅ **PURCHASE SUCCESSFUL!**",
                 description=f"You bought **{amount:,} share(s)** of {ticker_info['emoji']} **{ticker_info['name']}** ({ticker}) at **${current_price:.2f}** each.",
                 color=discord.Color.green()
             )
@@ -20920,6 +21068,7 @@ async def russian(
 
         #create new game (bet is already normalized)
         game = RouletteGame(game_id, user_id, user_name, bullets, bet, players)
+        game.channel_id = channel_id
         active_roulette_games[game_id] = game
         user_active_games[user_id] = game_id
         active_roulette_channel_games[channel_id] = game_id
