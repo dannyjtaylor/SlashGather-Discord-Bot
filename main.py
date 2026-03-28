@@ -231,7 +231,6 @@ from database import (
     add_shop_item_to_user,
     add_dayboost,
     get_dayboost_count,
-    get_all_dayboosts,
     steal_revert_gather,
     steal_apply_gather,
     steal_revert_harvest,
@@ -3812,16 +3811,13 @@ BLACK_SHARD_MONEY_MULTIPLIER = 1.2
 
 
 def get_nether_star_money_multiplier(user_id: int) -> float:
-    """Return multiplier based on Nether Star (shop item) and dayboosts. Additive stacking."""
-    base_mult = NETHER_STAR_MONEY_MULTIPLIER if has_shop_item(user_id, "nether_star") else 1.0
-    dayboost_count = get_dayboost_count(user_id, "nether_star")
-    if dayboost_count > 0:
-        # Additive: each dayboost adds (multiplier - 1.0) to the base
-        # If no permanent, base is 1.0, so we add (1.15 - 1.0) * count = 0.15 * count
-        # If permanent exists, base is 1.15, so we add 0.15 * count more
-        boost_per_dayboost = NETHER_STAR_MONEY_MULTIPLIER - 1.0  # 0.15
-        return base_mult + (boost_per_dayboost * dayboost_count)
-    return base_mult
+    """Return multiplier based on Nether Star count in shop inventory. Additive stacking per item."""
+    inv = get_user_shop_inventory(user_id)
+    count = inv.get("nether_star", 0)
+    if count <= 0:
+        return 1.0
+    boost_per_item = NETHER_STAR_MONEY_MULTIPLIER - 1.0  # 0.15
+    return 1.0 + (boost_per_item * count)
 
 
 SHADOW_CRYSTAL_MONEY_MULTIPLIER = 1.05
@@ -3833,16 +3829,13 @@ def get_shadow_crystal_money_multiplier(user_id: int) -> float:
 
 
 def get_black_shard_money_multiplier(user_id: int) -> float:
-    """Return multiplier based on Black Shard (shop item) and dayboosts. Additive stacking."""
-    base_mult = BLACK_SHARD_MONEY_MULTIPLIER if has_shop_item(user_id, "black_shard") else 1.0
-    dayboost_count = get_dayboost_count(user_id, "black_shard")
-    if dayboost_count > 0:
-        # Additive: each dayboost adds (multiplier - 1.0) to the base
-        # If no permanent, base is 1.0, so we add (1.2 - 1.0) * count = 0.2 * count
-        # If permanent exists, base is 1.2, so we add 0.2 * count more
-        boost_per_dayboost = BLACK_SHARD_MONEY_MULTIPLIER - 1.0  # 0.2
-        return base_mult + (boost_per_dayboost * dayboost_count)
-    return base_mult
+    """Return multiplier based on Black Shard count in shop inventory. Additive stacking per item."""
+    inv = get_user_shop_inventory(user_id)
+    count = inv.get("black_shard", 0)
+    if count <= 0:
+        return 1.0
+    boost_per_item = BLACK_SHARD_MONEY_MULTIPLIER - 1.0  # 0.2
+    return 1.0 + (boost_per_item * count)
 
 
 PALACE_TREASURE_MONEY_MULTIPLIER = 1.5
@@ -7841,7 +7834,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.1.2"
+            name="running /gather on V1.1.2 :3"
         )
     )
     try:
@@ -8665,11 +8658,12 @@ class WildAnimalView(discord.ui.View):
             if self.defeated or not self._dirty:
                 return
             self._dirty = False
+            embed = self._progress_embed()  # Build embed inside lock for consistent HP snapshot
         target = message or getattr(self, "message", None)
         if not target:
             return
         try:
-            await target.edit(embed=self._progress_embed(), view=self)
+            await target.edit(embed=embed, view=self)
         except Exception:
             # If this fails, we just drop the visual update; HP state is already correct.
             pass
@@ -8697,6 +8691,9 @@ class WildAnimalView(discord.ui.View):
 
             if self.hp <= 0:
                 self.defeated = True
+                # Cancel any pending debounced update so it can't overwrite the victory embed
+                if self._update_task and not self._update_task.done():
+                    self._update_task.cancel()
                 button.disabled = True
                 button.label = "☠️ Defeated!"
                 button.style = discord.ButtonStyle.secondary
@@ -8793,11 +8790,12 @@ class BulletAntView(discord.ui.View):
                 return
             last_hit = self._last_hit_name
             self._dirty = False
+            embed = self._progress_embed(last_hit)  # Build embed inside lock for consistent HP snapshot
         target = message or getattr(self, "message", None)
         if not target:
             return
         try:
-            await target.edit(embed=self._progress_embed(last_hit), view=self)
+            await target.edit(embed=embed, view=self)
         except Exception:
             pass
 
@@ -8822,6 +8820,9 @@ class BulletAntView(discord.ui.View):
 
             if self.hp <= 0:
                 self.defeated = True
+                # Cancel any pending debounced update so it can't overwrite the defeat embed
+                if self._update_task and not self._update_task.done():
+                    self._update_task.cancel()
                 button.disabled = True
                 button.label = "☠️"
                 button.style = discord.ButtonStyle.secondary
@@ -8986,11 +8987,12 @@ class BeeView(discord.ui.View):
             if self.defeated or not self._dirty:
                 return
             self._dirty = False
+            embed = self._progress_embed()  # Build embed inside lock for consistent HP snapshot
         target = message or getattr(self, "message", None)
         if not target:
             return
         try:
-            await target.edit(embed=self._progress_embed(), view=self)
+            await target.edit(embed=embed, view=self)
         except Exception:
             pass
 
@@ -9015,6 +9017,9 @@ class BeeView(discord.ui.View):
 
             if self.hp <= 0:
                 self.defeated = True
+                # Cancel any pending debounced update so it can't overwrite the defeat embed
+                if self._update_task and not self._update_task.done():
+                    self._update_task.cancel()
                 button.disabled = True
                 button.label = "☠️"
                 button.style = discord.ButtonStyle.secondary
@@ -9117,7 +9122,7 @@ def _format_item_boost_source(name: str, count: int = 1) -> str:
 
 
 class NetherStarClaimView(discord.ui.View):
-    """One-time claim button after Wither defeat. First user without a Nether Star gets it; button locks after claim."""
+    """One-time claim button after Wither defeat. First clicker gets a Nether Star added to their inventory (stacks); button locks after claim."""
 
     def __init__(self, claimed_ref: list):
         super().__init__(timeout=None)
@@ -9133,26 +9138,26 @@ class NetherStarClaimView(discord.ui.View):
                 interaction, interaction.response.send_message,
                 "❌ Someone else already claimed the Nether Star!", ephemeral=True)
             return
-        # Add dayboost (24-hour temporary boost) instead of permanent shop item
-        add_dayboost(user_id, "nether_star", 24.0)
-        dayboost_count = get_dayboost_count(user_id, "nether_star")
+        add_shop_item_to_user(user_id, "nether_star", 1)
+        inv = get_user_shop_inventory(user_id)
+        item_count = inv.get("nether_star", 0)
         self.claimed_ref[0] = user_id
         button.disabled = True
         button.label = "Claimed!"
         embed = interaction.message.embeds[0].copy() if interaction.message.embeds else discord.Embed(title="Wither Defeated", color=discord.Color.gold())
-        count_display = f" (x{dayboost_count})" if dayboost_count > 1 else ""
+        count_display = f" (x{item_count})" if item_count > 1 else ""
         embed.add_field(name=f"{NETHER_STAR_EMOJI} Nether Star{count_display}", value=f"**Claimed by {interaction.user.mention}!**", inline=False)
-        embed.set_footer(text=f"+15% all Money dayboost active for 24 hours!{count_display}")
+        embed.set_footer(text=f"+15% all Money per Nether Star!{count_display}")
         await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
         if interaction.guild:
             asyncio.create_task(_post_rares_nether_star_claim(interaction.guild, interaction.user))
         await interaction.followup.send(
-            f"{NETHER_STAR_EMOJI} You claimed the **Nether Star**! You now have a **+15% all Money dayboost for 24 hours**!{count_display}",
+            f"{NETHER_STAR_EMOJI} You claimed the **Nether Star**! You now have **+{item_count * 15}% all Money**!{count_display}",
             ephemeral=True)
 
 
 class BlackShardClaimView(discord.ui.View):
-    """One-time claim button after Roaring Knight defeat. First user without a Black Shard gets it; button locks after claim."""
+    """One-time claim button after Roaring Knight defeat. First clicker gets a Black Shard added to their inventory (stacks); button locks after claim."""
 
     def __init__(self, claimed_ref: list):
         super().__init__(timeout=None)
@@ -9168,21 +9173,21 @@ class BlackShardClaimView(discord.ui.View):
                 interaction, interaction.response.send_message,
                 "❌ Someone else already claimed the Black Shard!", ephemeral=True)
             return
-        # Add dayboost (24-hour temporary boost) instead of permanent shop item
-        add_dayboost(user_id, "black_shard", 24.0)
-        dayboost_count = get_dayboost_count(user_id, "black_shard")
+        add_shop_item_to_user(user_id, "black_shard", 1)
+        inv = get_user_shop_inventory(user_id)
+        item_count = inv.get("black_shard", 0)
         self.claimed_ref[0] = user_id
         button.disabled = True
         button.label = "Claimed!"
         embed = interaction.message.embeds[0].copy() if interaction.message.embeds else discord.Embed(title="The Roaring Knight Defeated", color=discord.Color.gold())
-        count_display = f" (x{dayboost_count})" if dayboost_count > 1 else ""
+        count_display = f" (x{item_count})" if item_count > 1 else ""
         embed.add_field(name=f"{BLACK_SHARD_EMOJI} Black Shard{count_display}", value=f"**Claimed by {interaction.user.mention}!**", inline=False)
-        embed.set_footer(text=f"+20% all Money dayboost active for 24 hours!{count_display}")
+        embed.set_footer(text=f"+20% all Money per Black Shard!{count_display}")
         await safe_interaction_response(interaction, interaction.response.edit_message, embed=embed, view=self)
         if interaction.guild:
             asyncio.create_task(_post_rares_black_shard_claim(interaction.guild, interaction.user))
         await interaction.followup.send(
-            f"{BLACK_SHARD_EMOJI} You claimed the **Black Shard**! You now have a **+20% all Money dayboost for 24 hours**!{count_display}",
+            f"{BLACK_SHARD_EMOJI} You claimed the **Black Shard**! You now have **+{item_count * 20}% all Money**!{count_display}",
             ephemeral=True)
 
 
@@ -9234,11 +9239,12 @@ class BossView(discord.ui.View):
                 return
             last_hit = self._last_hit_name
             self._dirty = False
+            embed = self._progress_embed(last_hit)  # Build embed inside lock for consistent HP snapshot
         target = message or getattr(self, "message", None)
         if not target:
             return
         try:
-            await target.edit(embed=self._progress_embed(last_hit), view=self)
+            await target.edit(embed=embed, view=self)
         except Exception:
             pass
 
@@ -9258,6 +9264,9 @@ class BossView(discord.ui.View):
 
             if self.hp <= 0:
                 self.defeated = True
+                # Cancel any pending debounced update so it can't overwrite the victory embed
+                if self._update_task and not self._update_task.done():
+                    self._update_task.cancel()
                 button.disabled = True
                 button.label = "☠️ Defeated!"
                 button.style = discord.ButtonStyle.secondary
@@ -9409,11 +9418,12 @@ class SansView(discord.ui.View):
                 return
             last_action_name = self._last_action_name
             self._dirty = False
+            embed = self._progress_embed(last_action_name)  # Build embed inside lock for consistent HP snapshot
         target = message or getattr(self, "message", None)
         if not target:
             return
         try:
-            await target.edit(embed=self._progress_embed(last_action_name), view=self)
+            await target.edit(embed=embed, view=self)
         except Exception:
             pass
 
@@ -9442,6 +9452,9 @@ class SansView(discord.ui.View):
                 # Check if defeated (after enough attempts)
                 if self.total_attempts >= self.DEFEAT_THRESHOLD:
                     self.defeated = True
+                    # Cancel any pending debounced update so it can't overwrite the victory embed
+                    if self._update_task and not self._update_task.done():
+                        self._update_task.cancel()
                     button.disabled = True
                     button.label = "☠️ Defeated!"
                     button.style = discord.ButtonStyle.secondary
@@ -10686,19 +10699,13 @@ async def gather(interaction: discord.Interaction):
         if shop_inv.get("alchemists_pocketwatch", 0) >= 1:
             item_boost_sources.append(("Alchemist's Pocketwatch", 1))
         if gather_result.get("extra_money_from_nether_star", 0) > 0:
-            # Check for permanent shop item and dayboosts
-            has_permanent = has_shop_item(user_id, "nether_star")
-            dayboost_count = get_dayboost_count(user_id, "nether_star")
-            total_count = (1 if has_permanent else 0) + dayboost_count
-            if total_count > 0:
-                item_boost_sources.append(("Nether Star", total_count))
+            ns_count = shop_inv.get("nether_star", 0)
+            if ns_count > 0:
+                item_boost_sources.append(("Nether Star", ns_count))
         if gather_result.get("extra_money_from_black_shard", 0) > 0:
-            # Check for permanent shop item and dayboosts
-            has_permanent = has_shop_item(user_id, "black_shard")
-            dayboost_count = get_dayboost_count(user_id, "black_shard")
-            total_count = (1 if has_permanent else 0) + dayboost_count
-            if total_count > 0:
-                item_boost_sources.append(("Black Shard", total_count))
+            bs_count = shop_inv.get("black_shard", 0)
+            if bs_count > 0:
+                item_boost_sources.append(("Black Shard", bs_count))
 
         # Resolve current hoe imbuement once for all embed variants
         hoe_enc = gather_result.get("hoe_enchant") or (full_data.get("hoe_enchantment") if full_data else None)
@@ -10830,28 +10837,28 @@ async def gather(interaction: discord.Interaction):
                 inline=False,
             )
 
-            if item_boost_sources:
-                extra_ns = gather_result.get("extra_money_from_nether_star", 0)
-                extra_bs = gather_result.get("extra_money_from_black_shard", 0)
-                total_extra = extra_ns + extra_bs
-                value_parts = [f"**+${total_extra:,.2f}**"] if total_extra > 0 else []
-                value_parts.append("\n".join(_format_item_boost_source(name, count) for name, count in item_boost_sources))
-                embed.add_field(
-                    name="📦 **ITEMS**",
-                    value="\n".join(value_parts),
-                    inline=False
-                )
+        if item_boost_sources:
+            extra_ns = gather_result.get("extra_money_from_nether_star", 0)
+            extra_bs = gather_result.get("extra_money_from_black_shard", 0)
+            total_extra = extra_ns + extra_bs
+            value_parts = [f"**+${total_extra:,.2f}**"] if total_extra > 0 else []
+            value_parts.append("\n".join(_format_item_boost_source(name, count) for name, count in item_boost_sources))
+            embed.add_field(
+                name="📦 **ITEMS**",
+                value="\n".join(value_parts),
+                inline=False
+            )
 
         # Always show the user's current hoe imbuement on /gather if present
         if hoe_enc and hoe_name and hoe_rarity_display:
             embed.add_field(name="\u2728 **IMBUEMENT**", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
 
-            month_name = gather_result.get("month_name", "—")
-            embed.add_field(
-                name="\u200b",
-                value=f"**~**\n{interaction.user.name} - **{month_name.upper()}**",
-                inline=False,
-            )
+        month_name = gather_result.get("month_name", "—")
+        embed.add_field(
+            name="\u200b",
+            value=f"**~**\n{interaction.user.name} - **{month_name.upper()}**",
+            inline=False,
+        )
 
 
         # Critical multiplier displayed last (before totals)
@@ -12552,19 +12559,13 @@ async def harvest(interaction: discord.Interaction):
         if shop_inv.get("fuzzy_dice", 0) >= 1:
             item_boost_sources.append(("Fuzzy Dice", 1))
         if result.get("extra_money_from_nether_star", 0) > 0:
-            # Check for permanent shop item and dayboosts
-            has_permanent = has_shop_item(user_id, "nether_star")
-            dayboost_count = get_dayboost_count(user_id, "nether_star")
-            total_count = (1 if has_permanent else 0) + dayboost_count
-            if total_count > 0:
-                item_boost_sources.append(("Nether Star", total_count))
+            ns_count = shop_inv.get("nether_star", 0)
+            if ns_count > 0:
+                item_boost_sources.append(("Nether Star", ns_count))
         if result.get("extra_money_from_black_shard", 0) > 0:
-            # Check for permanent shop item and dayboosts
-            has_permanent = has_shop_item(user_id, "black_shard")
-            dayboost_count = get_dayboost_count(user_id, "black_shard")
-            total_count = (1 if has_permanent else 0) + dayboost_count
-            if total_count > 0:
-                item_boost_sources.append(("Black Shard", total_count))
+            bs_count = shop_inv.get("black_shard", 0)
+            if bs_count > 0:
+                item_boost_sources.append(("Black Shard", bs_count))
 
         if item_boost_sources:
             extra_ns = result.get("extra_money_from_nether_star", 0)
@@ -13647,7 +13648,7 @@ _EMBED_FIELD_VALUE_MAX = 1024
 def _format_shop_inventory_field(inv: dict) -> list[str]:
     """
     Format shop inventory into one or more field-sized chunks (<= _EMBED_FIELD_VALUE_MAX chars each).
-    Items are one-per-user (no quantity shown).
+    Shows quantity for items with count > 1.
     """
     if not inv:
         return []
@@ -13659,7 +13660,9 @@ def _format_shop_inventory_field(inv: dict) -> list[str]:
         name = info.get("name", i)
         desc = info.get("description", "")
         effect = info.get("effect", "")
-        blocks.append(f"**{name}**\n*{desc}*\n**Buff:** {effect}")
+        count = inv.get(i, 1)
+        count_display = f" (x{count})" if count > 1 else ""
+        blocks.append(f"**{name}{count_display}**\n*{desc}*\n**Buff:** {effect}")
 
     # Greedy pack blocks into chunks within the embed field limit
     chunks: list[str] = []
@@ -17163,7 +17166,7 @@ GIVEAWAY_CLAIM_USER_ID = 843578539424350248  # Danny – contact for claiming pr
 )
 async def bot_pay(interaction: discord.Interaction, password: str, user: discord.Member, amount: float):
     try:
-        if not await safe_defer(interaction, ephemeral=True):
+        if not await safe_defer(interaction):
             return
         if password != "Fullmetal":
             await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
@@ -20423,18 +20426,13 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
 
         # Item Boosts (shop / dailyshop items affecting this sale)
         item_boost_sources = []
-        # Get counts for Nether Star and Black Shard (permanent + dayboosts)
         if nether_mult > 1.0:
-            has_permanent = has_shop_item(user_id, "nether_star")
-            dayboost_count = get_dayboost_count(user_id, "nether_star")
-            total_count = (1 if has_permanent else 0) + dayboost_count
-            if total_count > 0:
-                item_boost_sources.append(("Nether Star", total_count))
+            ns_count = get_user_shop_inventory(user_id).get("nether_star", 0)
+            if ns_count > 0:
+                item_boost_sources.append(("Nether Star", ns_count))
         if black_shard_mult > 1.0:
-            has_permanent = has_shop_item(user_id, "black_shard")
-            dayboost_count = get_dayboost_count(user_id, "black_shard")
-            total_count = (1 if has_permanent else 0) + dayboost_count
-            if total_count > 0:
+            bs_count = get_user_shop_inventory(user_id).get("black_shard", 0)
+            if bs_count > 0:
                 item_boost_sources.append(("Black Shard", total_count))
 
         if item_boost_sources:
@@ -20616,19 +20614,14 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
     item_boost_sources = []
     if has_shop_item(user_id, "cryptobro_shadow"):
         item_boost_sources.append(("Cryptobro's Shadow", 1))
-    # Get counts for Nether Star and Black Shard (permanent + dayboosts)
     if nether_mult > 1.0:
-        has_permanent = has_shop_item(user_id, "nether_star")
-        dayboost_count = get_dayboost_count(user_id, "nether_star")
-        total_count = (1 if has_permanent else 0) + dayboost_count
-        if total_count > 0:
-            item_boost_sources.append(("Nether Star", total_count))
+        ns_count = get_user_shop_inventory(user_id).get("nether_star", 0)
+        if ns_count > 0:
+            item_boost_sources.append(("Nether Star", ns_count))
     if black_shard_mult > 1.0:
-        has_permanent = has_shop_item(user_id, "black_shard")
-        dayboost_count = get_dayboost_count(user_id, "black_shard")
-        total_count = (1 if has_permanent else 0) + dayboost_count
-        if total_count > 0:
-            item_boost_sources.append(("Black Shard", total_count))
+        bs_count = get_user_shop_inventory(user_id).get("black_shard", 0)
+        if bs_count > 0:
+            item_boost_sources.append(("Black Shard", bs_count))
 
     if item_boost_sources:
         total_item_extra = extra_ns + extra_bs

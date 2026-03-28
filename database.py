@@ -2105,14 +2105,20 @@ def wipe_guild_all(user_ids: list[int]) -> int:
     return result.modified_count
 
 
+_STACKABLE_SHOP_ITEMS = {"nether_star", "black_shard"}
+
 def add_shop_item_to_user(user_id: int, item_id: str, amount: int = 1) -> None:
-    """Add a daily shop item to a user's inventory (e.g. for admin giveaway). Does not deduct tree rings. Caps at 1 per item."""
+    """Add a daily shop item to a user's inventory (e.g. for admin giveaway or boss drops). Does not deduct tree rings.
+    Nether Star and Black Shard can stack; all other items are capped at 1."""
     users = _get_users_collection()
     _ensure_user_document(user_id)
     doc = users.find_one({"_id": int(user_id)}, {"shop_inventory": 1})
     inv = dict(doc.get("shop_inventory", {})) if doc else {}
     current = inv.get(item_id, 0)
-    inv[item_id] = min(current + int(amount), 1)
+    new_count = current + int(amount)
+    if item_id not in _STACKABLE_SHOP_ITEMS:
+        new_count = min(new_count, 1)
+    inv[item_id] = new_count
     users.update_one(
         {"_id": int(user_id)},
         {"$set": {"shop_inventory": inv}},
@@ -2197,9 +2203,9 @@ def get_pending_giveaways() -> list[Dict]:
     return results
 
 
-# Dayboost functions (24-hour temporary boosts from Nether Star/Black Shard)
+# Dayboost functions (temporary timed boosts, e.g. jump_multi, jump_debuff)
 def add_dayboost(user_id: int, boost_type: str, duration_hours: float = 24.0) -> None:
-    """Add a dayboost (temporary boost) to a user. boost_type should be 'nether_star' or 'black_shard'."""
+    """Add a dayboost (temporary boost) to a user. boost_type should be 'jump_multi' or 'jump_debuff'."""
     import time
     users = _get_users_collection()
     _ensure_user_document(user_id)
@@ -2233,7 +2239,7 @@ def add_dayboost(user_id: int, boost_type: str, duration_hours: float = 24.0) ->
 
 
 def get_dayboost_count(user_id: int, boost_type: str) -> int:
-    """Get the count of active dayboosts for a user. boost_type should be 'nether_star' or 'black_shard'."""
+    """Get the count of active dayboosts for a user. boost_type should be 'jump_multi' or 'jump_debuff'."""
     import time
     users = _get_users_collection()
     _ensure_user_document(user_id)
@@ -2265,8 +2271,8 @@ def get_dayboost_count(user_id: int, boost_type: str) -> int:
 def get_all_dayboosts(user_id: int) -> dict[str, int]:
     """Get all active dayboost counts for a user. Returns dict with boost_type -> count."""
     return {
-        "nether_star": get_dayboost_count(user_id, "nether_star"),
-        "black_shard": get_dayboost_count(user_id, "black_shard"),
+        "jump_multi": get_dayboost_count(user_id, "jump_multi"),
+        "jump_debuff": get_dayboost_count(user_id, "jump_debuff"),
     }
 
 
