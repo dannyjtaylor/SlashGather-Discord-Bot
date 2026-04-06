@@ -1713,6 +1713,29 @@ def get_expired_events() -> list:
     return results
 
 
+def claim_expired_event(event_type: str) -> Optional[Dict]:
+    """Atomically find and delete one expired event of the given type.
+    Returns the event dict if found, None otherwise.
+    Uses find_one_and_delete so no other task can claim the same event."""
+    events = _get_events_collection()
+    current_time = time.time()
+    doc = events.find_one_and_delete({
+        "event_type": event_type,
+        "end_time": {"$lte": current_time}
+    })
+    if not doc:
+        return None
+    _clear_events_cache()
+    return {
+        "event_id": doc.get("event_id"),
+        "event_type": doc.get("event_type"),
+        "event_name": doc.get("event_name"),
+        "start_time": float(doc.get("start_time", 0)),
+        "end_time": float(doc.get("end_time", 0)),
+        "effects": doc.get("effects", {})
+    }
+
+
 def clear_expired_events() -> None:
     """Remove all expired events."""
     events = _get_events_collection()

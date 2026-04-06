@@ -123,6 +123,7 @@ from database import (
     get_active_events_cached,
     get_active_event_by_type,
     get_expired_events,
+    claim_expired_event,
     set_active_event,
     clear_event,
     clear_expired_events,
@@ -7834,7 +7835,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.1.2 :3"
+            name="running /gather on V1.1.2"
         )
     )
     try:
@@ -7902,7 +7903,12 @@ async def on_ready():
 
     # If bot restarted during an event, send end embeds for any expired events so #events channel stays consistent
     try:
-        await _send_end_embeds_for_expired_events()
+        for ev_type in ("hourly", "daily", "solar_eclipse", "blood_moon"):
+            claimed = await asyncio.to_thread(claim_expired_event, ev_type)
+            if claimed:
+                await _send_end_embed_all_guilds(claimed)
+                print(f"Startup recovery: sent end embed for {ev_type} '{claimed.get('event_name')}'")
+        await asyncio.to_thread(clear_expired_events)
         print("Event recovery at startup completed")
     except Exception as e:
         print(f"Error during event recovery at startup: {e}")
@@ -7937,15 +7943,9 @@ async def on_ready():
     bot.loop.create_task(gpu_background_task())
     print("Started automatic GPU mining")
     
-    # Start the event background tasks
-    bot.loop.create_task(hourly_event_check())
-    print("Started hourly event checking")
-    bot.loop.create_task(daily_event_check())
-    print("Started daily event checking")
-    bot.loop.create_task(event_cleanup_task())
-    print("Started event cleanup task")
-    bot.loop.create_task(celestial_event_check())
-    print("Started celestial event check (Solar Eclipse / Blood Moon)")
+    # Start the unified event manager (handles hourly, daily, and celestial events)
+    bot.loop.create_task(event_manager_loop())
+    print("Started unified event manager (hourly, daily, celestial)")
     bot.loop.create_task(irrigation_auto_water_task())
     print("Started irrigation auto-water task")
     bot.loop.create_task(mongodb_keepalive_task())
@@ -15558,7 +15558,8 @@ async def startcelestialevent(interaction: discord.Interaction, password: str, e
         for ev_type in ("hourly", "daily"):
             other = get_active_event_by_type(ev_type)
             if other:
-                await _end_active_event_for_all_guilds(other)
+                await asyncio.to_thread(clear_event, other.get("event_id", ""))
+                await _send_end_embed_all_guilds(other)
                 print(f"Admin start celestial: ended active {ev_type} event.")
 
         start_time = time.time()
@@ -19407,344 +19408,156 @@ async def irrigation_auto_water_task():
             await asyncio.sleep(60)
 
 
-async def hourly_event_check():
-    """Background task to trigger hourly events at configurable intervals with 50% chance."""
-    await bot.wait_until_ready()
-    
-    # Wait a short initial delay before first check
-    await asyncio.sleep(5)
-    
-    while not bot.is_closed():
-        try:
-            # Check if there's already an active hourly event
-            existing_hourly = await asyncio.to_thread(get_active_event_by_type, "hourly")
-            if existing_hourly:
-                # Verify the event is actually still valid (double-check)
-                current_time = time.time()
-                if existing_hourly.get("end_time", 0) > current_time:
-                    # Event already active and valid, skip this hour
-                    print(f"Skipping hourly event - event already active: {existing_hourly['event_name']} (ends at {existing_hourly.get('end_time', 0)})")
-                else:
-                    # Event found but expired — send end embed BEFORE clearing so it isn't lost
-                    print(f"Found expired hourly event: {existing_hourly['event_name']}, sending end embed and cleaning up")
-                    try:
-                        await _end_active_event_for_all_guilds(existing_hourly)
-                    except Exception as e:
-                        print(f"Error sending end embed for expired hourly event: {e}")
-                        await asyncio.to_thread(clear_event, existing_hourly.get("event_id", ""))
-                    existing_hourly = None
-
-            # Do not start hourly events during Solar Eclipse or Blood Moon
-            celestial_active = await asyncio.to_thread(get_active_event_by_type, "solar_eclipse") or await asyncio.to_thread(get_active_event_by_type, "blood_moon")
-            if not existing_hourly and not celestial_active:
-                # 50% chance to trigger an event
-                if random.random() < 0.5:
-                    # Select random hourly event
-                    event_info = random.choice(HOURLY_EVENTS)
-                    
-                    # Random duration: 40% = 30min, 35% = 45min, 25% = 60min
-                    rand = random.random()
-                    if rand < 0.40:
-                        duration_minutes = 30
-                    elif rand < 0.75:  # 0.40 + 0.35
-                        duration_minutes = 45
-                    else:
-                        duration_minutes = 60
-                    
-                    duration_seconds = duration_minutes * 60
-                    start_time = time.time()
-                    end_time = start_time + duration_seconds
-                    
-                    # Create event ID
-                    event_id = f"hourly_{int(start_time)}_{event_info['id']}"
-                    
-                    # Store event
-                    await asyncio.to_thread(set_active_event,
-                        event_id=event_id,
-                        event_type="hourly",
-                        event_name=event_info["name"],
-                        start_time=start_time,
-                        end_time=end_time,
-                        effects={"event_id": event_info["id"]}
-                    )
-
-                    # Send START embed first so channel order is Start then End (avoid "Ended" then "Started!" for same event name)
-                    for guild in bot.guilds:
-                        try:
-                            await send_event_start_embed(guild, {
-                                "event_type": "hourly",
-                                "event_id": event_info["id"],
-                                "event_name": event_info["name"]
-                            }, duration_minutes)
-                            print(f"Sent start embed to #events channel in {guild.name} for hourly event: {event_info['name']}")
-                        except Exception as e:
-                            print(f"Error sending start embed to {guild.name} for hourly event: {e}")
-                            import traceback
-                            traceback.print_exc()
-
-                    # Then send end embeds for any expired events (e.g. from bot restart), so order is Start (new) then End (old)
-                    await _send_end_embeds_for_expired_events()
-                    await asyncio.to_thread(clear_expired_events)
-                    
-                    print(f"Started hourly event: {event_info['name']} for {duration_minutes} minutes")
-                    
-                    # Wait until 5 seconds before event ends
-                    wait_seconds = duration_seconds - 5
-                    await asyncio.sleep(wait_seconds)
-                    
-                    # If event was ended early (e.g. by Blood Moon/Solar Eclipse), don't send end embed again
-                    still_active = await asyncio.to_thread(get_active_event_by_type, "hourly")
-                    if not still_active or still_active.get("event_id") != event_id:
-                        await asyncio.to_thread(clear_event, event_id)
-                        await asyncio.to_thread(clear_expired_events)
-                        print(f"Skipping hourly end embed - event was already ended (e.g. by celestial).")
-                    else:
-                        # Build event dict for end embed
-                        event = {
-                            "event_id": event_id,
-                            "event_type": "hourly",
-                            "event_name": event_info["name"],
-                            "start_time": start_time,
-                            "end_time": end_time,
-                            "effects": {"event_id": event_info["id"]}
-                        }
-                        # Send end embed BEFORE clearing so a crash during send doesn't lose the end embed (cleanup can retry)
-                        for guild in bot.guilds:
-                            try:
-                                await send_event_end_embed(guild, event)
-                                print(f"Sent end embed to #events channel in {guild.name}")
-                            except Exception as e:
-                                print(f"Error sending end embed to {guild.name}: {e}")
-                        await asyncio.to_thread(clear_event, event_id)
-                        await asyncio.to_thread(clear_expired_events)
-                        print(f"Sent end message for hourly event: {event_info['name']} (5 seconds remaining)")
-                        # Wait for remaining 5 seconds until event actually ends
-                        await asyncio.sleep(5)
-                        print(f"Ended hourly event: {event_info['name']}")
-                else:
-                    # No new event this iteration: send end embeds for expired and clear
-                    await _send_end_embeds_for_expired_events()
-                    await asyncio.to_thread(clear_expired_events)
-            else:
-                # Existing event or celestial active: send end embeds for any expired and clear
-                await _send_end_embeds_for_expired_events()
-                await asyncio.to_thread(clear_expired_events)
-            
-            # Wait for the configured interval before next check
-            print(f"Hourly event check completed. Waiting {HOURLY_EVENT_INTERVAL} seconds until next check...")
-            await asyncio.sleep(HOURLY_EVENT_INTERVAL)
-            
-        except Exception as e:
-            print(f"Error in hourly_event_check: {e}")
-            import traceback
-            traceback.print_exc()
-            # Wait for the configured interval on error
-            await asyncio.sleep(HOURLY_EVENT_INTERVAL)
-
-
-async def daily_event_check():
-    """Background task to trigger daily events at configurable intervals with 10% chance."""
-    await bot.wait_until_ready()
-    
-    # Wait a short initial delay before first check
-    await asyncio.sleep(10)
-    
-    while not bot.is_closed():
-        try:
-            # Check if there's already an active daily event
-            existing_daily = await asyncio.to_thread(get_active_event_by_type, "daily")
-            if existing_daily:
-                # Verify the event is actually still valid (double-check)
-                current_time = time.time()
-                if existing_daily.get("end_time", 0) > current_time:
-                    # Event already active and valid, skip this day
-                    print(f"Skipping daily event - event already active: {existing_daily['event_name']} (ends at {existing_daily.get('end_time', 0)})")
-                else:
-                    # Event found but expired — send end embed BEFORE clearing so it isn't lost
-                    print(f"Found expired daily event: {existing_daily['event_name']}, sending end embed and cleaning up")
-                    try:
-                        await _end_active_event_for_all_guilds(existing_daily)
-                    except Exception as e:
-                        print(f"Error sending end embed for expired daily event: {e}")
-                        await asyncio.to_thread(clear_event, existing_daily.get("event_id", ""))
-                    existing_daily = None
-
-            # Do not start daily events during Solar Eclipse or Blood Moon
-            celestial_active = await asyncio.to_thread(get_active_event_by_type, "solar_eclipse") or await asyncio.to_thread(get_active_event_by_type, "blood_moon")
-            if not existing_daily and not celestial_active:
-                # 10% chance to trigger an event
-                if random.random() < 0.10:
-                    # Select random daily event
-                    event_info = random.choice(DAILY_EVENTS)
-                    
-                    # Fixed 24 hour duration
-                    duration_minutes = 24 * 60
-                    duration_seconds = duration_minutes * 60
-                    start_time = time.time()
-                    end_time = start_time + duration_seconds
-                    
-                    # Create event ID
-                    event_id = f"daily_{int(start_time)}_{event_info['id']}"
-                    
-                    # Store event
-                    await asyncio.to_thread(set_active_event,
-                        event_id=event_id,
-                        event_type="daily",
-                        event_name=event_info["name"],
-                        start_time=start_time,
-                        end_time=end_time,
-                        effects={"event_id": event_info["id"]}
-                    )
-                    
-                    # Send START embed first so channel order is Start then End (avoid "Ended" then "Started!" for same event name)
-                    for guild in bot.guilds:
-                        try:
-                            await send_event_start_embed(guild, {
-                                "event_type": "daily",
-                                "event_id": event_info["id"],
-                                "event_name": event_info["name"]
-                            }, duration_minutes)
-                            print(f"Sent start embed to #events channel in {guild.name} for daily event: {event_info['name']}")
-                        except Exception as e:
-                            print(f"Error sending start embed to {guild.name} for daily event: {e}")
-                            import traceback
-                            traceback.print_exc()
-                    
-                    # Then send end embeds for any expired events (e.g. from bot restart), so order is Start (new) then End (old)
-                    await _send_end_embeds_for_expired_events()
-                    await asyncio.to_thread(clear_expired_events)
-                    
-                    print(f"Started daily event: {event_info['name']} for 24 hours")
-                    
-                    # Wait until 5 seconds before event ends
-                    wait_seconds = duration_seconds - 5
-                    await asyncio.sleep(wait_seconds)
-                    
-                    # If event was ended early (e.g. by Blood Moon/Solar Eclipse), don't send end embed again
-                    still_active = await asyncio.to_thread(get_active_event_by_type, "daily")
-                    if not still_active or still_active.get("event_id") != event_id:
-                        await asyncio.to_thread(clear_event, event_id)
-                        await asyncio.to_thread(clear_expired_events)
-                        print(f"Skipping daily end embed - event was already ended (e.g. by celestial).")
-                    else:
-                        # Build event dict for end embed
-                        event = {
-                            "event_id": event_id,
-                            "event_type": "daily",
-                            "event_name": event_info["name"],
-                            "start_time": start_time,
-                            "end_time": end_time,
-                            "effects": {"event_id": event_info["id"]}
-                        }
-                        # Send end embed BEFORE clearing so a crash during send doesn't lose the end embed (cleanup can retry)
-                        for guild in bot.guilds:
-                            try:
-                                await send_event_end_embed(guild, event)
-                                print(f"Sent end embed to #events channel in {guild.name}")
-                            except Exception as e:
-                                print(f"Error sending end embed to {guild.name}: {e}")
-                        await asyncio.to_thread(clear_event, event_id)
-                        await asyncio.to_thread(clear_expired_events)
-                        print(f"Sent end message for daily event: {event_info['name']} (5 seconds remaining)")
-                        # Wait for remaining 5 seconds until event actually ends
-                        await asyncio.sleep(5)
-                        print(f"Ended daily event: {event_info['name']}")
-                else:
-                    # No new event this iteration: send end embeds for expired and clear
-                    await _send_end_embeds_for_expired_events()
-                    await asyncio.to_thread(clear_expired_events)
-            else:
-                # Existing event or celestial active: send end embeds for any expired and clear
-                await _send_end_embeds_for_expired_events()
-                await asyncio.to_thread(clear_expired_events)
-            
-            # Wait for the configured interval before next check
-            print(f"Daily event check completed. Waiting {DAILY_EVENT_INTERVAL} seconds until next check...")
-            await asyncio.sleep(DAILY_EVENT_INTERVAL)
-            
-        except Exception as e:
-            print(f"Error in daily_event_check: {e}")
-            import traceback
-            traceback.print_exc()
-            # Wait for the configured interval on error
-            await asyncio.sleep(DAILY_EVENT_INTERVAL)
-
-
-async def event_cleanup_task():
-    """Background task to clean up any orphaned expired events. Sends end embeds to #events before clearing."""
-    await bot.wait_until_ready()
-    await asyncio.sleep(5)
-
-    while not bot.is_closed():
-        try:
-            await _send_end_embeds_for_expired_events()
-            await asyncio.to_thread(clear_expired_events)
-            await asyncio.sleep(60)  # Check every minute
-        except Exception as e:
-            print(f"Error in event_cleanup_task: {e}")
-            await asyncio.sleep(60)
-
-
-async def _end_active_event_for_all_guilds(event: dict):
-    """Send event end embed to #events in all guilds, then clear the event from DB. Sends first so a crash during send doesn't lose the end embed; cleanup can retry."""
-    event_id = event.get("event_id", "")
+async def _send_end_embed_all_guilds(event: dict):
+    """Send event end embed to #events in all guilds. Event should already be deleted from DB."""
     for guild in bot.guilds:
         try:
             await send_event_end_embed(guild, event)
         except Exception as e:
             print(f"Error sending event end embed to {guild.name}: {e}")
-    await asyncio.to_thread(clear_event, event_id)
 
 
-async def _send_end_embeds_for_expired_events():
-    """Get any events that have already ended, send their end embeds to #events in all guilds, then clear them. Call on startup and before clear_expired_events() in loops."""
-    expired = await asyncio.to_thread(get_expired_events)
-    for event in expired:
+async def _send_start_embed_all_guilds(event_dict: dict, duration_minutes: int):
+    """Send event start embed to #events in all guilds."""
+    for guild in bot.guilds:
         try:
-            await _end_active_event_for_all_guilds(event)
-            print(f"Event recovery: sent end embed for {event.get('event_type')} '{event.get('event_name')}'")
+            await send_event_start_embed(guild, event_dict, duration_minutes)
         except Exception as e:
-            print(f"Error sending end embed for expired event {event.get('event_id')}: {e}")
-            await asyncio.to_thread(clear_event, event.get("event_id", ""))
-    if expired:
-        await asyncio.to_thread(clear_expired_events)
+            print(f"Error sending start embed to {guild.name}: {e}")
 
 
-async def celestial_event_check():
-    """At 4:30 Eastern roll 50% for Solar Eclipse (until 19:30). At 19:30 Eastern roll 50% for Blood Moon (until 4:30 next day). DST-aware. Start/end embeds in #events."""
+async def event_manager_loop():
+    """Single unified background task that manages ALL event lifecycle.
+
+    Replaces the old hourly_event_check, daily_event_check, event_cleanup_task,
+    and celestial_event_check which raced against each other causing duplicate
+    'Ended' messages and missed end embeds.
+
+    Runs every 30 seconds. Each iteration:
+      1. End any expired events (hourly, daily, celestial) — exactly once via atomic claim
+      2. Maybe start a new hourly event (if interval elapsed, no active, 50% roll)
+      3. Maybe start a new daily event (if interval elapsed, no active, 10% roll)
+      4. Check celestial triggers at 4:30 AM / 7:30 PM Eastern
+    """
     await bot.wait_until_ready()
-    await asyncio.sleep(15)
-    last_solar_trigger_date = None  # (year, month, day) in Eastern
+    await asyncio.sleep(5)
+
+    # Timing: next allowed attempt to START a new hourly/daily event
+    now = time.time()
+    next_hourly_attempt = now  # Allow immediate first check
+    next_daily_attempt = now
+
+    # Celestial dedup: only trigger once per calendar day in Eastern
+    last_solar_trigger_date = None  # (year, month, day)
     last_blood_trigger_date = None
+
+    print("Event manager loop started.")
+
     while not bot.is_closed():
         try:
-            await _send_end_embeds_for_expired_events()
+            # ── Step 1: End any expired events (one type at a time, atomic) ──
+            for ev_type in ("hourly", "daily", "solar_eclipse", "blood_moon"):
+                claimed = await asyncio.to_thread(claim_expired_event, ev_type)
+                if claimed:
+                    await _send_end_embed_all_guilds(claimed)
+                    print(f"Event manager: ended expired {ev_type} event '{claimed.get('event_name')}'")
+
+            # Also sweep any orphaned events of unknown type (safety net)
             await asyncio.to_thread(clear_expired_events)
+
+            now = time.time()
+
+            # Check if celestial is active (blocks hourly/daily starts)
+            celestial_active = (
+                await asyncio.to_thread(get_active_event_by_type, "solar_eclipse")
+                or await asyncio.to_thread(get_active_event_by_type, "blood_moon")
+            )
+
+            # ── Step 2: Maybe start a new hourly event ──
+            if now >= next_hourly_attempt and not celestial_active:
+                existing_hourly = await asyncio.to_thread(get_active_event_by_type, "hourly")
+                if not existing_hourly:
+                    # Advance the next attempt time regardless of roll outcome
+                    next_hourly_attempt = now + HOURLY_EVENT_INTERVAL
+                    # 50% chance to trigger
+                    if random.random() < 0.5:
+                        event_info = random.choice(HOURLY_EVENTS)
+
+                        # Random duration: 40% = 30min, 35% = 45min, 25% = 60min
+                        rand = random.random()
+                        if rand < 0.40:
+                            duration_minutes = 30
+                        elif rand < 0.75:
+                            duration_minutes = 45
+                        else:
+                            duration_minutes = 60
+
+                        duration_seconds = duration_minutes * 60
+                        start_time = time.time()
+                        end_time = start_time + duration_seconds
+                        event_id = f"hourly_{int(start_time)}_{event_info['id']}"
+
+                        await asyncio.to_thread(set_active_event,
+                            event_id=event_id,
+                            event_type="hourly",
+                            event_name=event_info["name"],
+                            start_time=start_time,
+                            end_time=end_time,
+                            effects={"event_id": event_info["id"]}
+                        )
+                        await _send_start_embed_all_guilds({
+                            "event_type": "hourly",
+                            "event_id": event_info["id"],
+                            "event_name": event_info["name"]
+                        }, duration_minutes)
+                        print(f"Event manager: started hourly event '{event_info['name']}' for {duration_minutes} minutes")
+
+            # ── Step 3: Maybe start a new daily event ──
+            if now >= next_daily_attempt and not celestial_active:
+                existing_daily = await asyncio.to_thread(get_active_event_by_type, "daily")
+                if not existing_daily:
+                    # Advance the next attempt time regardless of roll outcome
+                    next_daily_attempt = now + DAILY_EVENT_INTERVAL
+                    # 10% chance to trigger
+                    if random.random() < 0.10:
+                        event_info = random.choice(DAILY_EVENTS)
+                        duration_minutes = 24 * 60
+                        duration_seconds = duration_minutes * 60
+                        start_time = time.time()
+                        end_time = start_time + duration_seconds
+                        event_id = f"daily_{int(start_time)}_{event_info['id']}"
+
+                        await asyncio.to_thread(set_active_event,
+                            event_id=event_id,
+                            event_type="daily",
+                            event_name=event_info["name"],
+                            start_time=start_time,
+                            end_time=end_time,
+                            effects={"event_id": event_info["id"]}
+                        )
+                        await _send_start_embed_all_guilds({
+                            "event_type": "daily",
+                            "event_id": event_info["id"],
+                            "event_name": event_info["name"]
+                        }, duration_minutes)
+                        print(f"Event manager: started daily event '{event_info['name']}' for 24 hours")
+
+            # ── Step 4: Celestial triggers (DST-aware Eastern time) ──
             now_est = _now_est()
-            now_utc = now_est.astimezone(datetime.timezone.utc)
-            now_ts = now_utc.timestamp()
             today_est = (now_est.year, now_est.month, now_est.day)
+            now_ts = time.time()
 
-            # End expired celestial events (send end embed, then clear)
-            se = await asyncio.to_thread(get_active_event_by_type, "solar_eclipse")
-            if se and now_ts >= se.get("end_time", 0):
-                await _end_active_event_for_all_guilds(se)
-                print("Solar Eclipse ended (time expired).")
-            bm = await asyncio.to_thread(get_active_event_by_type, "blood_moon")
-            if bm and now_ts >= bm.get("end_time", 0):
-                await _end_active_event_for_all_guilds(bm)
-                print("Blood Moon ended (time expired).")
-
-            # At 4:30 Eastern: 50% chance to start Solar Eclipse (day: 4:30 -> 19:30 Eastern)
+            # Solar Eclipse at 4:30 AM Eastern
             if (now_est.hour, now_est.minute) == CELESTIAL_DAY_START_EST and today_est != last_solar_trigger_date:
                 last_solar_trigger_date = today_est
                 if not await asyncio.to_thread(get_active_event_by_type, "solar_eclipse") and random.random() < CELESTIAL_TRIGGER_CHANCE:
-                    # End any active hourly and daily (send their end embeds, then clear)
+                    # End active hourly and daily first
                     for ev_type in ("hourly", "daily"):
                         existing = await asyncio.to_thread(get_active_event_by_type, ev_type)
                         if existing:
-                            await _end_active_event_for_all_guilds(existing)
-                            print(f"Ended active {ev_type} event for Solar Eclipse start.")
+                            await asyncio.to_thread(clear_event, existing.get("event_id", ""))
+                            await _send_end_embed_all_guilds(existing)
+                            print(f"Event manager: ended active {ev_type} event for Solar Eclipse start.")
                     end_est = now_est.replace(hour=CELESTIAL_NIGHT_START_EST[0], minute=CELESTIAL_NIGHT_START_EST[1], second=0, microsecond=0)
                     end_ts = end_est.timestamp()
                     event_id = f"solar_eclipse_{int(now_ts)}"
@@ -19756,27 +19569,25 @@ async def celestial_event_check():
                         end_time=end_ts,
                         effects={"event_id": "solar_eclipse"}
                     )
-                    for guild in bot.guilds:
-                        try:
-                            await send_event_start_embed(guild, {
-                                "event_type": "solar_eclipse",
-                                "event_id": "solar_eclipse",
-                                "event_name": SOLAR_ECLIPSE_TITLE,
-                                "effects": {"event_id": "solar_eclipse"}
-                            }, 0)
-                        except Exception as e:
-                            print(f"Error sending Solar Eclipse start to {guild.name}: {e}")
-                    print("Started Solar Eclipse (50% roll at 4:30 Eastern).")
+                    await _send_start_embed_all_guilds({
+                        "event_type": "solar_eclipse",
+                        "event_id": "solar_eclipse",
+                        "event_name": SOLAR_ECLIPSE_TITLE,
+                        "effects": {"event_id": "solar_eclipse"}
+                    }, 0)
+                    print("Event manager: started Solar Eclipse.")
 
-            # At 19:30 Eastern: 50% chance to start Blood Moon (night: 19:30 -> 4:30 Eastern next day)
+            # Blood Moon at 7:30 PM Eastern
             if (now_est.hour, now_est.minute) == CELESTIAL_NIGHT_START_EST and today_est != last_blood_trigger_date:
                 last_blood_trigger_date = today_est
                 if not await asyncio.to_thread(get_active_event_by_type, "blood_moon") and random.random() < CELESTIAL_TRIGGER_CHANCE:
+                    # End active hourly and daily first
                     for ev_type in ("hourly", "daily"):
                         existing = await asyncio.to_thread(get_active_event_by_type, ev_type)
                         if existing:
-                            await _end_active_event_for_all_guilds(existing)
-                            print(f"Ended active {ev_type} event for Blood Moon start.")
+                            await asyncio.to_thread(clear_event, existing.get("event_id", ""))
+                            await _send_end_embed_all_guilds(existing)
+                            print(f"Event manager: ended active {ev_type} event for Blood Moon start.")
                     next_day = now_est.date() + datetime.timedelta(days=1)
                     end_est = now_est.replace(year=next_day.year, month=next_day.month, day=next_day.day,
                                              hour=CELESTIAL_DAY_START_EST[0], minute=CELESTIAL_DAY_START_EST[1], second=0, microsecond=0)
@@ -19790,24 +19601,20 @@ async def celestial_event_check():
                         end_time=end_ts,
                         effects={"event_id": "blood_moon"}
                     )
-                    for guild in bot.guilds:
-                        try:
-                            await send_event_start_embed(guild, {
-                                "event_type": "blood_moon",
-                                "event_id": "blood_moon",
-                                "event_name": BLOOD_MOON_TITLE,
-                                "effects": {"event_id": "blood_moon"}
-                            }, 0)
-                        except Exception as e:
-                            print(f"Error sending Blood Moon start to {guild.name}: {e}")
-                    print("Started Blood Moon (50% roll at 19:30 Eastern).")
+                    await _send_start_embed_all_guilds({
+                        "event_type": "blood_moon",
+                        "event_id": "blood_moon",
+                        "event_name": BLOOD_MOON_TITLE,
+                        "effects": {"event_id": "blood_moon"}
+                    }, 0)
+                    print("Event manager: started Blood Moon.")
 
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
         except Exception as e:
-            print(f"Error in celestial_event_check: {e}")
+            print(f"Error in event_manager_loop: {e}")
             import traceback
             traceback.print_exc()
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
 
 
 # Mining View with button
