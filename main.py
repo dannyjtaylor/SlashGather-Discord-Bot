@@ -255,6 +255,8 @@ from database import (
     get_jump_state,
     increment_jump_counter,
     reset_jump_counter,
+    get_dayboost_expirations,
+    clear_all_jump_multi,
 )
 
 try:
@@ -367,9 +369,23 @@ JUMP_MULTI_PERCENT = 0.05  # +5% per stack
 JUMP_DEBUFF_PERCENT = 0.60  # -60% per stack
 JUMP_MAX_PER_DAY = 5
 JUMP_COOLDOWN_SEC = 10
-JUMP_BREAK_DENOMINATOR = 10000  # TEMPORARY: was 10000, set to 10 for testing
-JUMP_REPAIR_SEC = 60 * 60  # 1 hour repair time after branch breaks
+# 1/1750 per jump ≈ one break per week if 50 people each use all 5 daily jumps.
+JUMP_BREAK_DENOMINATOR = 1750
+JUMP_REPAIR_SEC = 60*60  # 1 hour repair time after branch breaks
 _jump_cooldowns: dict[int, float] = {}  # user_id -> last jump timestamp
+_jump_locks_guard = threading.Lock()
+_jump_user_locks: dict[int, threading.Lock] = {}
+_jump_guild_locks: dict[int, threading.Lock] = {}
+
+
+def _named_jump_lock(table: dict[int, threading.Lock], key: int) -> threading.Lock:
+    """Return a process-local lock for a user or guild jump mutation."""
+    with _jump_locks_guard:
+        lock = table.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            table[key] = lock
+        return lock
 
 
 def get_jump_multi_multiplier(user_id: int) -> float:
@@ -643,6 +659,11 @@ COINFLIP_LOSS_COOLDOWN = 10  # seconds before next /coinflip after losing
 # In production, these should be: HOURLY_EVENT_INTERVAL = 3600, DAILY_EVENT_INTERVAL = 86400
 HOURLY_EVENT_INTERVAL = 3600 # Seconds between hourly event checks (default: 3600 = 1 hour)
 DAILY_EVENT_INTERVAL = 86400 # Seconds between daily event checks (default: 86400 = 24 hours)
+HOURLY_EVENT_TRIGGER_CHANCE = 0.5  # 50% chance per hourly check
+DAILY_EVENT_TRIGGER_CHANCE = 0.10  # 10% chance per daily check
+
+# Prevent on_ready reconnects from spawning duplicate background loops
+_background_tasks_started = False
 
 # Gardener names (by slot ID)
 GARDENER_NAMES = {
@@ -2062,6 +2083,8 @@ _pve_boss_defeated_pending: dict[int, list] = {}  # guild_id -> [(boss, attacker
 # Users who have defeated PvE but reward distribution hasn't finished yet — block bloom until they get their rewards
 users_pending_pve_rewards: set[int] = set()
 plantera_bulb_eligible_guilds: dict[int, float] = {}  # guild_id -> timestamp when last boss was defeated (for Plantera bulb chance)
+active_plantera_bulb_guilds: set[int] = set()  # guild currently has an unresolved Plantera bulb prompt
+pending_boss_spawn_tasks: dict[int, asyncio.Task] = {}  # guild_id -> delayed boss spawn task (cancellable)
 PLANTERA_BULB_CHANCE = 0.02
 PLANTERA_BULB_MAX_AGE_SEC = 86400  # 24h
 # #underground-jungle: 2x wild animal and boss spawn
@@ -7835,7 +7858,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.1.2 :3"
+            name="running /gather on V1.1.3"
         )
     )
     try:
@@ -7901,60 +7924,58 @@ async def on_ready():
         import traceback
         traceback.print_exc()
 
-    # If bot restarted during an event, send end embeds for any expired events so #events channel stays consistent
-    try:
-        for ev_type in ("hourly", "daily", "solar_eclipse", "blood_moon"):
-            claimed = await asyncio.to_thread(claim_expired_event, ev_type)
-            if claimed:
-                await _send_end_embed_all_guilds(claimed)
-                print(f"Startup recovery: sent end embed for {ev_type} '{claimed.get('event_name')}'")
-        await asyncio.to_thread(clear_expired_events)
-        print("Event recovery at startup completed")
-    except Exception as e:
-        print(f"Error during event recovery at startup: {e}")
-        import traceback
-        traceback.print_exc()
+    # Background tasks + one-shot recovery only on first ready (discord.py can call on_ready again on resume)
+    global _background_tasks_started, _invite_cache
+    if not _background_tasks_started:
+        _background_tasks_started = True
 
-    bot.loop.create_task(update_all_leaderboards())
-    print("Started automatic leaderboard updates")
-    
-    
-    # Start the marketboard update task
-    bot.loop.create_task(update_all_marketboards())
-    print("Started automatic marketboard updates")
-    
-    # Start the market news task
-    bot.loop.create_task(send_market_news_loop())
-    print("Started automatic market news alerts")
-    
-    # Start the fernbase update task
-    bot.loop.create_task(update_all_coinbase())
-    print("Started automatic fernbase updates")
-    
-    # Start the gardener background task
-    bot.loop.create_task(gardener_background_task())
-    print("Started automatic gardener gathering")
-    
-    # Start the secret gardener background task
-    bot.loop.create_task(secret_gardener_background_task())
-    print("Started automatic secret gardener gathering")
-    
-    # Start the GPU background task
-    bot.loop.create_task(gpu_background_task())
-    print("Started automatic GPU mining")
-    
-    # Start the unified event manager (handles hourly, daily, and celestial events)
-    bot.loop.create_task(event_manager_loop())
-    print("Started unified event manager (hourly, daily, celestial)")
-    bot.loop.create_task(irrigation_auto_water_task())
-    print("Started irrigation auto-water task")
-    bot.loop.create_task(mongodb_keepalive_task())
-    print("Started MongoDB keepalive task")
-    bot.loop.create_task(roulette_stale_game_cleanup())
-    print("Started roulette stale game cleanup task")
+        # If bot restarted during an event, send end embeds for any expired events so #events channel stays consistent
+        try:
+            for ev_type in ("hourly", "daily", "solar_eclipse", "blood_moon"):
+                claimed = await asyncio.to_thread(claim_expired_event, ev_type)
+                if claimed:
+                    await _send_end_embed_all_guilds(claimed)
+                    print(f"Startup recovery: sent end embed for {ev_type} '{claimed.get('event_name')}'")
+            await asyncio.to_thread(clear_expired_events)
+            print("Event recovery at startup completed")
+        except Exception as e:
+            print(f"Error during event recovery at startup: {e}")
+            import traceback
+            traceback.print_exc()
+
+        bot.loop.create_task(update_all_leaderboards())
+        print("Started automatic leaderboard updates")
+
+        bot.loop.create_task(update_all_marketboards())
+        print("Started automatic marketboard updates")
+
+        bot.loop.create_task(send_market_news_loop())
+        print("Started automatic market news alerts")
+
+        bot.loop.create_task(update_all_coinbase())
+        print("Started automatic fernbase updates")
+
+        bot.loop.create_task(gardener_background_task())
+        print("Started automatic gardener gathering")
+
+        bot.loop.create_task(secret_gardener_background_task())
+        print("Started automatic secret gardener gathering")
+
+        bot.loop.create_task(gpu_background_task())
+        print("Started automatic GPU mining")
+
+        bot.loop.create_task(event_manager_loop())
+        print("Started unified event manager (hourly, daily, celestial)")
+        bot.loop.create_task(irrigation_auto_water_task())
+        print("Started irrigation auto-water task")
+        bot.loop.create_task(mongodb_keepalive_task())
+        print("Started MongoDB keepalive task")
+        bot.loop.create_task(roulette_stale_game_cleanup())
+        print("Started roulette stale game cleanup task")
+    else:
+        print("on_ready: reconnect — background tasks already running, skipping re-start")
 
     # Cache invites for invite tracking (needs "Manage Server" permission)
-    global _invite_cache
     _invite_cache = {}
     for guild in bot.guilds:
         try:
@@ -9334,6 +9355,9 @@ class BossView(discord.ui.View):
                             color=discord.Color.gold())
                     broadcast_embed.set_footer(text="gathering channels are now unblocked")
                     for ch in channels:
+                        # Fight channel already has the local victory embed — avoid double kill message
+                        if ch.id == self.channel_id:
+                            continue
                         try:
                             if ch.permissions_for(guild.me).send_messages:
                                 await ch.send(embed=broadcast_embed)
@@ -9511,6 +9535,8 @@ class SansView(discord.ui.View):
                                 color=discord.Color.gold())
                             broadcast_embed.set_footer(text="gathering channels are now unblocked")
                             for ch in channels:
+                                if ch.id == self.channel_id:
+                                    continue
                                 try:
                                     if ch.permissions_for(guild.me).send_messages:
                                         await ch.send(embed=broadcast_embed)
@@ -9914,6 +9940,8 @@ class EnderDragonView(discord.ui.View):
                         color=discord.Color.gold())
                     broadcast_embed.set_footer(text="Gathering channels are now unblocked.")
                     for ch in channels:
+                        if ch.id == self.channel_id:
+                            continue
                         try:
                             if ch.permissions_for(guild.me).send_messages:
                                 await ch.send(embed=broadcast_embed)
@@ -10040,18 +10068,33 @@ async def trigger_ender_dragon_event(channel: discord.TextChannel, area_multipli
 async def _delayed_boss_spawn(guild: discord.Guild, channel: discord.TextChannel, boss: dict, area_multiplier: float, delay: float = 60.0):
     try:
         await asyncio.sleep(delay)
-        if guild.id not in active_boss_events:
+        if guild.id in active_boss_events or guild.id in active_plantera_bulb_guilds:
+            # Warning already went out; something else (e.g. Plantera) took the slot
             try:
-                if boss["id"] in PVE_BOSSES_TWINS_IDS:
-                    await trigger_twins_boss_event(channel, area_multiplier)
-                elif boss["id"] == ENDER_DRAGON_ID:
-                    await trigger_ender_dragon_event(channel, area_multiplier)
-                else:
-                    await trigger_boss_event(channel, boss, area_multiplier)
+                embed = discord.Embed(
+                    title=f"💨 {boss.get('emoji', '')} {boss.get('name', 'The boss')} retreated...",
+                    description="Another threat arrived first. The approaching boss never made it.",
+                    color=discord.Color.dark_grey(),
+                )
+                if channel.permissions_for(guild.me).send_messages:
+                    await channel.send(embed=embed)
             except Exception as e:
-                print(f"Delayed boss spawn failed: {e}")
+                print(f"Delayed boss cancel notice failed: {e}")
+            return
+        try:
+            if boss["id"] in PVE_BOSSES_TWINS_IDS:
+                await trigger_twins_boss_event(channel, area_multiplier)
+            elif boss["id"] == ENDER_DRAGON_ID:
+                await trigger_ender_dragon_event(channel, area_multiplier)
+            else:
+                await trigger_boss_event(channel, boss, area_multiplier)
+        except Exception as e:
+            print(f"Delayed boss spawn failed: {e}")
+    except asyncio.CancelledError:
+        raise
     finally:
         pending_boss_spawn_guild_ids.discard(guild.id)
+        pending_boss_spawn_tasks.pop(guild.id, None)
 
 
 # Bosses that can spawn randomly: excludes Plantera (bulb only); Mothron only when Solar Eclipse; Queen Bee only via Larva.
@@ -10071,6 +10114,12 @@ class PlanteraBulbView(discord.ui.View):
         self.area_multiplier = area_multiplier
         self.resolved = False
 
+    def _clear_bulb_state(self):
+        active_plantera_bulb_guilds.discard(self.guild_id)
+
+    async def on_timeout(self):
+        self._clear_bulb_state()
+
     @discord.ui.button(label="Break", style=discord.ButtonStyle.danger, custom_id="plantera_break")
     async def break_bulb(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await safe_defer(interaction, ephemeral=False):
@@ -10078,8 +10127,18 @@ class PlanteraBulbView(discord.ui.View):
         if self.resolved:
             await safe_interaction_response(interaction, interaction.response.send_message, "Someone already chose!", ephemeral=True)
             return
+        # Do not let Plantera steal a slot from a boss that already warned / is active
+        if self.guild_id in active_boss_events:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "A boss is already active — you can't summon Plantera right now!", ephemeral=True)
+            return
+        if self.guild_id in pending_boss_spawn_guild_ids:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "A boss is already approaching — wait for it (or for it to retreat) before breaking the bulb!", ephemeral=True)
+            return
         self.resolved = True
         self.stop()
+        self._clear_bulb_state()
         plantera = next(b for b in PVE_BOSSES if b["id"] == "plantera")
         plantera_bulb_eligible_guilds.pop(self.guild_id, None)
         await safe_interaction_response(interaction, interaction.response.edit_message,
@@ -10100,6 +10159,7 @@ class PlanteraBulbView(discord.ui.View):
             return
         self.resolved = True
         self.stop()
+        self._clear_bulb_state()
         await safe_interaction_response(interaction, interaction.response.edit_message,
             content="The bulb is left alone. The jungle settles back into silence.",
             view=None)
@@ -10853,9 +10913,17 @@ async def gather(interaction: discord.Interaction):
         if hoe_enc and hoe_name and hoe_rarity_display:
             embed.add_field(name="\u2728 **IMBUEMENT**", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
 
-        month_name = gather_result.get("month_name", "—")
+        if gather_result.get("seasonal_label") and gather_result.get("seasonal_multiplier", 1.0) > 1.0:
+            season_pct = (gather_result["seasonal_multiplier"] - 1.0) * 100
+            embed.add_field(
+                name=f"\U0001f4c5 **{gather_result['seasonal_label']}**",
+                value=f"+{season_pct:.0f}% seasonal bonus",
+                inline=False,
+            )
+
+        month_name = gather_result.get("month_name") or "-"
         embed.add_field(
-            name="\u200b",
+            name="\U0001f4c5 **MONTH**",
             value=f"**~**\n{interaction.user.name} - **{month_name.upper()}**",
             inline=False,
         )
@@ -10914,8 +10982,11 @@ async def gather(interaction: discord.Interaction):
                 and (time.time() - plantera_bulb_eligible_guilds[guild_id]) <= PLANTERA_BULB_MAX_AGE_SEC
                 and interaction.channel.id not in active_pve_events
                 and guild_id not in active_boss_events
+                and guild_id not in pending_boss_spawn_guild_ids
+                and guild_id not in active_plantera_bulb_guilds
                 and random.random() < PLANTERA_BULB_CHANCE):
             plantera_bulb_eligible_guilds.pop(guild_id, None)
+            active_plantera_bulb_guilds.add(guild_id)
             bulb_embed = discord.Embed(
                 title="🌸 The jungle grows restless...",
                 description="A **Plantera Bulb** spawned!",
@@ -10926,6 +10997,7 @@ async def gather(interaction: discord.Interaction):
         # 2. Boss spawn (rarer): 1-min warning then boss in this channel (only if no boss active, no enemy in any gather channel, no boss already scheduled)
         if (not pve_spawned and channel_name in VALID_GATHERING_CHANNELS and guild_id and guild_id not in active_boss_events
                 and guild_id not in pending_boss_spawn_guild_ids
+                and guild_id not in active_plantera_bulb_guilds
                 and interaction.channel.id not in active_pve_events
                 and not _guild_has_active_pve(interaction.guild)
                 and not result.get("stealable")):
@@ -10938,7 +11010,8 @@ async def gather(interaction: discord.Interaction):
                 boss = random.choice(bosses_candidates)
                 pending_boss_spawn_guild_ids.add(guild_id)
                 await _send_boss_warning_embed(interaction.guild, boss, interaction.channel)
-                asyncio.create_task(_delayed_boss_spawn(interaction.guild, interaction.channel, boss, area_mult, 60.0))
+                task = asyncio.create_task(_delayed_boss_spawn(interaction.guild, interaction.channel, boss, area_mult, 60.0))
+                pending_boss_spawn_tasks[guild_id] = task
                 pve_spawned = True
         # 3. PvE wild animal: only if no boss active and this channel has no PvE event
         if (not pve_spawned and channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
@@ -10954,6 +11027,28 @@ async def gather(interaction: discord.Interaction):
         traceback.print_exc()
         print(f"Error in gather command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+def _sync_water_streak_achievements(user_id: int, consecutive_days: int) -> dict:
+    """Persist water-streak achievement progress from the current consecutive-day count.
+
+    /water, Irrigation System auto-water, and /give must all use this — otherwise
+    streak stats can rise while /achievements stays stuck. Leap Day unlocks at 29+
+    so a skipped exact-29 day (admin give, catch-up) still counts.
+    """
+    water_streak_level_up = None
+    new_level = get_achievement_level_for_stat("water_streak", consecutive_days)
+    current_level = get_user_achievement_level(user_id, "water_streak")
+    if new_level > current_level:
+        set_user_achievement_level(user_id, "water_streak", new_level)
+        water_streak_level_up = new_level
+    leap_year_unlocked = False
+    if consecutive_days >= 29:
+        leap_year_unlocked = unlock_hidden_achievement(user_id, "leap_year")
+    return {
+        "water_streak_level_up": water_streak_level_up,
+        "leap_year_unlocked": leap_year_unlocked,
+    }
 
 
 def _water_critical_path(user_id: int) -> dict:
@@ -11002,7 +11097,8 @@ def _water_critical_path(user_id: int) -> dict:
             minutes_left = (time_left % 3600) // 60
             seconds_left = time_left % 60
             time_msg = f"{hours_left} hour{'s' if hours_left != 1 else ''}, {minutes_left} minute{'s' if minutes_left != 1 else ''}, and {seconds_left} second{'s' if seconds_left != 1 else ''}"
-        return {"already_watered": True, "time_msg": time_msg}
+        ach = _sync_water_streak_achievements(user_id, get_user_consecutive_water_days(user_id))
+        return {"already_watered": True, "time_msg": time_msg, **ach}
 
     consecutive_days = get_user_consecutive_water_days(user_id)
     is_first_water_today = True
@@ -11035,7 +11131,8 @@ def _water_critical_path(user_id: int) -> dict:
     daily_bonus_multiplier = get_daily_bonus_multiplier(user_id)
 
     tree_rings_awarded = 0
-    if consecutive_days == 5 and is_first_water_today:
+    # Ongoing perk: 10 Tree Rings every 5 consecutive water days (5, 10, 15, ...)
+    if is_first_water_today and consecutive_days > 0 and consecutive_days % 5 == 0:
         increment_tree_rings(user_id, 10)
         tree_rings_awarded = 10
 
@@ -11047,22 +11144,15 @@ def _water_critical_path(user_id: int) -> dict:
     if tree_rings_awarded > 0:
         message += f" You've been awarded **{tree_rings_awarded} Tree Rings**!"
 
-    water_streak_level_up = None
-    leap_year_unlocked = False
+    ach = {"water_streak_level_up": None, "leap_year_unlocked": False}
     if is_first_water_today:
-        new_water_streak_level = get_achievement_level_for_stat("water_streak", consecutive_days)
-        current_water_streak_level = get_user_achievement_level(user_id, "water_streak")
-        if new_water_streak_level > current_water_streak_level:
-            set_user_achievement_level(user_id, "water_streak", new_water_streak_level)
-            water_streak_level_up = new_water_streak_level
-        if consecutive_days == 29:
-            leap_year_unlocked = unlock_hidden_achievement(user_id, "leap_year")
+        ach = _sync_water_streak_achievements(user_id, consecutive_days)
 
     return {
         "already_watered": False,
         "message": message,
-        "water_streak_level_up": water_streak_level_up,
-        "leap_year_unlocked": leap_year_unlocked,
+        "water_streak_level_up": ach["water_streak_level_up"],
+        "leap_year_unlocked": ach["leap_year_unlocked"],
     }
 
 
@@ -11082,6 +11172,10 @@ async def water(interaction: discord.Interaction):
         if result["already_watered"]:
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"💧 {interaction.user.mention}, you need to wait **{result['time_msg']}** before watering your plants again!", ephemeral=False)
+            if result.get("water_streak_level_up") is not None:
+                await send_achievement_notification(interaction, "water_streak", result["water_streak_level_up"])
+            if result.get("leap_year_unlocked"):
+                await send_hidden_achievement_notification(interaction, "leap_year")
             return
 
         message = f"💧 {interaction.user.mention}, " + result["message"]
@@ -11552,7 +11646,8 @@ async def stats(interaction: discord.Interaction):
         if jump_multi_mult > 1.0:
             jm_pct = (jump_multi_mult - 1.0) * 100
             jm_count = get_dayboost_count(user_id, "jump_multi")
-            mult_lines.append(f"**🌿 JUMP MULTI —** +{jm_pct:.1f}% ({jm_count}x)")
+            jm_unit = "multi" if jm_count == 1 else "multis"
+            mult_lines.append(f"**🌿 JUMP MULTI —** +{jm_pct:.1f}% ({jm_count} {jm_unit})")
         if jump_debuff_mult < 1.0:
             jd_pct = (1.0 - jump_debuff_mult) * 100
             jd_count = get_dayboost_count(user_id, "jump_debuff")
@@ -12587,9 +12682,19 @@ async def harvest(interaction: discord.Interaction):
             embed.add_field(name="\u2728 **IMBUEMENT**",
                 value=f"**{tractor_name}** {tractor_rarity_display}", inline=False)
 
-        month_name = result.get("month_name", "")
-        if month_name:
-            embed.add_field(name="\u200b", value=f"**~**\n{interaction.user.name} - **{month_name.upper()}**", inline=False)
+        if result.get("seasonal_label") and result.get("total_seasonal_bonus", 0) > 0:
+            embed.add_field(
+                name=f"\U0001f4c5 **{result['seasonal_label']}**",
+                value=f"**+${result['total_seasonal_bonus']:,.2f}** seasonal bonus",
+                inline=False,
+            )
+
+        month_name = result.get("month_name") or "-"
+        embed.add_field(
+            name="\U0001f4c5 **MONTH**",
+            value=f"**~**\n{interaction.user.name} - **{month_name.upper()}**",
+            inline=False,
+        )
         embed.add_field(name="💰 **TOTAL**", value=f"**{format_money(total_value)}**", inline=True)
         embed.add_field(name="💵 **NEW BALANCE**", value=f"**{format_money(current_balance)}**", inline=True)
 
@@ -12642,8 +12747,11 @@ async def harvest(interaction: discord.Interaction):
                 and (time.time() - plantera_bulb_eligible_guilds[guild_id]) <= PLANTERA_BULB_MAX_AGE_SEC
                 and interaction.channel.id not in active_pve_events
                 and guild_id not in active_boss_events
+                and guild_id not in pending_boss_spawn_guild_ids
+                and guild_id not in active_plantera_bulb_guilds
                 and random.random() < PLANTERA_BULB_CHANCE):
             plantera_bulb_eligible_guilds.pop(guild_id, None)
+            active_plantera_bulb_guilds.add(guild_id)
             bulb_embed = discord.Embed(
                 title="🌸 The jungle grows restless...",
                 description="A **Plantera Bulb** spawned!",
@@ -12654,6 +12762,7 @@ async def harvest(interaction: discord.Interaction):
         # 2. Boss spawn (rarer) — only if no boss active, no enemy in any gather channel, no boss already scheduled
         if (not pve_spawned and channel_name in VALID_GATHERING_CHANNELS and guild_id and guild_id not in active_boss_events
                 and guild_id not in pending_boss_spawn_guild_ids
+                and guild_id not in active_plantera_bulb_guilds
                 and interaction.channel.id not in active_pve_events
                 and not _guild_has_active_pve(interaction.guild)
                 and not crit.get("stealable")):
@@ -12666,7 +12775,8 @@ async def harvest(interaction: discord.Interaction):
                 boss = random.choice(bosses_candidates)
                 pending_boss_spawn_guild_ids.add(guild_id)
                 await _send_boss_warning_embed(interaction.guild, boss, interaction.channel)
-                asyncio.create_task(_delayed_boss_spawn(interaction.guild, interaction.channel, boss, area_mult, 60.0))
+                task = asyncio.create_task(_delayed_boss_spawn(interaction.guild, interaction.channel, boss, area_mult, 60.0))
+                pending_boss_spawn_tasks[guild_id] = task
                 pve_spawned = True
         # 3. PvE wild animal
         if (not pve_spawned and channel_name in VALID_GATHERING_CHANNELS and interaction.channel.id not in active_pve_events
@@ -17091,6 +17201,7 @@ async def give(
             days = int(amount)
             old_streak = get_user_consecutive_water_days(user_id)
             set_user_consecutive_water_days(user_id, days)
+            _sync_water_streak_achievements(user_id, days)
 
             embed = discord.Embed(
                 title="🎉 Giveaway – Water Streak",
@@ -17833,19 +17944,20 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
                         logging.warning(f"Error editing {leaderboard_type} leaderboard in {guild.name}: {e}")
                         return  # Skip this update rather than creating new message
             except discord.NotFound:
-                # Message was deleted, search for existing one
+                # Message was deleted, search for an existing one before creating
                 message_id = None
             except discord.HTTPException as e:
-                # Other error (permissions, etc.), search for existing one
+                # Keep the cached ID and retry next tick rather than posting a duplicate
                 if e.status == 429:
-                    # Rate limited, skip this update
                     logging.warning(f"Rate limited while fetching leaderboard message in {guild.name}, skipping update")
-                    return
-                logging.warning(f"Error fetching {leaderboard_type} leaderboard message in {guild.name}: {e}")
-                message_id = None
+                else:
+                    logging.warning(f"Error fetching {leaderboard_type} leaderboard message in {guild.name}: {e}")
+                return
         
         # If no valid message_id, search for existing leaderboard message in channel
         if not message_id:
+            search_completed = False
+            found_existing = False
             try:
                 # Search through recent messages to find existing leaderboard
                 async for message in leaderboard_channel.history(limit=50):
@@ -17856,6 +17968,7 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
                            (leaderboard_type == "money" and "💰 MONEY" in embed_title) or \
                            (leaderboard_type == "ranks" and "🏆 RANKS" in embed_title):
                             # Found existing message, update it (regardless of age)
+                            found_existing = True
                             message_id = message.id
                             leaderboard_messages[guild_id][leaderboard_type] = message_id
                             try:
@@ -17871,27 +17984,32 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
                                     logging.warning(f"Maximum edits reached for {leaderboard_type} leaderboard message in {guild.name}, skipping update")
                                     return
                                 else:
-                                    # Other error, try next message or skip
+                                    # Other error, try next matching message
                                     continue
+                search_completed = True
             except discord.HTTPException as e:
                 if e.status == 429:
                     logging.warning(f"Rate limited while searching for leaderboard message in {guild.name}, skipping update")
-                    return
-                logging.warning(f"Error searching for existing leaderboard message in {guild.name}: {e}")
+                else:
+                    logging.warning(f"Error searching for existing leaderboard message in {guild.name}: {e}")
+                return
             except Exception as e:
                 logging.error(f"Unexpected error searching for leaderboard message in {guild.name}: {e}", exc_info=True)
-        
-        # Create new message only if we truly couldn't find an existing one (message was deleted)
-        # This should be rare - we only create if no message exists at all
-        try:
-            message = await leaderboard_channel.send(embed=embed)
-            leaderboard_messages[guild_id][leaderboard_type] = message.id
-            logging.info(f"Created new {leaderboard_type} leaderboard message in {guild.name} (no existing message found)")
-        except discord.HTTPException as e:
-            if e.status == 429:
-                logging.warning(f"Rate limited while creating new {leaderboard_type} leaderboard message in {guild.name}, skipping update")
-            else:
-                logging.error(f"Error creating new {leaderboard_type} leaderboard message in {guild.name}: {e}")
+                return
+
+            # Only create a new post after a completed search with no matching message
+            if found_existing or not search_completed:
+                return
+
+            try:
+                message = await leaderboard_channel.send(embed=embed)
+                leaderboard_messages[guild_id][leaderboard_type] = message.id
+                logging.info(f"Created new {leaderboard_type} leaderboard message in {guild.name} (no existing message found)")
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    logging.warning(f"Rate limited while creating new {leaderboard_type} leaderboard message in {guild.name}, skipping update")
+                else:
+                    logging.error(f"Error creating new {leaderboard_type} leaderboard message in {guild.name}: {e}")
     except Exception as e:
         logging.error(f"Unexpected error updating {leaderboard_type} leaderboard in {guild.name}: {e}", exc_info=True)
 
@@ -18278,19 +18396,20 @@ async def update_marketboard_message(guild: discord.Guild):
                         logging.warning(f"Error editing marketboard in {guild.name}: {e}")
                         return  # Skip this update rather than creating new message
             except discord.NotFound:
-                # Message was deleted, search for existing one
+                # Message was deleted, search for an existing one before creating
                 message_id = None
             except discord.HTTPException as e:
-                # Other error (permissions, etc.), search for existing one
+                # Keep the cached ID and retry next tick rather than posting a duplicate
                 if e.status == 429:
-                    # Rate limited, skip this update
                     logging.warning(f"Rate limited while fetching marketboard message in {guild.name}, skipping update")
-                    return
-                logging.warning(f"Error fetching marketboard message in {guild.name}: {e}")
-                message_id = None
+                else:
+                    logging.warning(f"Error fetching marketboard message in {guild.name}: {e}")
+                return
         
         # If no valid message_id, search for existing marketboard message in channel
         if not message_id:
+            search_completed = False
+            found_existing = False
             try:
                 # Search through recent messages to find existing marketboard
                 async for message in market_channel.history(limit=50):
@@ -18299,6 +18418,7 @@ async def update_marketboard_message(guild: discord.Guild):
                         # Check if this is the marketboard message
                         if "GROW JONES INDUSTRIAL AVERAGE" in embed_title:
                             # Found existing message, update it (regardless of age)
+                            found_existing = True
                             message_id = message.id
                             leaderboard_messages[guild_id]["marketboard"] = message_id
                             try:
@@ -18314,27 +18434,32 @@ async def update_marketboard_message(guild: discord.Guild):
                                     logging.warning(f"Maximum edits reached for marketboard message in {guild.name}, skipping update")
                                     return
                                 else:
-                                    # Other error, try next message or skip
+                                    # Other error, try next matching message
                                     continue
+                search_completed = True
             except discord.HTTPException as e:
                 if e.status == 429:
                     logging.warning(f"Rate limited while searching for marketboard message in {guild.name}, skipping update")
-                    return
-                logging.warning(f"Error searching for existing marketboard message in {guild.name}: {e}")
+                else:
+                    logging.warning(f"Error searching for existing marketboard message in {guild.name}: {e}")
+                return
             except Exception as e:
                 logging.error(f"Unexpected error searching for marketboard message in {guild.name}: {e}", exc_info=True)
-        
-        # Create new message only if we truly couldn't find an existing one (message was deleted)
-        # This should be rare - we only create if no message exists at all
-        try:
-            message = await market_channel.send(embed=embed)
-            leaderboard_messages[guild_id]["marketboard"] = message.id
-            logging.info(f"Created new marketboard message in {guild.name} (no existing message found)")
-        except discord.HTTPException as e:
-            if e.status == 429:
-                logging.warning(f"Rate limited while creating new marketboard message in {guild.name}, skipping update")
-            else:
-                logging.error(f"Error creating new marketboard message in {guild.name}: {e}")
+                return
+
+            # Only create a new post after a completed search with no matching message
+            if found_existing or not search_completed:
+                return
+
+            try:
+                message = await market_channel.send(embed=embed)
+                leaderboard_messages[guild_id]["marketboard"] = message.id
+                logging.info(f"Created new marketboard message in {guild.name} (no existing message found)")
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    logging.warning(f"Rate limited while creating new marketboard message in {guild.name}, skipping update")
+                else:
+                    logging.error(f"Error creating new marketboard message in {guild.name}: {e}")
     except Exception as e:
         logging.error(f"Unexpected error updating marketboard in {guild.name}: {e}", exc_info=True)
 
@@ -18350,14 +18475,9 @@ async def update_all_marketboards():
             # Update marketboards for all guilds the bot is in
             for guild in bot.guilds:
                 try:
-                    await asyncio.gather(
-                        update_marketboard_message(guild),
-                        update_leaderboard_message(guild, "plants"),
-                        update_leaderboard_message(guild, "money"),
-                        update_leaderboard_message(guild, "ranks"),
-                    )
+                    await update_marketboard_message(guild)
                 except Exception as e:
-                    logging.error(f"Error updating marketboard/leaderboards for guild {guild.name}: {e}", exc_info=True)
+                    logging.error(f"Error updating marketboard for guild {guild.name}: {e}", exc_info=True)
                 # Delay between guilds to prevent rate limiting
                 await asyncio.sleep(0.5)
         except Exception as e:
@@ -19354,7 +19474,8 @@ def _apply_auto_water_for_user(user_id: int, now_est: datetime.datetime) -> bool
             else:
                 already_watered = True
         if already_watered:
-            return False
+            ach = _sync_water_streak_achievements(user_id, get_user_consecutive_water_days(user_id))
+            return {"applied": False, **ach}
     consecutive_days = get_user_consecutive_water_days(user_id)
     is_first_water_today = True
     if last_water_time > 0:
@@ -19377,9 +19498,11 @@ def _apply_auto_water_for_user(user_id: int, now_est: datetime.datetime) -> bool
     current_balance = get_user_balance(user_id)
     new_balance = normalize_money(current_balance + money_reward)
     update_user_balance(user_id, new_balance)
-    if consecutive_days == 5 and is_first_water_today:
+    # Ongoing perk: 10 Tree Rings every 5 consecutive water days (5, 10, 15, ...)
+    if is_first_water_today and consecutive_days > 0 and consecutive_days % 5 == 0:
         increment_tree_rings(user_id, 10)
-    return True
+    ach = _sync_water_streak_achievements(user_id, consecutive_days)
+    return {"applied": True, **ach}
 
 
 async def irrigation_auto_water_task():
@@ -19397,9 +19520,13 @@ async def irrigation_auto_water_task():
                     user_ids = await asyncio.to_thread(get_user_ids_with_shop_item, "irrigation_system")
                     for uid in user_ids:
                         try:
-                            applied = await asyncio.to_thread(_apply_auto_water_for_user, uid, now_est)
-                            if applied:
+                            result = await asyncio.to_thread(_apply_auto_water_for_user, uid, now_est)
+                            if result.get("applied"):
                                 print(f"Irrigation: auto-watered user {uid}")
+                            if result.get("water_streak_level_up") is not None:
+                                await send_achievement_notification_dm(uid, "water_streak", result["water_streak_level_up"])
+                            if result.get("leap_year_unlocked"):
+                                await send_hidden_achievement_notification_dm(uid, "leap_year")
                         except Exception as e:
                             print(f"Irrigation: error watering user {uid}: {e}")
             await asyncio.sleep(60)
@@ -19426,6 +19553,24 @@ async def _send_start_embed_all_guilds(event_dict: dict, duration_minutes: int):
             print(f"Error sending start embed to {guild.name}: {e}")
 
 
+def _pick_event_excluding(pool: list, exclude_id: str | None):
+    """Pick a random event from pool, never repeating the previous event_id when alternatives exist."""
+    if exclude_id:
+        candidates = [e for e in pool if e["id"] != exclude_id]
+        if candidates:
+            return random.choice(candidates)
+    return random.choice(pool)
+
+
+async def _claim_and_announce_expired(ev_type: str) -> dict | None:
+    """Atomically claim one expired event of type and announce its end. Returns claimed event or None."""
+    claimed = await asyncio.to_thread(claim_expired_event, ev_type)
+    if claimed:
+        await _send_end_embed_all_guilds(claimed)
+        print(f"Event manager: ended expired {ev_type} event '{claimed.get('event_name')}'")
+    return claimed
+
+
 async def event_manager_loop():
     """Single unified background task that manages ALL event lifecycle.
 
@@ -19442,14 +19587,27 @@ async def event_manager_loop():
     await bot.wait_until_ready()
     await asyncio.sleep(5)
 
-    # Timing: next allowed attempt to START a new hourly/daily event
+    # Timing: next allowed attempt to START a new hourly/daily event.
+    # Delay first attempt by a full interval so reconnects/restarts do not instantly spam events.
     now = time.time()
-    next_hourly_attempt = now  # Allow immediate first check
-    next_daily_attempt = now
+    next_hourly_attempt = now + HOURLY_EVENT_INTERVAL
+    next_daily_attempt = now + DAILY_EVENT_INTERVAL
 
     # Celestial dedup: only trigger once per calendar day in Eastern
     last_solar_trigger_date = None  # (year, month, day)
     last_blood_trigger_date = None
+
+    # No consecutive repeats (same event id back-to-back)
+    last_hourly_event_id = None
+    last_daily_event_id = None
+    active_hourly = await asyncio.to_thread(get_active_event_by_type, "hourly")
+    if active_hourly:
+        last_hourly_event_id = active_hourly.get("effects", {}).get("event_id")
+        next_hourly_attempt = max(next_hourly_attempt, float(active_hourly.get("end_time", now)) + HOURLY_EVENT_INTERVAL)
+    active_daily = await asyncio.to_thread(get_active_event_by_type, "daily")
+    if active_daily:
+        last_daily_event_id = active_daily.get("effects", {}).get("event_id")
+        next_daily_attempt = max(next_daily_attempt, float(active_daily.get("end_time", now)) + DAILY_EVENT_INTERVAL)
 
     print("Event manager loop started.")
 
@@ -19457,10 +19615,13 @@ async def event_manager_loop():
         try:
             # ── Step 1: End any expired events (one type at a time, atomic) ──
             for ev_type in ("hourly", "daily", "solar_eclipse", "blood_moon"):
-                claimed = await asyncio.to_thread(claim_expired_event, ev_type)
+                claimed = await _claim_and_announce_expired(ev_type)
                 if claimed:
-                    await _send_end_embed_all_guilds(claimed)
-                    print(f"Event manager: ended expired {ev_type} event '{claimed.get('event_name')}'")
+                    eid = claimed.get("effects", {}).get("event_id")
+                    if ev_type == "hourly" and eid:
+                        last_hourly_event_id = eid
+                    elif ev_type == "daily" and eid:
+                        last_daily_event_id = eid
 
             # Also sweep any orphaned events of unknown type (safety net)
             await asyncio.to_thread(clear_expired_events)
@@ -19476,12 +19637,15 @@ async def event_manager_loop():
             # ── Step 2: Maybe start a new hourly event ──
             if now >= next_hourly_attempt and not celestial_active:
                 existing_hourly = await asyncio.to_thread(get_active_event_by_type, "hourly")
-                if not existing_hourly:
-                    # Advance the next attempt time regardless of roll outcome
+                if existing_hourly:
+                    # Interval elapsed while an event is still running — wait until after it ends + full interval
+                    next_hourly_attempt = float(existing_hourly.get("end_time", now)) + HOURLY_EVENT_INTERVAL
+                else:
+                    # Guarantee end embed before any start (covers races with set_active_event wipe)
+                    await _claim_and_announce_expired("hourly")
                     next_hourly_attempt = now + HOURLY_EVENT_INTERVAL
-                    # 50% chance to trigger
-                    if random.random() < 0.5:
-                        event_info = random.choice(HOURLY_EVENTS)
+                    if random.random() < HOURLY_EVENT_TRIGGER_CHANCE:
+                        event_info = _pick_event_excluding(HOURLY_EVENTS, last_hourly_event_id)
 
                         # Random duration: 40% = 30min, 35% = 45min, 25% = 60min
                         rand = random.random()
@@ -19505,22 +19669,28 @@ async def event_manager_loop():
                             end_time=end_time,
                             effects={"event_id": event_info["id"]}
                         )
+                        last_hourly_event_id = event_info["id"]
+                        # Gap is after the event ENDS, otherwise 30-min events feel back-to-back.
+                        next_hourly_attempt = end_time + HOURLY_EVENT_INTERVAL
                         await _send_start_embed_all_guilds({
                             "event_type": "hourly",
                             "event_id": event_info["id"],
                             "event_name": event_info["name"]
                         }, duration_minutes)
                         print(f"Event manager: started hourly event '{event_info['name']}' for {duration_minutes} minutes")
+                    else:
+                        print("Event manager: hourly check rolled miss (no event started)")
 
             # ── Step 3: Maybe start a new daily event ──
             if now >= next_daily_attempt and not celestial_active:
                 existing_daily = await asyncio.to_thread(get_active_event_by_type, "daily")
-                if not existing_daily:
-                    # Advance the next attempt time regardless of roll outcome
+                if existing_daily:
+                    next_daily_attempt = float(existing_daily.get("end_time", now)) + DAILY_EVENT_INTERVAL
+                else:
+                    await _claim_and_announce_expired("daily")
                     next_daily_attempt = now + DAILY_EVENT_INTERVAL
-                    # 10% chance to trigger
-                    if random.random() < 0.10:
-                        event_info = random.choice(DAILY_EVENTS)
+                    if random.random() < DAILY_EVENT_TRIGGER_CHANCE:
+                        event_info = _pick_event_excluding(DAILY_EVENTS, last_daily_event_id)
                         duration_minutes = 24 * 60
                         duration_seconds = duration_minutes * 60
                         start_time = time.time()
@@ -19535,12 +19705,15 @@ async def event_manager_loop():
                             end_time=end_time,
                             effects={"event_id": event_info["id"]}
                         )
+                        last_daily_event_id = event_info["id"]
                         await _send_start_embed_all_guilds({
                             "event_type": "daily",
                             "event_id": event_info["id"],
                             "event_name": event_info["name"]
                         }, duration_minutes)
                         print(f"Event manager: started daily event '{event_info['name']}' for 24 hours")
+                    else:
+                        print("Event manager: daily check rolled miss (no event started)")
 
             # ── Step 4: Celestial triggers (DST-aware Eastern time) ──
             now_est = _now_est()
@@ -19551,12 +19724,17 @@ async def event_manager_loop():
             if (now_est.hour, now_est.minute) == CELESTIAL_DAY_START_EST and today_est != last_solar_trigger_date:
                 last_solar_trigger_date = today_est
                 if not await asyncio.to_thread(get_active_event_by_type, "solar_eclipse") and random.random() < CELESTIAL_TRIGGER_CHANCE:
-                    # End active hourly and daily first
+                    # End active hourly and daily first (send END before celestial START)
                     for ev_type in ("hourly", "daily"):
                         existing = await asyncio.to_thread(get_active_event_by_type, ev_type)
                         if existing:
                             await asyncio.to_thread(clear_event, existing.get("event_id", ""))
                             await _send_end_embed_all_guilds(existing)
+                            eid = existing.get("effects", {}).get("event_id")
+                            if ev_type == "hourly" and eid:
+                                last_hourly_event_id = eid
+                            elif ev_type == "daily" and eid:
+                                last_daily_event_id = eid
                             print(f"Event manager: ended active {ev_type} event for Solar Eclipse start.")
                     end_est = now_est.replace(hour=CELESTIAL_NIGHT_START_EST[0], minute=CELESTIAL_NIGHT_START_EST[1], second=0, microsecond=0)
                     end_ts = end_est.timestamp()
@@ -19581,12 +19759,17 @@ async def event_manager_loop():
             if (now_est.hour, now_est.minute) == CELESTIAL_NIGHT_START_EST and today_est != last_blood_trigger_date:
                 last_blood_trigger_date = today_est
                 if not await asyncio.to_thread(get_active_event_by_type, "blood_moon") and random.random() < CELESTIAL_TRIGGER_CHANCE:
-                    # End active hourly and daily first
+                    # End active hourly and daily first (send END before celestial START)
                     for ev_type in ("hourly", "daily"):
                         existing = await asyncio.to_thread(get_active_event_by_type, ev_type)
                         if existing:
                             await asyncio.to_thread(clear_event, existing.get("event_id", ""))
                             await _send_end_embed_all_guilds(existing)
+                            eid = existing.get("effects", {}).get("event_id")
+                            if ev_type == "hourly" and eid:
+                                last_hourly_event_id = eid
+                            elif ev_type == "daily" and eid:
+                                last_daily_event_id = eid
                             print(f"Event manager: ended active {ev_type} event for Blood Moon start.")
                     next_day = now_est.date() + datetime.timedelta(days=1)
                     end_est = now_est.replace(year=next_day.year, month=next_day.month, day=next_day.day,
@@ -19615,6 +19798,55 @@ async def event_manager_loop():
             import traceback
             traceback.print_exc()
             await asyncio.sleep(30)
+
+
+def _perform_one_mine(user_id: int, gpu_percent_boost: float) -> dict:
+    """Resolve a single /mine click: pick a coin, credit holdings, return the result."""
+    coin = random.choice(CRYPTO_COINS)
+    symbol = coin["symbol"]
+    base_price = coin["base_price"]
+
+    price_ratio = 200.0 / base_price
+    min_thousandths = int(30 * price_ratio)
+    max_thousandths = int(70 * price_ratio)
+    min_thousandths = max(1, min_thousandths)
+    max_thousandths = max(min_thousandths, max_thousandths)
+    random_thousandths = random.randint(min_thousandths, max_thousandths)
+    base_amount = round(random_thousandths / 10000, 4)
+
+    gpu_boost = float(gpu_percent_boost) if gpu_percent_boost else 0.0
+    percent_multiplier = 1.0 + (gpu_boost / 100.0)
+    amount = round(base_amount * percent_multiplier, 4)
+
+    update_user_crypto_holdings(user_id, symbol, amount)
+
+    crypto_holdings = get_user_crypto_holdings(user_id)
+    has_blockchain = any(coin_amount >= 1.0 for coin_amount in crypto_holdings.values())
+    blockchain_unlocked = False
+    if has_blockchain and unlock_hidden_achievement(user_id, "blockchain"):
+        blockchain_unlocked = True
+
+    prices = get_crypto_prices()
+    coin_price = prices.get(symbol, base_price)
+    mine_value = amount * coin_price
+
+    return {
+        "symbol": symbol,
+        "amount": amount,
+        "mine_value": mine_value,
+        "blockchain_unlocked": blockchain_unlocked,
+    }
+
+
+def _perform_mine_clicks(user_id: int, gpu_percent_boost: float) -> dict:
+    """Apply one button press. Geek Squad membership makes each press count as two clicks."""
+    click_count = 2 if has_shop_item(user_id, "best_buy_geek_squad") else 1
+    mines = [_perform_one_mine(user_id, gpu_percent_boost) for _ in range(click_count)]
+    return {
+        "mines": mines,
+        "click_count": click_count,
+        "blockchain_unlocked": any(m["blockchain_unlocked"] for m in mines),
+    }
 
 
 # Mining View with button
@@ -19813,60 +20045,21 @@ class MiningView(discord.ui.View):
                     return
             
             # Run all DB and price work off the event loop
-            def _mine_critical_path(user_id: int, gpu_percent_boost: float):
-                # Randomly select a coin to mine
-                coin = random.choice(CRYPTO_COINS)
-                symbol = coin["symbol"]
-                base_price = coin["base_price"]
+            result = await asyncio.to_thread(_perform_mine_clicks, interaction.user.id, self.gpu_percent_boost)
 
-                # Calculate mining amount based on coin's base price (proportional to old 200.0 base)
-                price_ratio = 200.0 / base_price
-                min_thousandths = int(30 * price_ratio)
-                max_thousandths = int(70 * price_ratio)
-                min_thousandths = max(1, min_thousandths)
-                max_thousandths = max(min_thousandths, max_thousandths)
-                random_thousandths = random.randint(min_thousandths, max_thousandths)
-                base_amount = round(random_thousandths / 10000, 4)
+            if result["blockchain_unlocked"]:
+                self.blockchain_achievement_unlocked = True
 
-                gpu_boost = float(gpu_percent_boost) if gpu_percent_boost else 0.0
-                percent_multiplier = 1.0 + (gpu_boost / 100.0)
-                amount = round(base_amount * percent_multiplier, 4)
-
-                if has_shop_item(user_id, "best_buy_geek_squad"):
-                    amount *= 2
-
-                update_user_crypto_holdings(user_id, symbol, amount)
-
-                crypto_holdings = get_user_crypto_holdings(user_id)
-                has_blockchain = any(coin_amount >= 1.0 for coin_amount in crypto_holdings.values())
-                blockchain_unlocked = False
-                if has_blockchain and unlock_hidden_achievement(user_id, "blockchain"):
-                    blockchain_unlocked = True
-
-                prices = get_crypto_prices()
-                coin_price = prices.get(symbol, base_price)
-                mine_value = amount * coin_price
-
-                return {
-                    "symbol": symbol,
-                    "amount": amount,
-                    "mine_value": mine_value,
-                    "blockchain_unlocked": blockchain_unlocked,
-                }
-
-            result = await asyncio.to_thread(_mine_critical_path, interaction.user.id, self.gpu_percent_boost)
-
-            symbol = result["symbol"]
-            amount = result["amount"]
-            mine_value = result["mine_value"]
-            self.blockchain_achievement_unlocked = result["blockchain_unlocked"]
-
-            # Update session tracking (in-memory only)
-            self.total_mines += 1
-            if symbol not in self.session_mined:
-                self.session_mined[symbol] = 0.0
-            self.session_mined[symbol] += amount
-            self.session_value += mine_value
+            # Update session tracking (in-memory only). Geek Squad counts as two mines.
+            self.total_mines += result["click_count"]
+            for mine in result["mines"]:
+                symbol = mine["symbol"]
+                amount = mine["amount"]
+                mine_value = mine["mine_value"]
+                if symbol not in self.session_mined:
+                    self.session_mined[symbol] = 0.0
+                self.session_mined[symbol] += amount
+                self.session_value += mine_value
             
             # Check timeout again after processing (in case processing took time)
             # The timer task handles the main timeout, but we check here as a safety measure
@@ -21148,191 +21341,503 @@ def start_http_server():
 
 # ==================== /JUMP COMMAND ====================
 
-def _jump_critical_path(guild_id: int, user_id: int, jumps_today: int, today_est: str, now: float) -> dict:
-    """All DB work for /jump in ONE sync call (runs via to_thread)."""
-    # Increment server-wide counter
-    increment_jump_counter(guild_id)
+def _jump_critical_path(
+    guild_id: int,
+    user_id: int,
+    jumps_today: int,
+    today_est: str,
+    now: float,
+    jump_count: int,
+    breaker_name: str = "",
+) -> dict:
+    """All DB work for /jump in ONE sync call (runs via to_thread).
 
-    # Roll break chance
-    broke = random.randint(1, JUMP_BREAK_DENOMINATOR) <= 1
+    Rolls each requested jump in order. On a break, later jumps in the batch
+    are not consumed. Successful jumps in a batch that then breaks do not
+    grant JUMP MULTI (the shared wipe would remove them anyway).
 
-    # Update daily jump count and increment all-time total
-    set_user_jump_data(user_id, jumps_today + 1, today_est, increment_total=True)
+    User then guild locks serialize overlapping /jump so a wipe cannot be
+    undone by an in-flight success, and daily counts are re-read under the lock.
+    """
+    requested = int(jump_count)
 
-    # Check jumping achievement
-    new_total = get_user_total_jumps(user_id)
-    jumping_lvl = get_achievement_level_for_stat("jumping", new_total)
-    cur_jumping = get_user_achievement_level(user_id, "jumping")
-    jumping_up = None
-    if jumping_lvl > cur_jumping:
-        set_user_achievement_level(user_id, "jumping", jumping_lvl)
-        jumping_up = jumping_lvl
+    def _result(**overrides):
+        base = {
+            "error": None,
+            "broke": False,
+            "broke_on": 0,
+            "used": 0,
+            "requested": requested,
+            "jumping_up": None,
+            "user_total": 0,
+            "branch_breaker_unlocked": False,
+            "debuff_count": 0,
+            "total_debuff_percent": 0.0,
+            "buff_count": 0,
+            "total_buff_percent": 0.0,
+            "repair_until": 0.0,
+            "remaining_today": 0,
+        }
+        base.update(overrides)
+        return base
 
-    branch_breaker_unlocked = False
-    debuff_count = 0
-    total_debuff_percent = 0.0
-    buff_count = 0
-    total_buff_percent = 0.0
-    user_total = new_total
+    with _named_jump_lock(_jump_user_locks, user_id):
+        with _named_jump_lock(_jump_guild_locks, guild_id):
+            state = get_jump_state(guild_id)
+            repair_until = float(state.get("repair_until", 0.0))
+            if repair_until > now:
+                return _result(error="repair", repair_until=repair_until)
 
-    if broke:
-        # Branch broke — apply debuff, lock branch
-        reset_jump_counter(guild_id, repair_until=now + JUMP_REPAIR_SEC)
-        add_dayboost(user_id, "jump_debuff", duration_hours=12.0)
-        debuff_count = get_dayboost_count(user_id, "jump_debuff")
-        total_debuff_percent = JUMP_DEBUFF_PERCENT * debuff_count * 100
-        user_total = get_user_total_jumps(user_id)
-        branch_breaker_unlocked = unlock_hidden_achievement(user_id, "branch_breaker")
-    else:
-        # Successful jump — apply buff
-        add_dayboost(user_id, "jump_multi", duration_hours=1.0)
-        buff_count = get_dayboost_count(user_id, "jump_multi")
-        total_buff_percent = JUMP_MULTI_PERCENT * buff_count * 100
-        user_total = get_user_total_jumps(user_id)
+            jump_data = get_user_jump_data(user_id)
+            used_today = int(jump_data.get("jump_today_count", 0))
+            if str(jump_data.get("jump_today_date", "")) != str(today_est):
+                used_today = 0
+            remaining_today = JUMP_MAX_PER_DAY - used_today
+            if remaining_today <= 0 or requested > remaining_today:
+                return _result(error="over_cap", remaining_today=max(0, remaining_today))
 
+            used = 0
+            broke = False
+            broke_on = 0
+            for _ in range(requested):
+                increment_jump_counter(guild_id)
+                used += 1
+                if random.randint(1, JUMP_BREAK_DENOMINATOR) <= 1:
+                    broke = True
+                    broke_on = used
+                    break
+
+            set_user_jump_data(
+                user_id,
+                used_today + used,
+                today_est,
+                increment_total=True,
+                increment_total_by=used,
+            )
+
+            new_total = get_user_total_jumps(user_id)
+            jumping_lvl = get_achievement_level_for_stat("jumping", new_total)
+            cur_jumping = get_user_achievement_level(user_id, "jumping")
+            jumping_up = None
+            if jumping_lvl > cur_jumping:
+                set_user_achievement_level(user_id, "jumping", jumping_lvl)
+                jumping_up = jumping_lvl
+
+            branch_breaker_unlocked = False
+            debuff_count = 0
+            total_debuff_percent = 0.0
+            buff_count = 0
+            total_buff_percent = 0.0
+            out_repair_until = 0.0
+            user_total = new_total
+            multi_hours = JUMP_MULTI_DURATION_SEC / 3600.0
+            debuff_hours = JUMP_DEBUFF_DURATION_SEC / 3600.0
+
+            if broke:
+                out_repair_until = now + JUMP_REPAIR_SEC
+                reset_jump_counter(
+                    guild_id,
+                    repair_until=out_repair_until,
+                    broken_by=user_id,
+                    broken_by_name=breaker_name,
+                )
+                add_dayboost(user_id, "jump_debuff", duration_hours=debuff_hours)
+                clear_all_jump_multi()
+                debuff_count = get_dayboost_count(user_id, "jump_debuff")
+                total_debuff_percent = JUMP_DEBUFF_PERCENT * debuff_count * 100
+                user_total = get_user_total_jumps(user_id)
+                branch_breaker_unlocked = unlock_hidden_achievement(user_id, "branch_breaker")
+            else:
+                for _ in range(used):
+                    add_dayboost(user_id, "jump_multi", duration_hours=multi_hours)
+                buff_count = get_dayboost_count(user_id, "jump_multi")
+                total_buff_percent = JUMP_MULTI_PERCENT * buff_count * 100
+                user_total = get_user_total_jumps(user_id)
+
+            return _result(
+                broke=broke,
+                broke_on=broke_on,
+                used=used,
+                jumping_up=jumping_up,
+                user_total=user_total,
+                branch_breaker_unlocked=branch_breaker_unlocked,
+                debuff_count=debuff_count,
+                total_debuff_percent=total_debuff_percent,
+                buff_count=buff_count,
+                total_buff_percent=total_buff_percent,
+                repair_until=out_repair_until,
+                remaining_today=JUMP_MAX_PER_DAY - (used_today + used),
+            )
+
+
+def _jump_check_payload(guild_id: int, user_id: int, now: float) -> dict:
+    """Sync DB reads for /jump check (run via to_thread)."""
+    today_est = _get_date_est()
+    jump_state = get_jump_state(guild_id)
+    jump_data = get_user_jump_data(user_id)
+    jumps_today = jump_data["jump_today_count"]
+    if jump_data["jump_today_date"] != today_est:
+        jumps_today = 0
+    multi_expirations = get_dayboost_expirations(user_id, "jump_multi")
+    debuff_expirations = get_dayboost_expirations(user_id, "jump_debuff")
     return {
-        "broke": broke,
-        "jumping_up": jumping_up,
-        "user_total": user_total,
-        "branch_breaker_unlocked": branch_breaker_unlocked,
-        "debuff_count": debuff_count,
-        "total_debuff_percent": total_debuff_percent,
-        "buff_count": buff_count,
-        "total_buff_percent": total_buff_percent,
+        "now": now,
+        "repair_until": float(jump_state.get("repair_until", 0.0)),
+        "broken_by_name": str(jump_state.get("broken_by_name", "")),
+        "jumps_today": jumps_today,
+        "user_total": get_user_total_jumps(user_id),
+        "multi_count": len(multi_expirations),
+        "multi_expirations": multi_expirations,
+        "debuff_count": len(debuff_expirations),
+        "debuff_expirations": debuff_expirations,
     }
 
 
-@bot.tree.command(name="jump", description="Jump off the tree branch into the spring!")
-@app_commands.describe(action="Check the branch status or jump")
-@app_commands.choices(action=[
-    app_commands.Choice(name="Jump", value="jump"),
-    app_commands.Choice(name="Check", value="check"),
-])
-async def jump(interaction: discord.Interaction, action: app_commands.Choice[str] = None):
+def _format_jump_count_line(
+    label: str,
+    percent: float,
+    count: int,
+    expirations: list[float],
+    *,
+    singular: str,
+    plural: str,
+) -> str:
+    """One status line for JUMP MULTI / JUMP DEBUFF on /jump check."""
+    unit = singular if count == 1 else plural
+    sign = "+" if percent >= 0 else ""
+    line = f"{label} **{sign}{percent:.0f}%** ({count} {unit})"
+    if expirations:
+        latest = max(expirations)
+        line += f" — last {singular} expires <t:{int(latest)}:R>"
+    return line
+
+
+def _build_jump_check_embed(
+    *,
+    now: float,
+    repair_until: float,
+    broken_by_name: str,
+    jumps_today: int,
+    user_total: int,
+    multi_count: int,
+    multi_expirations: list[float],
+    debuff_count: int,
+    debuff_expirations: list[float],
+) -> discord.Embed:
+    """Ephemeral /jump check. No odds, no server jump counter."""
+    repairing = repair_until > now
+    daily_line = f"**TODAY'S JUMPS:** {jumps_today}/{JUMP_MAX_PER_DAY}"
+    total_line = f"**JUMP TOTAL:** {user_total}"
+
+    extra_lines: list[str] = []
+    if multi_count > 0:
+        extra_lines.append(
+            _format_jump_count_line(
+                "🌿 **JUMP MULTI:**",
+                JUMP_MULTI_PERCENT * multi_count * 100,
+                multi_count,
+                multi_expirations,
+                singular="multi",
+                plural="multis",
+            )
+        )
+    if debuff_count > 0:
+        debuff_pct = JUMP_DEBUFF_PERCENT * debuff_count * 100
+        debuff_line = f"💀 **JUMP DEBUFF:** **-{debuff_pct:.0f}%**"
+        if debuff_expirations:
+            debuff_line += f" — expires <t:{int(max(debuff_expirations))}:R>"
+        extra_lines.append(debuff_line)
+    extra = ("\n" + "\n".join(extra_lines)) if extra_lines else ""
+
+    if repairing:
+        breaker = broken_by_name.strip() if broken_by_name else "Unknown"
+        description = (
+            "The branch is splintered and under repairs.\n\n"
+            f"**Broke by:** {breaker}\n"
+            f"**Ready:** <t:{int(repair_until)}:R>\n"
+            "🌿 All JUMP MULTIs were **WIPED** when it snapped.\n\n"
+            f"{daily_line} — unused jumps are still yours after repairs\n"
+            f"{total_line}"
+            f"{extra}"
+        )
+        return discord.Embed(
+            title="💀 **BRANCH SHATTERED**",
+            description=description,
+            color=discord.Color.dark_blue(),
+        )
+
+    description = (
+        "The branch looks sturdy.\n\n"
+        f"{daily_line}\n"
+        f"{total_line}"
+        f"{extra}"
+    )
+    return discord.Embed(
+        title="🌿 **BRANCH STATUS**",
+        description=description,
+        color=discord.Color.dark_blue(),
+    )
+
+
+def _build_jump_success_embed(
+    *,
+    display_name: str,
+    jump_count: int,
+    total_buff_percent: float,
+    buff_count: int,
+    jumps_left: int,
+    user_total: int,
+) -> discord.Embed:
+    if jump_count == 1:
+        lead = f"**{display_name}** jumped off the branch & landed safely in the spring!"
+    else:
+        lead = (
+            f"**{display_name}** jumped **{jump_count}** times off the branch "
+            f"& landed safely in the spring!"
+        )
+    embed = discord.Embed(
+        title="🌿 **JUMP!**",
+        description=(
+            f"{lead}\n\n"
+            f"🌿 **JUMP MULTI**: **+{total_buff_percent:.0f}%** ({buff_count} {'multi' if buff_count == 1 else 'multis'})\n"
+            f"JUMPS REMAINING: **{jumps_left}**"
+        ),
+        color=discord.Color.dark_blue(),
+    )
+    embed.set_footer(text=f"JUMP TOTAL: {user_total}")
+    return embed
+
+
+def _build_jump_break_embed(
+    *,
+    display_name: str,
+    requested: int,
+    used: int,
+    broke_on: int,
+    total_debuff_percent: float,
+    debuff_count: int,
+    repair_until: float,
+    user_total: int,
+) -> discord.Embed:
+    unused = max(0, requested - used)
+    if requested <= 1:
+        lead = f"**{display_name}** jumped & the branch **SNAPPED**!"
+    else:
+        used_word = "time" if used == 1 else "times"
+        lead = (
+            f"**{display_name}** jumped **{used}** {used_word} — "
+            f"the branch **SNAPPED** on jump **{broke_on}** of **{requested}**!"
+        )
+    unused_line = ""
+    if unused > 0:
+        unused_word = "jump" if unused == 1 else "jumps"
+        unused_verb = "was" if unused == 1 else "were"
+        still = "is" if unused == 1 else "are"
+        unused_line = (
+            f"\n⏳ **{unused}** {unused_word} from this attempt **{unused_verb} not used** "
+            f"and {still} still yours after repairs."
+        )
+    embed = discord.Embed(
+        title="💀 **THE BRANCH BROKE!**",
+        description=(
+            f"{lead}\n\n"
+            f"💀 **JUMP DEBUFF**: **-{total_debuff_percent:.0f}%**\n"
+            f"🌿 All **JUMP MULTIs** have been **WIPED** from everyone.\n"
+            f"🔧 The branch is **UNDER REPAIRS** until <t:{int(repair_until)}:R>."
+            f"{unused_line}"
+        ),
+        color=discord.Color.dark_blue(),
+    )
+    embed.set_footer(text=f"JUMP TOTAL: {user_total}")
+    return embed
+
+
+
+def _jump_repair_blocked_message(mention: str) -> str:
+    """Ephemeral copy when someone tries to jump during repairs. No timestamp."""
+    return (
+        f"🔧 The branch is under repairs, {mention}! You can't jump! "
+        f"(Use `/jumpcheck` to see the branch's status!)"
+    )
+
+
+async def _jump_publish_result(interaction: discord.Interaction, embed: discord.Embed) -> None:
+    """Send a public jump result in #spring, then drop the ephemeral thinking ack."""
+    try:
+        if interaction.channel is not None:
+            await interaction.channel.send(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
+            return
+    except Exception as e:
+        print(f"Error posting /jump result: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+        return
+    try:
+        await interaction.delete_original_response()
+    except Exception:
+        pass
+
+
+@bot.tree.command(name="jumpcheck", description="Check the tree branch status and your jumps.")
+async def jumpcheck(interaction: discord.Interaction):
     user_id = interaction.user.id
     guild = interaction.guild
     if not guild:
         await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
         return
 
-    action_val = action.value if action else "jump"
-
-    # Only allowed in #spring
     if not isinstance(interaction.channel, discord.TextChannel) or interaction.channel.name != "spring":
-        await interaction.response.send_message("❌ You can only use `/jump` in the **#spring** channel!", ephemeral=True)
-        return
-
-    # Check if branch is under repairs (persisted in DB)
-    now = time.time()
-    jump_state = get_jump_state(guild.id)
-    repair_until = jump_state["repair_until"]
-    if now < repair_until:
-        remaining_min = int((repair_until - now) / 60) + 1
         await interaction.response.send_message(
-            f"🔧 The tree to jump off is under repairs.. Come back in **{remaining_min} minute{'s' if remaining_min != 1 else ''}**.",
+            "❌ You can only use `/jumpcheck` in the **#spring** channel!",
             ephemeral=True,
         )
         return
 
-    # /jump check — show your total jumps and branch status
-    if action_val == "check":
-        user_total = get_user_total_jumps(user_id)
-        server_counter = jump_state["jump_counter"]
-        embed = discord.Embed(
-            title="🌿 **BRANCH STATUS**",
-            description=(
-                f"The branch is intact and ready!\n\n"
-                f"Jumps since last break: **{server_counter}**\n"
-                f"Your total jumps: **{user_total}**"
-            ),
-            color=discord.Color.dark_blue(),
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    if not await safe_defer(interaction, ephemeral=True):
         return
 
-    # --- /jump (actual jump) ---
+    now = time.time()
+    payload = await asyncio.to_thread(_jump_check_payload, guild.id, user_id, now)
+    embed = _build_jump_check_embed(**payload)
+    await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
 
-    # 10-second cooldown
-    last_jump = _jump_cooldowns.get(user_id, 0)
-    if now - last_jump < JUMP_COOLDOWN_SEC:
-        remaining = JUMP_COOLDOWN_SEC - (now - last_jump)
-        await interaction.response.send_message(
-            f"❌ You need to wait **{remaining:.1f}s** before jumping again!", ephemeral=True
+
+@bot.tree.command(name="jump", description="Jump off the tree branch into the spring!")
+@app_commands.describe(jumps="How many times to jump at once (1-5)")
+async def jump(
+    interaction: discord.Interaction,
+    jumps: app_commands.Range[int, 1, 5] = 1,
+):
+    user_id = interaction.user.id
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+        return
+
+    if not isinstance(interaction.channel, discord.TextChannel) or interaction.channel.name != "spring":
+        await interaction.response.send_message("❌ You can only use `/jump` in the **#spring** channel!", ephemeral=True)
+        return
+
+    # Always ack as ephemeral so error replies stay private. Successful jumps
+    # are posted to the channel with _jump_publish_result.
+    if not await safe_defer(interaction, ephemeral=True):
+        return
+
+    now = time.time()
+    jump_state = await asyncio.to_thread(get_jump_state, guild.id)
+    repair_until = float(jump_state.get("repair_until", 0.0))
+    if now < repair_until:
+        await interaction.followup.send(
+            _jump_repair_blocked_message(interaction.user.mention),
+            ephemeral=True,
         )
         return
 
-    # Daily limit (resets at midnight EST, same as water streak)
+    cooldown_remaining = None
+    with _named_jump_lock(_jump_user_locks, user_id):
+        last_jump = _jump_cooldowns.get(user_id, 0)
+        if now - last_jump < JUMP_COOLDOWN_SEC:
+            cooldown_remaining = JUMP_COOLDOWN_SEC - (now - last_jump)
+        else:
+            _jump_cooldowns[user_id] = now
+    if cooldown_remaining is not None:
+        await interaction.followup.send(
+            f"❌ You need to wait **{cooldown_remaining:.1f}s** before jumping again!", ephemeral=True
+        )
+        return
+
     today_est = _get_date_est()
     jump_data = get_user_jump_data(user_id)
     jumps_today = jump_data["jump_today_count"]
     jump_date = jump_data["jump_today_date"]
-
-    # Reset if it's a new day
     if jump_date != today_est:
         jumps_today = 0
 
     if jumps_today >= JUMP_MAX_PER_DAY:
-        await interaction.response.send_message(
-            f"❌ You've already jumped **{JUMP_MAX_PER_DAY}** times today! Resets at midnight EST.", ephemeral=True
+        await interaction.followup.send(
+            f"❌ You've already jumped **{JUMP_MAX_PER_DAY}** times today! Resets at midnight EST.",
+            ephemeral=True,
         )
         return
 
-    # Defer since we're doing DB work
-    await interaction.response.defer()
+    remaining_today = JUMP_MAX_PER_DAY - jumps_today
+    if jumps > remaining_today:
+        await interaction.followup.send(
+            f"❌ You only have **{remaining_today}** jump"
+            f"{'s' if remaining_today != 1 else ''} left today. "
+            f"Pick **1–{remaining_today}**, or wait until midnight EST.",
+            ephemeral=True,
+        )
+        return
 
-    # Update cooldown
-    _jump_cooldowns[user_id] = now
+    result = await asyncio.to_thread(
+        _jump_critical_path,
+        guild.id,
+        user_id,
+        jumps_today,
+        today_est,
+        now,
+        int(jumps),
+        interaction.user.display_name,
+    )
 
-    # Run all DB work in a single thread call
-    result = await asyncio.to_thread(_jump_critical_path, guild.id, user_id, jumps_today, today_est, now)
+    if result.get("error") == "repair":
+        await interaction.followup.send(
+            _jump_repair_blocked_message(interaction.user.mention),
+            ephemeral=True,
+        )
+        return
+    if result.get("error") == "over_cap":
+        left = int(result.get("remaining_today", 0))
+        if left <= 0:
+            await interaction.followup.send(
+                f"❌ You've already jumped **{JUMP_MAX_PER_DAY}** times today! Resets at midnight EST.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"❌ You only have **{left}** jump{'s' if left != 1 else ''} left today. "
+                f"Pick **1–{left}**, or wait until midnight EST.",
+                ephemeral=True,
+            )
+        return
 
-    broke = result["broke"]
     jumping_up = result["jumping_up"]
     user_total = result["user_total"]
 
-    if broke:
-        total_debuff_percent = result["total_debuff_percent"]
-        debuff_count = result["debuff_count"]
-
-        # Personal embed (in #spring via followup)
-        debuff_embed = discord.Embed(
-            title="💀 **THE BRANCH BROKE!**",
-            description=(
-                f"**{interaction.user.display_name}** jumped & the branch **SNAPPED**!\n\n"
-                f"💀 **JUMP DEBUFF**: **-{total_debuff_percent:.0f}%** ({debuff_count} active)\n"
-                f"🔧 The branch is now **UNDER REPAIRS** for **1 HOUR**."
-            ),
-            color=discord.Color.dark_blue(),
+    if result["broke"]:
+        break_embed = _build_jump_break_embed(
+            display_name=interaction.user.display_name,
+            requested=result["requested"],
+            used=result["used"],
+            broke_on=result["broke_on"],
+            total_debuff_percent=result["total_debuff_percent"],
+            debuff_count=result["debuff_count"],
+            repair_until=result["repair_until"],
+            user_total=user_total,
         )
-        debuff_embed.set_footer(text=f"Your total jumps: {user_total}")
-
-        await interaction.followup.send(embed=debuff_embed)
-
-        # Announcement in #rares
-        await _post_to_rares_channel(guild, f"💀 {interaction.user.mention} **BROKE** the **BRANCH**! | **[SPRING]**")
-
-        # Hidden achievement: break the branch for the first time
+        await _jump_publish_result(interaction, break_embed)
+        await _post_to_rares_channel(
+            guild,
+            f"🪵 {interaction.user.mention} **BROKE** the **BRANCH**! "
+            f"**JUMP MULTIPLIERS RESET**! | **[SPRING]**",
+        )
         if result["branch_breaker_unlocked"]:
             await send_hidden_achievement_notification(interaction, "branch_breaker")
         if jumping_up:
             await send_achievement_notification(interaction, "jumping", jumping_up)
     else:
-        total_buff_percent = result["total_buff_percent"]
-        buff_count = result["buff_count"]
-        jumps_left = JUMP_MAX_PER_DAY - (jumps_today + 1)
-
-        success_embed = discord.Embed(
-            title="🌿 **JUMP!**",
-            description=(
-                f"**{interaction.user.display_name}** jumped off the branch & landed safely in the spring!\n\n"
-                f"🌿 **JUMP MULTI**: **+{total_buff_percent:.0f}%** ({buff_count} active)\n"
-                f"JUMPS REMAINING: **{jumps_left}**"
-            ),
-            color=discord.Color.dark_blue(),
+        jumps_left = result.get("remaining_today", JUMP_MAX_PER_DAY - (jumps_today + result["used"]))
+        success_embed = _build_jump_success_embed(
+            display_name=interaction.user.display_name,
+            jump_count=result["used"],
+            total_buff_percent=result["total_buff_percent"],
+            buff_count=result["buff_count"],
+            jumps_left=jumps_left,
+            user_total=user_total,
         )
-        success_embed.set_footer(text=f"Your total jumps: {user_total}")
-
-        await interaction.followup.send(embed=success_embed)
+        await _jump_publish_result(interaction, success_embed)
         if jumping_up:
             await send_achievement_notification(interaction, "jumping", jumping_up)
 

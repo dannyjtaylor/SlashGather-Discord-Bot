@@ -2250,45 +2250,59 @@ def add_dayboost(user_id: int, boost_type: str, duration_hours: float = 24.0) ->
                 except (ValueError, TypeError):
                     continue
     
-    # Add the new boost
+    # Add the new boost. Set only this key so a concurrent JUMP MULTI wipe
+    # cannot be undone by rewriting the whole dayboosts object.
     active_boosts.append(str(expiration_time))
-    dayboosts[boost_type] = active_boosts
-    
     users.update_one(
         {"_id": int(user_id)},
-        {"$set": {"dayboosts": dayboosts}},
+        {"$set": {f"dayboosts.{boost_type}": active_boosts}},
         upsert=True,
     )
 
 
-def get_dayboost_count(user_id: int, boost_type: str) -> int:
-    """Get the count of active dayboosts for a user. boost_type should be 'jump_multi' or 'jump_debuff'."""
+def get_dayboost_expirations(user_id: int, boost_type: str) -> list[float]:
+    """Return active expiration timestamps (unix seconds, soonest first) for a dayboost type."""
     import time
     users = _get_users_collection()
     _ensure_user_document(user_id)
     doc = users.find_one({"_id": int(user_id)}, {"dayboosts": 1})
     if not doc:
-        return 0
-    
+        return []
+
     dayboosts = doc.get("dayboosts", {})
     if boost_type not in dayboosts:
-        return 0
-    
+        return []
+
     boost_list = dayboosts[boost_type]
     if not isinstance(boost_list, list):
-        return 0
-    
+        return []
+
     current_time = time.time()
-    active_count = 0
+    expirations: list[float] = []
     for exp_time_str in boost_list:
         try:
             exp_time = float(exp_time_str)
             if exp_time > current_time:
-                active_count += 1
+                expirations.append(exp_time)
         except (ValueError, TypeError):
             continue
-    
-    return active_count
+    expirations.sort()
+    return expirations
+
+
+def get_dayboost_count(user_id: int, boost_type: str) -> int:
+    """Get the count of active dayboosts for a user. boost_type should be 'jump_multi' or 'jump_debuff'."""
+    return len(get_dayboost_expirations(user_id, boost_type))
+
+
+def clear_all_jump_multi() -> int:
+    """Remove JUMP MULTI stacks from every user. Does not touch JUMP DEBUFF. Returns modified count."""
+    users = _get_users_collection()
+    result = users.update_many(
+        {"dayboosts.jump_multi": {"$exists": True}},
+        {"$unset": {"dayboosts.jump_multi": ""}},
+    )
+    return int(result.modified_count)
 
 
 def get_all_dayboosts(user_id: int) -> dict[str, int]:
@@ -2313,14 +2327,16 @@ def _get_jump_state_collection() -> Collection:
 
 
 def get_jump_state(guild_id: int) -> dict:
-    """Get the jump state for a guild (counter + repair timestamp)."""
+    """Get the jump state for a guild (counter, repair timestamp, last breaker)."""
     col = _get_jump_state_collection()
     doc = col.find_one({"_id": int(guild_id)})
     if not doc:
-        return {"jump_counter": 0, "repair_until": 0.0}
+        return {"jump_counter": 0, "repair_until": 0.0, "broken_by": 0, "broken_by_name": ""}
     return {
         "jump_counter": int(doc.get("jump_counter", 0)),
         "repair_until": float(doc.get("repair_until", 0.0)),
+        "broken_by": int(doc.get("broken_by", 0)),
+        "broken_by_name": str(doc.get("broken_by_name", "")),
     }
 
 
@@ -2336,12 +2352,25 @@ def increment_jump_counter(guild_id: int) -> int:
     return int(result.get("jump_counter", 1))
 
 
-def reset_jump_counter(guild_id: int, repair_until: float = 0.0) -> None:
-    """Reset the global jump counter and set repair timestamp."""
+def reset_jump_counter(
+    guild_id: int,
+    repair_until: float = 0.0,
+    *,
+    broken_by: int = 0,
+    broken_by_name: str = "",
+) -> None:
+    """Reset the global jump counter and set repair timestamp plus last breaker."""
     col = _get_jump_state_collection()
     col.update_one(
         {"_id": int(guild_id)},
-        {"$set": {"jump_counter": 0, "repair_until": repair_until}},
+        {
+            "$set": {
+                "jump_counter": 0,
+                "repair_until": repair_until,
+                "broken_by": int(broken_by),
+                "broken_by_name": str(broken_by_name),
+            }
+        },
         upsert=True,
     )
 
@@ -2360,12 +2389,19 @@ def get_user_jump_data(user_id: int) -> dict:
     }
 
 
-def set_user_jump_data(user_id: int, count: int, date_str: str, *, increment_total: bool = False) -> None:
-    """Set a user's daily jump count and date. If increment_total, also bump total_jumps by 1."""
+def set_user_jump_data(
+    user_id: int,
+    count: int,
+    date_str: str,
+    *,
+    increment_total: bool = False,
+    increment_total_by: int = 1,
+) -> None:
+    """Set a user's daily jump count and date. If increment_total, bump total_jumps by increment_total_by."""
     users = _get_users_collection()
     update: dict = {"$set": {"jump_today_count": int(count), "jump_today_date": str(date_str)}}
     if increment_total:
-        update["$inc"] = {"total_jumps": 1}
+        update["$inc"] = {"total_jumps": int(increment_total_by)}
     users.update_one({"_id": int(user_id)}, update, upsert=True)
 
 
