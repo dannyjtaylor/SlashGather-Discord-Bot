@@ -498,7 +498,7 @@ def battlepass_reward_announce(reward: dict) -> str:
         return f"${int(round(float(reward.get('amount', 0)))):,}"
     if rtype == "seed_pod":
         n = int(reward.get("amount", 1) or 1)
-        return "🫛 SEED POD" if n == 1 else f"🫛x{n} SEED PODs"
+        return "🫛 PEA POD" if n == 1 else f"🫛x{n} PEA PODs"
     if rtype == "tree_rings":
         n = int(reward.get("amount", 0) or 0)
         return f"{TREE_RING_EMOJI}x{n}"

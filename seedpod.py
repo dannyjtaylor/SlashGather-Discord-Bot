@@ -1,4 +1,4 @@
-"""SEED POD gacha: rare imbues, shop items, Tree Rings, and Auto-Bloom."""
+"""PEA POD gacha: rare imbues, shop items, Tree Rings, and Auto-Bloom."""
 
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ def guaranteed_imbue_rarity(equipped: dict | None) -> str | None:
 
 
 def seedpod_fallback_prize() -> dict:
-    """Always-valid consolation so a SEED POD never refuses to open."""
+    """Always-valid consolation so a PEA POD never refuses to open."""
     rarity = seedpod_rarity_for_shop_cost(250)
     return {
         "kind": "shop",
@@ -105,7 +105,7 @@ def seedpod_opened_title(prize: dict, rarity_emoji: dict[str, str] | None = None
     rarity = seedpod_prize_rarity(prize)
     emoji = (rarity_emoji or {}).get(rarity, "")
     extra = f" {emoji}" if emoji else ""
-    return f"🫛 SEED POD OPENED: {rarity}!{extra}"
+    return f"🫛 PEA POD OPENED: {rarity}!{extra}"
 
 
 def seedpod_normalized_loot_weights(rarity_weights: dict[str, float] | None = None) -> dict[str, float]:

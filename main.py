@@ -381,7 +381,7 @@ _invite_cache = {}
 # Per-user locks to prevent concurrent /imbue operations for the same user
 _imbue_locks: dict[int, asyncio.Lock] = {}
 
-# Per-user locks so /seedpod cannot be opened twice at once
+# Per-user locks so /peapod cannot be opened twice at once
 _seedpod_locks: dict[int, asyncio.Lock] = {}
 
 # Per-user locks so only one of gather/harvest post-response sends a rank-up embed for the same user
@@ -8454,7 +8454,7 @@ IMBUE_RARES_RARITIES = {"NETHERITE", "LUMINITE", "CELESTIAL", "SECRET"}
 
 
 def _seedpod_rares_line(msg: str) -> str:
-    """Append the seed pod emoji so #rares can tell a pod drop from a normal roll."""
+    """Append the pea pod emoji so #rares can tell a pod drop from a normal roll."""
     return f"{msg} 🫛"
 
 
@@ -13844,7 +13844,7 @@ def get_daily_shop_offerings(date_est: str, user_id: int = None) -> list:
     """
     Return item ids for the given EST date (YYYY-MM-DD).
     For a user: lock the first unowned slate of the day so a later grant
-    (seed pod, admin give) does not reshuffle today's shop.
+    (pea pod, admin give) does not reshuffle today's shop.
     Without user: up to 3 items.
     """
     seed = f"{date_est}_{user_id}" if user_id is not None else date_est
@@ -14581,7 +14581,7 @@ async def battlepass(interaction: discord.Interaction):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
-SEEDPOD_EMPTY_MESSAGE = "❌ You don't have a SEED POD. Earn them in the BP, then use /seedpod!"
+SEEDPOD_EMPTY_MESSAGE = "❌ You don't have a PEA POD. Earn them in the BP, then use /peapod!"
 SEEDPOD_TREE_RING_EMOJI = "<:TreeRing:1474244868288282817>"
 SEEDPOD_SPIN_DELAYS = (0.16, 0.16, 0.20, 0.26, 0.34, 0.45, 0.58, 0.75)
 SEEDPOD_SPIN_FLAVOR = (
@@ -14631,11 +14631,11 @@ def _seedpod_prize_headline(prize: dict) -> tuple[str, int]:
 def _seedpod_spin_embed(user_name: str, prize: dict, flavor: str) -> discord.Embed:
     headline, color = _seedpod_prize_headline(prize)
     embed = discord.Embed(
-        title="🫛 SEED POD",
+        title="🫛 PEA POD",
         description=f"{flavor}\n\n>>> {headline}",
         color=discord.Color(color),
     )
-    embed.set_footer(text=f"{user_name} is cracking a SEED POD...")
+    embed.set_footer(text=f"{user_name} is cracking a PEA POD...")
     return embed
 
 
@@ -14706,7 +14706,7 @@ def _seedpod_result_embed(
             embed.add_field(name="Item", value=f'*"{desc}"*', inline=False)
         if effect:
             embed.add_field(name="Effect", value=effect, inline=False)
-    embed.set_footer(text=f"SEED PODs remaining: {remaining}")
+    embed.set_footer(text=f"PEA PODs remaining: {remaining}")
     return embed
 
 
@@ -14806,7 +14806,7 @@ class SeedpodEquipView(discord.ui.View):
             return True
         await safe_interaction_response(
             interaction, interaction.followup.send,
-            "❌ This isn't your seed pod!",
+            "❌ This isn't your pea pod!",
             ephemeral=True,
         )
         return False
@@ -14832,7 +14832,7 @@ class SeedpodEquipView(discord.ui.View):
             color=self._prize_color(),
         )
         confirm.add_field(name="Imbuement", value=format_enchant_block(enchant, tool), inline=False)
-        confirm.set_footer(text=f"SEED PODs remaining: {self.remaining}")
+        confirm.set_footer(text=f"PEA PODs remaining: {self.remaining}")
         return confirm
 
     async def _apply_new_imbue(self, interaction: discord.Interaction | None = None):
@@ -14916,7 +14916,7 @@ class SeedpodEquipView(discord.ui.View):
             )
         else:
             keep.add_field(name="Current Imbuement", value="**NONE**", inline=False)
-        keep.set_footer(text=f"SEED PODs remaining: {self.remaining}")
+        keep.set_footer(text=f"PEA PODs remaining: {self.remaining}")
         await self._edit_result(interaction, keep)
         self.stop()
 
@@ -14957,7 +14957,7 @@ class SeedpodAutoBloomView(discord.ui.View):
         if interaction.user.id != self.user_id:
             await safe_interaction_response(
                 interaction, interaction.followup.send,
-                "❌ This isn't your seed pod!",
+                "❌ This isn't your pea pod!",
                 ephemeral=True,
             )
             return
@@ -15041,7 +15041,7 @@ class SeedpodAutoBloomView(discord.ui.View):
             value="Money, upgrades, gardeners, and unlocked areas have been reset.",
             inline=False,
         )
-        success.set_footer(text=f"SEED PODs remaining: {self.remaining}")
+        success.set_footer(text=f"PEA PODs remaining: {self.remaining}")
         self._disable()
         try:
             await interaction.followup.edit_message(interaction.message.id, embed=success, view=self)
@@ -15050,7 +15050,7 @@ class SeedpodAutoBloomView(discord.ui.View):
         asyncio.create_task(_post_to_rares_channel(
             guild,
             _seedpod_rares_line(
-                f"🌸 {interaction.user.mention} Auto-Bloomed from a SEED POD: **{old_rank}** → **{new_rank}**!"
+                f"🌸 {interaction.user.mention} Auto-Bloomed from a PEA POD: **{old_rank}** → **{new_rank}**!"
             ),
         ))
         try:
@@ -15077,14 +15077,14 @@ class SeedpodAutoBloomView(discord.ui.View):
                     description=f"{self.user_name}'s Auto-Bloom expired. Bloom Rank unchanged.",
                     color=discord.Color.light_grey(),
                 )
-                expire.set_footer(text=f"SEED PODs remaining: {self.remaining}")
+                expire.set_footer(text=f"PEA PODs remaining: {self.remaining}")
                 await self.message.edit(embed=expire, view=self)
             except Exception:
                 pass
         self.stop()
 
 
-@bot.tree.command(name="seedpod", description="Crack open a SEED POD from the Battle Pass")
+@bot.tree.command(name="peapod", description="Crack open a PEA POD from the Battle Pass")
 async def seedpod_command(interaction: discord.Interaction):
     try:
         if not await safe_defer(interaction, ephemeral=False):
@@ -15163,12 +15163,12 @@ async def seedpod_command(interaction: discord.Interaction):
                 view.message = msg
             if prize.get("item_id") == "nether_star" and interaction.guild:
                 rares_msg = _seedpod_rares_line(
-                    f"{NETHER_STAR_EMOJI} {interaction.user.mention} sprouted a **Nether Star** from a SEED POD!"
+                    f"{NETHER_STAR_EMOJI} {interaction.user.mention} sprouted a **Nether Star** from a PEA POD!"
                 )
                 asyncio.create_task(_post_to_rares_channel(interaction.guild, rares_msg))
             elif prize.get("item_id") == "black_shard" and interaction.guild:
                 rares_msg = _seedpod_rares_line(
-                    f"{BLACK_SHARD_EMOJI} {interaction.user.mention} sprouted a **Black Shard** from a SEED POD!"
+                    f"{BLACK_SHARD_EMOJI} {interaction.user.mention} sprouted a **Black Shard** from a PEA POD!"
                 )
                 asyncio.create_task(_post_to_rares_channel(interaction.guild, rares_msg))
             if result.get("unlocked_fully_stocked"):
@@ -17999,7 +17999,7 @@ async def wipe(interaction: discord.Interaction, password: str, type: str):
                 description=f"Reset everything for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank and **PINE I** Bloom rank.\n\n**Market has been reset** - all shares returned, making all stocks available at max capacity.",
                 color=discord.Color.red()
             )
-            embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Stock holdings (shares)\n• Crypto holdings (portfolio)\n• Collected items\n• Gather stats\n• Ripeness stats\n• Tree Rings\n• Rank (set to PLANTER I)\n• Bloom rank (set to PINE I)\n• All achievements and achievement stats\n• All cooldowns\n• Daily shop inventory and purchase count\n• Battle Pass EXP and LV\n• Unopened SEED PODs", inline=False)
+            embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Stock holdings (shares)\n• Crypto holdings (portfolio)\n• Collected items\n• Gather stats\n• Ripeness stats\n• Tree Rings\n• Rank (set to PLANTER I)\n• Bloom rank (set to PINE I)\n• All achievements and achievement stats\n• All cooldowns\n• Daily shop inventory and purchase count\n• Battle Pass EXP and LV\n• Unopened PEA PODs", inline=False)
 
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
         print(f"Admin {interaction.user.name} wiped {type} data for {wiped_count} users")
@@ -18235,7 +18235,7 @@ async def newseason(interaction: discord.Interaction, password: str, confirm: st
             "• Bloom rank, planter rank, unlocked areas",
             "• Stocks (holdings + prices), crypto, jackpot, jump",
             "• Daily shop, dayboosts",
-            "• Battle Pass EXP / LV and unopened SEED PODs",
+            "• Battle Pass EXP / LV and unopened PEA PODs",
         ]
         kept_lines = [
             "• Invite join counts and claimed invite rewards (re-applied silently)",
