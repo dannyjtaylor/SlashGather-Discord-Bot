@@ -1,8 +1,9 @@
 import os
+import random
 import time
 from typing import Dict, Optional, Union
 
-from pymongo import MongoClient
+from pymongo import MongoClient, ReturnDocument
 from pymongo.collection import Collection
 from pymongo.errors import ConfigurationError
 from pymongo.server_api import ServerApi
@@ -181,7 +182,8 @@ def _ensure_user_document(user_id: int) -> None:
                 "no_honor": False,
             },
             "areas_unlocked": 0,
-            "slots": 0
+            "slots": 0,
+            "jumping": 0,
         },
         "coinflip_count": 0,
         "coinflip_win_streak": 0,
@@ -208,15 +210,587 @@ def _ensure_user_document(user_id: int) -> None:
         "shop_inventory": {},
         "daily_shop_purchases_count": 0,
         "daily_shop_last_date_est": "",
+        "daily_shop_slate": None,
+        "daily_shop_slate_date": "",
         "gathers_stolen": 0,
         "harvests_stolen": 0,
         "critical_gathers_count": 0,
+        "battlepass_exp": 0,
+        "battlepass_lv": 0,
+        "seed_pods": 0,
+        "the_world_used_date_est": "",
     }
     users.update_one(
         {"_id": int(user_id)},
         {"$setOnInsert": default_doc},
         upsert=True,
     )
+
+
+BATTLEPASS_MAX_LV = 30
+BATTLEPASS_EXP_GATHER = 8
+BATTLEPASS_EXP_HARVEST = 50
+BATTLEPASS_EXP_WATER = 80
+BATTLEPASS_EXP_MINE = 40
+BATTLEPASS_EXP_MINE_EXTRA_CLICK = 2
+BATTLEPASS_EXP_SELL = 20
+BATTLEPASS_EXP_STEAL = 35
+BATTLEPASS_EXP_ANIMAL = 80
+BATTLEPASS_EXP_BOSS = 250
+BATTLEPASS_EXP_COINFLIP = 35
+BATTLEPASS_EXP_SLOTS = 12
+BATTLEPASS_EXP_RUSSIAN_WIN = 75
+BATTLEPASS_EXP_RUSSIAN_CASHOUT = 45
+BATTLEPASS_EXP_GATHEMON = 100
+BATTLEPASS_EXP_GATHERSHIP = 100
+BATTLEPASS_EXP_JUMP = 20
+BATTLEPASS_COINFLIP_STREAK_MULT = 1.3
+BATTLEPASS_COINFLIP_STREAK_CAP = 10
+BATTLEPASS_WATER_STREAK_RATE = 0.04
+BATTLEPASS_WATER_STREAK_CAP = 5.0
+BATTLEPASS_BET_FRACTION = 0.20
+
+_BATTLEPASS_RARITY_MULT = {
+    "budding": 1.0,
+    "raw": 1.0,
+    "spoiled": 1.0,
+    "sproutling": 1.0,
+    "budded": 1.0,
+    "wilted": 1.0,
+    "normal": 1.0,
+    "flowering": 1.05,
+    "slightly ripe": 1.05,
+    "overripe": 1.05,
+    "blooming": 1.05,
+    "perfectly ripe": 1.10,
+    "full bloom": 1.10,
+    "legendary": 1.20,
+    "netherite": 1.30,
+    "luminite": 1.45,
+    "celestial": 1.60,
+    "mikellion": 2.00,
+    "jackpot": 2.00,
+}
+
+
+def battlepass_tier_cost(n: int) -> int:
+    """EXP required to reach LV n (go from LV n-1 to LV n).
+
+    Early LVs stay cheap; later LVs ramp harder via 2n^2. Reaching LV30 completes the pass.
+    """
+    n = int(n)
+    return 100 + 15 * n + 2 * n * n
+
+
+def _battlepass_build_cumulative() -> list[int]:
+    totals = [0]
+    running = 0
+    for n in range(1, BATTLEPASS_MAX_LV + 1):
+        running += battlepass_tier_cost(n)
+        totals.append(running)
+    return totals
+
+
+BATTLEPASS_CUMULATIVE = _battlepass_build_cumulative()
+
+
+def battlepass_cumulative_for_lv(lv: int) -> int:
+    lv = max(0, min(int(lv), BATTLEPASS_MAX_LV))
+    return BATTLEPASS_CUMULATIVE[lv]
+
+
+def battlepass_lv_from_exp(exp: int) -> int:
+    """Players start at LV 0. Reaching cumulative EXP for LV n grants that LV, capped at 30."""
+    exp = max(0, int(exp))
+    lv = 0
+    for n in range(1, BATTLEPASS_MAX_LV + 1):
+        if exp >= BATTLEPASS_CUMULATIVE[n]:
+            lv = n
+        else:
+            break
+    return lv
+
+
+def battlepass_apply_exp_rng(amount: int, *, extra: bool = False) -> int:
+    """Jitter an EXP award. Regular sources roll -2 to +4; extra event EXP is +1 to +4 only."""
+    amount = int(amount)
+    if amount <= 0:
+        return 0
+    if extra:
+        delta = random.randint(1, 4)
+    else:
+        delta = random.randint(-2, 4)
+    return max(1, amount + delta)
+
+
+def _battlepass_reached_levels(old_lv: int, new_lv: int) -> list[int]:
+    """Levels whose rewards unlock: you earn LV n's reward when you reach LV n."""
+    old_lv = max(0, int(old_lv))
+    new_lv = max(0, min(int(new_lv), BATTLEPASS_MAX_LV))
+    if new_lv <= old_lv:
+        return []
+    return list(range(old_lv + 1, new_lv + 1))
+
+
+def battlepass_rarity_mult(ripeness: str) -> float:
+    return _BATTLEPASS_RARITY_MULT.get((ripeness or "").strip().lower(), 1.0)
+
+
+def battlepass_gather_exp(*, ripeness: str, is_crit: bool) -> int:
+    amount = BATTLEPASS_EXP_GATHER * battlepass_rarity_mult(ripeness)
+    if is_crit:
+        amount *= 2
+    return int(round(amount))
+
+
+def battlepass_harvest_exp(ripeness_names: list[str]) -> int:
+    best = 1.0
+    for name in ripeness_names or []:
+        best = max(best, battlepass_rarity_mult(name))
+    return int(round(BATTLEPASS_EXP_HARVEST * best))
+
+
+def battlepass_coinflip_exp(*, streak: int) -> int:
+    steps = max(0, min(int(streak), BATTLEPASS_COINFLIP_STREAK_CAP) - 1)
+    return int(round(BATTLEPASS_EXP_COINFLIP * (BATTLEPASS_COINFLIP_STREAK_MULT ** steps)))
+
+
+def battlepass_water_exp(*, streak: int) -> int:
+    mult = min(BATTLEPASS_WATER_STREAK_CAP, 1.0 + BATTLEPASS_WATER_STREAK_RATE * max(0, int(streak)))
+    return int(round(BATTLEPASS_EXP_WATER * mult))
+
+
+def battlepass_mine_exp(*, clicks: int, duration_seconds: int) -> int:
+    extra = max(0, int(clicks) - int(duration_seconds))
+    return BATTLEPASS_EXP_MINE + BATTLEPASS_EXP_MINE_EXTRA_CLICK * extra
+
+
+def battlepass_gathemon_exp(*, hp: int, max_hp: int) -> int:
+    if max_hp <= 0:
+        return BATTLEPASS_EXP_GATHEMON
+    ratio = max(0.0, min(1.0, float(hp) / float(max_hp)))
+    return int(round(BATTLEPASS_EXP_GATHEMON * (0.5 + 1.5 * ratio)))
+
+
+def battlepass_gathership_exp(*, ships_left: int, num_ships: int) -> int:
+    if num_ships <= 0:
+        return BATTLEPASS_EXP_GATHERSHIP
+    ratio = max(0.0, min(1.0, float(ships_left) / float(num_ships)))
+    return int(round(BATTLEPASS_EXP_GATHERSHIP * (1.0 + ratio)))
+
+
+def battlepass_jump_exp(successful_jumps: int) -> int:
+    return BATTLEPASS_EXP_JUMP * max(0, int(successful_jumps))
+
+
+def battlepass_bet_qualifies(*, bet: float, balance: float) -> bool:
+    if balance <= 0:
+        return False
+    return float(bet) > float(balance) * BATTLEPASS_BET_FRACTION
+
+
+def battlepass_pve_exp(*, damage: int, max_hp: int | None, total_damage: int, is_boss: bool) -> int:
+    base = BATTLEPASS_EXP_BOSS if is_boss else BATTLEPASS_EXP_ANIMAL
+    if max_hp and max_hp > 0:
+        share = max(0.0, min(1.0, float(damage) / float(max_hp)))
+    elif total_damage > 0:
+        share = max(0.0, min(1.0, float(damage) / float(total_damage)))
+    else:
+        share = 0.0
+    return int(round(base * share))
+
+
+TREE_RING_EMOJI = "<:TreeRing:1474244868288282817>"
+IMBUE_NETHERITE_EMOJI = "<:IMBUE_N:1472431697642520576>"
+
+
+def _battlepass_money(amount: int) -> dict:
+    return {"type": "money", "amount": float(amount), "label": f"${amount:,.0f}"}
+
+
+def _battlepass_rings(amount: int) -> dict:
+    return {"type": "tree_rings", "amount": int(amount), "label": f"{TREE_RING_EMOJI}x{amount}"}
+
+
+def _battlepass_pods(amount: int) -> dict:
+    label = "🫛" if int(amount) == 1 else f"🫛x{amount}"
+    return {"type": "seed_pod", "amount": int(amount), "label": label}
+
+
+def _battlepass_item(item_id: str, label: str, *, weapon: bool = False, name: str = "") -> dict:
+    prefix = "⚔️" if weapon else "📦"
+    return {
+        "type": "shop_item",
+        "item_id": item_id,
+        "label": f"{prefix}{label}",
+        "name": name or label,
+        "weapon": bool(weapon),
+    }
+
+
+BATTLEPASS_3070_NAME = "NATIVIDIA RooTX 3070 ★"
+BATTLEPASS_EXCLUSIVE_ITEM_IDS = (
+    "resonance_nail",
+    "quavers_beat",
+    "neo_frontier_axe",
+    "true_judgements_gavel",
+    "the_world",
+)
+BATTLE_PASS_MULTI_UNLOCK_LV = 13
+
+BATTLEPASS_REWARDS = [
+    _battlepass_money(1000),
+    _battlepass_money(2000),
+    _battlepass_rings(5),
+    {"type": "gpu", "name": BATTLEPASS_3070_NAME, "label": "📦3070"},
+    _battlepass_pods(1),
+    _battlepass_money(10000),
+    _battlepass_rings(15),
+    _battlepass_money(60000),
+    _battlepass_item("resonance_nail", "RNail", weapon=True, name="Resonance Nail"),
+    _battlepass_pods(1),
+    _battlepass_rings(50),
+    _battlepass_money(150000),
+    {"type": "buff", "id": "battle_pass_multi", "label": "1.2×"},
+    _battlepass_money(250000),
+    _battlepass_pods(1),
+    _battlepass_rings(125),
+    _battlepass_item("quavers_beat", "Quaver", name="Quaver's Beat"),
+    _battlepass_money(750000),
+    _battlepass_rings(169),
+    _battlepass_pods(1),
+    {"type": "imbue_upgrade", "tool": "hoe", "label": f"{IMBUE_NETHERITE_EMOJI} Hoe"},
+    {"type": "imbue_upgrade", "tool": "tractor", "label": f"{IMBUE_NETHERITE_EMOJI} Tractor"},
+    _battlepass_rings(300),
+    _battlepass_item("neo_frontier_axe", "Axe", weapon=True, name="Neo Frontier Axe"),
+    _battlepass_pods(1),
+    _battlepass_money(2000000),
+    _battlepass_pods(2),
+    _battlepass_item("true_judgements_gavel", "Gavel", weapon=True, name="True Judgement's Gavel"),
+    _battlepass_item("the_world", "The World", name="The World"),
+    _battlepass_pods(3),
+]
+
+
+def _battlepass_filler_reward(lv: int) -> dict:
+    return dict(BATTLEPASS_REWARDS[int(lv) - 1])
+
+
+def _battlepass_build_tiers() -> list[dict]:
+    tiers = []
+    for n in range(1, BATTLEPASS_MAX_LV + 1):
+        tiers.append({
+            "lv": n,
+            "cost": battlepass_tier_cost(n),
+            "exp": BATTLEPASS_CUMULATIVE[n],
+            "reward": _battlepass_filler_reward(n),
+        })
+    return tiers
+
+
+BATTLEPASS_TIERS = _battlepass_build_tiers()
+
+
+def battlepass_reward_announce(reward: dict) -> str:
+    """Emoji + readable name for the level-up ping (track labels stay short)."""
+    rtype = reward.get("type")
+    if rtype == "money":
+        return f"${int(round(float(reward.get('amount', 0)))):,}"
+    if rtype == "seed_pod":
+        n = int(reward.get("amount", 1) or 1)
+        return "🫛 SEED POD" if n == 1 else f"🫛x{n} SEED PODs"
+    if rtype == "tree_rings":
+        n = int(reward.get("amount", 0) or 0)
+        return f"{TREE_RING_EMOJI}x{n}"
+    if rtype == "gpu":
+        return f"📦 {reward.get('name') or BATTLEPASS_3070_NAME}"
+    if rtype == "shop_item":
+        prefix = "⚔️" if reward.get("weapon") else "📦"
+        name = str(reward.get("name") or reward.get("label") or reward.get("item_id") or "?")
+        if name.startswith(prefix):
+            return name
+        return f"{prefix} {name}"
+    if rtype == "imbue_upgrade":
+        return str(reward.get("label") or "Imbue")
+    return str(reward.get("label") or "?")
+
+
+def battlepass_levelup_text(result: dict | None) -> str | None:
+    if not result:
+        return None
+    old_lv = int(result.get("old_lv", 0) or 0)
+    new_lv = int(result.get("new_lv", 0) or 0)
+    if new_lv <= old_lv:
+        return None
+    rewards = list(result.get("rewards") or [])
+    if not rewards:
+        for lv in result.get("unlocked") or []:
+            idx = int(lv) - 1
+            if 0 <= idx < len(BATTLEPASS_TIERS):
+                rewards.append(BATTLEPASS_TIERS[idx]["reward"])
+    items = ", ".join(battlepass_reward_announce(reward) for reward in rewards)
+    text = f"BATTLEPASS **LV** INCREASED! (**{old_lv} -> {new_lv}**)"
+    if items:
+        text += f" **YOU UNLOCKED:** {items}"
+    return text
+
+
+_IMBUE_CATALOGS = {"hoe": {}, "tractor": {}}
+_FULLY_STOCKED_ITEM_IDS: tuple[str, ...] = ()
+
+
+def register_imbue_catalogs(hoe_by_rarity: dict, tractor_by_rarity: dict) -> None:
+    _IMBUE_CATALOGS["hoe"] = hoe_by_rarity
+    _IMBUE_CATALOGS["tractor"] = tractor_by_rarity
+
+
+def set_fully_stocked_item_ids(item_ids) -> None:
+    global _FULLY_STOCKED_ITEM_IDS
+    _FULLY_STOCKED_ITEM_IDS = tuple(item_ids)
+
+
+def try_unlock_fully_stocked(user_id: int) -> bool:
+    if not _FULLY_STOCKED_ITEM_IDS:
+        return False
+    inv = get_user_shop_inventory(user_id)
+    if all(int(inv.get(item_id, 0) or 0) >= 1 for item_id in _FULLY_STOCKED_ITEM_IDS):
+        return unlock_hidden_achievement(user_id, "fully_stocked")
+    return False
+
+
+def grant_gpu(user_id: int, gpu_name: str) -> None:
+    """Add a GPU without charging. Allows duplicates so the Battle Pass 3070 stacks with /gpu."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$push": {"gpus": str(gpu_name)}},
+        upsert=True,
+    )
+
+
+def _grant_imbue_upgrade(user_id: int, tool: str) -> None:
+    from seedpod import guaranteed_imbue_rarity
+
+    current = get_user_hoe_attunement(user_id) if tool == "hoe" else get_user_tractor_attunement(user_id)
+    rarity = guaranteed_imbue_rarity(current)
+    if rarity is None:
+        increment_seed_pods(user_id, 2)
+        return
+    pool = list((_IMBUE_CATALOGS.get(tool) or {}).get(rarity) or [])
+    if not pool:
+        increment_seed_pods(user_id, 2)
+        return
+    enchant = dict(random.choice(pool))
+    if tool == "hoe":
+        set_user_hoe_attunement(user_id, enchant)
+    else:
+        set_user_tractor_attunement(user_id, enchant)
+    if rarity in {"NETHERITE", "LUMINITE", "CELESTIAL", "SECRET"}:
+        unlock_hidden_achievement(user_id, "high_reroller")
+
+
+def _grant_battlepass_reward(user_id: int, reward: dict) -> None:
+    rtype = reward.get("type")
+    if rtype == "money":
+        current = get_user_balance(user_id)
+        update_user_balance(user_id, float(current) + float(reward.get("amount", 0)))
+    elif rtype == "tree_rings":
+        increment_tree_rings(user_id, int(reward.get("amount", 0)))
+    elif rtype == "seed_pod":
+        increment_seed_pods(user_id, int(reward.get("amount", 1)))
+    elif rtype == "shop_item":
+        add_shop_item_to_user(user_id, str(reward.get("item_id")), 1)
+        try_unlock_fully_stocked(user_id)
+    elif rtype == "gpu":
+        grant_gpu(user_id, str(reward.get("name") or BATTLEPASS_3070_NAME))
+    elif rtype == "imbue_upgrade":
+        _grant_imbue_upgrade(user_id, str(reward.get("tool") or "hoe"))
+    elif rtype == "buff":
+        return
+
+
+def get_user_battlepass(user_id: int) -> dict:
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"battlepass_exp": 1, "battlepass_lv": 1}) or {}
+    exp = int(doc.get("battlepass_exp", 0) or 0)
+    lv = battlepass_lv_from_exp(exp)
+    return {"exp": exp, "lv": min(lv, BATTLEPASS_MAX_LV)}
+
+
+def _battlepass_granted_levels(lv: int, exp: int) -> set[int]:
+    """Rewards already owned: LV n is claimed once you have reached it."""
+    lv = max(0, min(int(lv), BATTLEPASS_MAX_LV))
+    return set(range(1, lv + 1))
+
+
+def _battlepass_missing_unlock(user_id: int, lv: int) -> bool:
+    """True if this LV's testable unlock (item/GPU) is not on the user yet."""
+    if not (1 <= int(lv) <= len(BATTLEPASS_TIERS)):
+        return False
+    reward = BATTLEPASS_TIERS[int(lv) - 1]["reward"]
+    rtype = reward.get("type")
+    if rtype == "shop_item":
+        return not has_shop_item(user_id, str(reward.get("item_id")))
+    if rtype == "gpu":
+        return str(reward.get("name") or BATTLEPASS_3070_NAME) not in get_user_gpus(user_id)
+    return False
+
+
+def set_user_battlepass_level(user_id: int, target_lv: int) -> dict:
+    """Admin-set Battle Pass LV (0-30) and grant newly unlocked rewards.
+
+    0 resets to LV 0 / 0 EXP (keeps items already owned).
+    1-29 sets that LV and grants rewards through that LV, including the LV's own item.
+    30 maxes EXP and grants remaining rewards through LV 30.
+    """
+    target_lv = int(target_lv)
+    if target_lv < 0 or target_lv > BATTLEPASS_MAX_LV:
+        raise ValueError(f"Battle Pass LV must be between 0 and {BATTLEPASS_MAX_LV}.")
+
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"battlepass_exp": 1, "battlepass_lv": 1}) or {}
+    old_exp = int(doc.get("battlepass_exp", 0) or 0)
+    old_lv = battlepass_lv_from_exp(old_exp)
+
+    if target_lv <= 0:
+        new_lv = 0
+        new_exp = 0
+        to_grant: list[int] = []
+    else:
+        new_lv = target_lv
+        new_exp = BATTLEPASS_CUMULATIVE[target_lv]
+        already = _battlepass_granted_levels(old_lv, old_exp)
+        want = set(range(1, target_lv + 1))
+        if target_lv > old_lv:
+            to_grant = sorted(want - already)
+        elif target_lv == old_lv and _battlepass_missing_unlock(user_id, target_lv):
+            to_grant = [target_lv]
+        else:
+            to_grant = []
+
+    users.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"battlepass_lv": int(new_lv), "battlepass_exp": int(new_exp)}},
+        upsert=True,
+    )
+
+    had_stocked = has_hidden_achievement(user_id, "fully_stocked")
+    had_reroller = has_hidden_achievement(user_id, "high_reroller")
+    rewards = []
+    for lv in to_grant:
+        if 1 <= lv <= len(BATTLEPASS_TIERS):
+            reward = BATTLEPASS_TIERS[lv - 1]["reward"]
+            rtype = reward.get("type")
+            if rtype == "shop_item" and has_shop_item(user_id, str(reward.get("item_id"))):
+                continue
+            if rtype == "gpu" and str(reward.get("name") or BATTLEPASS_3070_NAME) in get_user_gpus(user_id):
+                continue
+            _grant_battlepass_reward(user_id, reward)
+            rewards.append({
+                "lv": lv,
+                "type": reward.get("type"),
+                "label": str(reward.get("label") or reward.get("item_id") or reward.get("name") or "?"),
+                "item_id": reward.get("item_id"),
+            })
+
+    unlocked_hidden = []
+    if new_exp >= BATTLEPASS_CUMULATIVE[BATTLEPASS_MAX_LV]:
+        if unlock_hidden_achievement(user_id, "harvest_complete"):
+            unlocked_hidden.append("harvest_complete")
+    if not had_stocked and has_hidden_achievement(user_id, "fully_stocked"):
+        unlocked_hidden.append("fully_stocked")
+    if not had_reroller and has_hidden_achievement(user_id, "high_reroller"):
+        unlocked_hidden.append("high_reroller")
+
+    return {
+        "old_lv": old_lv,
+        "new_lv": new_lv,
+        "exp": new_exp,
+        "unlocked": [row["lv"] for row in rewards],
+        "rewards": rewards,
+        "unlocked_hidden": unlocked_hidden,
+        "reset": target_lv <= 0,
+    }
+
+
+def award_battlepass_exp(user_id: int, amount: int, *, extra: bool = False) -> dict:
+    """Increment EXP, auto-grant rewards for newly reached levels, return old/new LV.
+
+    extra=True is for event bonuses (PvE, etc.): RNG jitter is +1-4 only, never negative.
+    """
+    amount = int(amount)
+    if amount > 0:
+        amount = battlepass_apply_exp_rng(amount, extra=extra)
+
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    empty = {"unlocked": [], "rewards": [], "gained": 0, "unlocked_hidden": []}
+    if amount <= 0:
+        doc = users.find_one({"_id": int(user_id)}, {"battlepass_exp": 1, "battlepass_lv": 1}) or {}
+        exp = int(doc.get("battlepass_exp", 0) or 0)
+        lv = battlepass_lv_from_exp(exp)
+        return {"old_lv": lv, "new_lv": lv, "exp": exp, **empty}
+
+    after = users.find_one_and_update(
+        {"_id": int(user_id)},
+        {"$inc": {"battlepass_exp": amount}},
+        return_document=ReturnDocument.AFTER,
+        upsert=True,
+    ) or {}
+    new_exp = int(after.get("battlepass_exp", 0) or 0)
+    stored_lv = int(after.get("battlepass_lv", 0) or 0)
+    old_exp = new_exp - amount
+    old_lv = battlepass_lv_from_exp(old_exp)
+    target_lv = battlepass_lv_from_exp(new_exp)
+    display_lv = max(old_lv, target_lv)
+    reached = _battlepass_reached_levels(old_lv, target_lv)
+    max_exp = BATTLEPASS_CUMULATIVE[BATTLEPASS_MAX_LV]
+
+    if display_lv > stored_lv:
+        if stored_lv < 1 and after.get("battlepass_lv") is None:
+            # Existing players may have no battlepass_lv field; Mongo $lt does not match missing.
+            users.update_one(
+                {"_id": int(user_id)},
+                {"$set": {"battlepass_lv": display_lv}},
+                upsert=True,
+            )
+        else:
+            before = users.find_one_and_update(
+                {"_id": int(user_id), "battlepass_lv": {"$lt": display_lv}},
+                {"$set": {"battlepass_lv": display_lv}},
+                return_document=ReturnDocument.BEFORE,
+            )
+            if before is None:
+                reached = []
+
+    had_stocked = has_hidden_achievement(user_id, "fully_stocked")
+    had_reroller = has_hidden_achievement(user_id, "high_reroller")
+    rewards = []
+    for lv in reached:
+        if 1 <= lv <= len(BATTLEPASS_TIERS):
+            reward = BATTLEPASS_TIERS[lv - 1]["reward"]
+            _grant_battlepass_reward(user_id, reward)
+            rewards.append(reward)
+    unlocked_hidden = []
+    if new_exp >= max_exp:
+        if unlock_hidden_achievement(user_id, "harvest_complete"):
+            unlocked_hidden.append("harvest_complete")
+    if not had_stocked and has_hidden_achievement(user_id, "fully_stocked"):
+        unlocked_hidden.append("fully_stocked")
+    if not had_reroller and has_hidden_achievement(user_id, "high_reroller"):
+        unlocked_hidden.append("high_reroller")
+    return {
+        "old_lv": old_lv,
+        "new_lv": display_lv,
+        "exp": new_exp,
+        "unlocked": reached,
+        "rewards": rewards,
+        "gained": amount,
+        "unlocked_hidden": unlocked_hidden,
+    }
 
 
 def increment_gather_stats(userid: int, category: str, item: str) -> None:
@@ -1350,6 +1924,82 @@ def get_tree_ring_interval(user_id: int) -> int:
     return max(1, base - reduction)
 
 
+def compute_unowned_daily_shop_offerings(
+    all_ids: list,
+    owned_ids,
+    max_n: int,
+    rng,
+) -> list[str]:
+    """Shuffle the catalog and take the first max_n items the user does not own."""
+    owned = {str(item_id) for item_id in (owned_ids or [])}
+    shuffled = [str(item_id) for item_id in all_ids]
+    rng.shuffle(shuffled)
+    offerings: list[str] = []
+    limit = max(0, int(max_n))
+    for item_id in shuffled:
+        if item_id in owned:
+            continue
+        offerings.append(item_id)
+        if len(offerings) >= limit:
+            break
+    return offerings
+
+
+def resolve_daily_shop_slate(
+    stored_date: str | None,
+    stored_ids,
+    today: str,
+    fresh_ids: list,
+) -> list[str]:
+    """Reuse today's locked slate so a later grant does not reshuffle the shop."""
+    if str(stored_date or "") == str(today) and stored_ids is not None:
+        return [str(item_id) for item_id in stored_ids]
+    return [str(item_id) for item_id in fresh_ids]
+
+
+def peek_daily_shop_slate(user_id: int, date_est: str) -> list[str] | None:
+    """Return the locked slate for this EST date, or None if today is not locked yet."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one(
+        {"_id": int(user_id)},
+        {"daily_shop_slate": 1, "daily_shop_slate_date": 1},
+    ) or {}
+    if str(doc.get("daily_shop_slate_date") or "") != str(date_est):
+        return None
+    if "daily_shop_slate" not in doc or doc.get("daily_shop_slate") is None:
+        return None
+    return [str(item_id) for item_id in doc.get("daily_shop_slate") or []]
+
+
+def lock_daily_shop_slate(user_id: int, date_est: str, item_ids: list) -> list[str]:
+    """Persist the first slate of the EST day. Later calls return that same list."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one(
+        {"_id": int(user_id)},
+        {"daily_shop_slate": 1, "daily_shop_slate_date": 1},
+    ) or {}
+    stored_ids = doc.get("daily_shop_slate") if "daily_shop_slate" in doc else None
+    resolved = resolve_daily_shop_slate(
+        stored_date=doc.get("daily_shop_slate_date"),
+        stored_ids=stored_ids,
+        today=date_est,
+        fresh_ids=item_ids,
+    )
+    if str(doc.get("daily_shop_slate_date") or "") != str(date_est) or stored_ids is None:
+        users.update_one(
+            {"_id": int(user_id)},
+            {
+                "$set": {
+                    "daily_shop_slate_date": str(date_est),
+                    "daily_shop_slate": resolved,
+                }
+            },
+        )
+    return resolved
+
+
 def get_user_daily_shop_purchases(user_id: int) -> tuple:
     """Return (purchases_count_today: int, last_date_est: str). Count resets when date changes."""
     users = _get_users_collection()
@@ -1401,6 +2051,7 @@ def purchase_daily_shop_item(user_id: int, item_id: str, cost: int, date_est: st
             }
         }
     )
+    try_unlock_fully_stocked(user_id)
     return True
 
 
@@ -1422,6 +2073,25 @@ def set_slot_token_free_spin_used_date_est(user_id: int, date_est: str) -> None:
         {"$set": {"slot_token_free_spin_used_date_est": date_est}},
         upsert=True,
     )
+
+
+def get_the_world_used_date_est(user_id: int) -> str:
+    users = _get_users_collection()
+    doc = users.find_one({"_id": int(user_id)}, {"the_world_used_date_est": 1})
+    if not doc:
+        return ""
+    return str(doc.get("the_world_used_date_est", "") or "")
+
+
+def try_claim_the_world_today(user_id: int, date_est: str) -> bool:
+    """Mark The World used for this EST date. Returns False if it was already used today."""
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    result = users.update_one(
+        {"_id": int(user_id), "the_world_used_date_est": {"$ne": str(date_est)}},
+        {"$set": {"the_world_used_date_est": str(date_est)}},
+    )
+    return int(getattr(result, "modified_count", 0) or 0) == 1
 
 
 def get_roulette_elimination_cooldown_seconds(user_id: int) -> int:
@@ -1516,19 +2186,22 @@ def set_user_bloom_count(user_id: int, bloom_count: int) -> None:
 
 def perform_bloom(user_id: int) -> None:
     """Reset user's progress while keeping lifetime plants (gather_stats.total_items, total_forage_count),
-    Tree Rings, achievements, and incrementing bloom_count.
+    Tree Rings, achievements, Battle Pass EXP/LV, and incrementing bloom_count.
     Resets bloom_cycle_plants to 0 so PLANTER rank restarts at I.
-    Note: All achievements persist through bloom, including planter achievements."""
+    Note: All achievements persist through bloom, including planter achievements.
+    Battle Pass progress is season-scoped and is not reset by bloom."""
     users = _get_users_collection()
     default_balance = _get_default_balance()
 
     # Preserve the lifetime plants gathered count before resetting
-    doc = users.find_one({"_id": int(user_id)}, {"gather_stats.total_items": 1, "total_forage_count": 1})
+    doc = users.find_one({"_id": int(user_id)}, {"gather_stats.total_items": 1, "total_forage_count": 1, "gpus": 1})
     preserved_total_items = 0
     preserved_forage_count = 0
+    preserved_gpus = []
     if doc:
         preserved_total_items = int(doc.get("gather_stats", {}).get("total_items", 0))
         preserved_forage_count = int(doc.get("total_forage_count", 0))
+        preserved_gpus = [g for g in (doc.get("gpus") or []) if g == BATTLEPASS_3070_NAME]
 
     users.update_one(
         {"_id": int(user_id)},
@@ -1548,7 +2221,7 @@ def perform_bloom(user_id: int) -> None:
                     "cooldown": 0
                 },
                 "gardeners": [],
-                "gpus": [],
+                "gpus": preserved_gpus,
                 "items": {},
                 "ripeness_stats": {},
                 "gather_stats": {
@@ -1571,7 +2244,7 @@ def perform_bloom(user_id: int) -> None:
                     "mire": False
                 },
                 "last_roulette_elimination_time": 0.0
-                # All achievements persist through bloom (gatherer, planter, harvesting, coinflip, water_streak, hidden)
+                # Achievements and battlepass_exp / battlepass_lv persist through bloom
             },
             "$inc": {
                 "bloom_count": 1
@@ -1689,6 +2362,8 @@ def set_active_event(event_id: str, event_type: str, event_name: str, start_time
 
 def clear_event(event_id: str) -> None:
     """Remove an event by its ID."""
+    if not event_id:
+        return
     events = _get_events_collection()
     events.delete_one({"event_id": event_id})
     # Clear cache when events are modified
@@ -1743,6 +2418,92 @@ def clear_expired_events() -> None:
     events.delete_many({"end_time": {"$lte": current_time}})
     # Clear cache when events are modified
     _clear_events_cache()
+
+
+EVENT_MANAGER_STATE_ID = "event_manager_state"
+
+
+def get_event_manager_state() -> dict:
+    """Load persisted event-manager schedule (hourly/daily timers + celestial roll dates)."""
+    events = _get_events_collection()
+    doc = events.find_one({"_id": EVENT_MANAGER_STATE_ID}) or {}
+    return {
+        "next_hourly_attempt": float(doc.get("next_hourly_attempt") or 0),
+        "next_daily_attempt": float(doc.get("next_daily_attempt") or 0),
+        "last_hourly_event_id": doc.get("last_hourly_event_id") or None,
+        "last_daily_event_id": doc.get("last_daily_event_id") or None,
+        "last_solar_trigger_date": doc.get("last_solar_trigger_date") or None,
+        "last_blood_trigger_date": doc.get("last_blood_trigger_date") or None,
+    }
+
+
+def save_event_manager_state(
+    *,
+    next_hourly_attempt: float,
+    next_daily_attempt: float,
+    last_hourly_event_id: Optional[str],
+    last_daily_event_id: Optional[str],
+    last_solar_trigger_date: Optional[str],
+    last_blood_trigger_date: Optional[str],
+) -> None:
+    """Persist event-manager schedule so restarts do not reset timers or re-roll celestial windows."""
+    events = _get_events_collection()
+    events.update_one(
+        {"_id": EVENT_MANAGER_STATE_ID},
+        {"$set": {
+            "next_hourly_attempt": float(next_hourly_attempt),
+            "next_daily_attempt": float(next_daily_attempt),
+            "last_hourly_event_id": last_hourly_event_id,
+            "last_daily_event_id": last_daily_event_id,
+            "last_solar_trigger_date": last_solar_trigger_date,
+            "last_blood_trigger_date": last_blood_trigger_date,
+        }},
+        upsert=True,
+    )
+
+
+def compute_event_manager_schedule(
+    now: float,
+    hourly_interval: float,
+    daily_interval: float,
+    state: Optional[Dict] = None,
+    active_hourly: Optional[Dict] = None,
+    active_daily: Optional[Dict] = None,
+) -> dict:
+    """Restore next hourly/daily attempt times from persisted state.
+
+    Empty state delays the first attempt by one interval (avoids instant spam on
+    first boot). A persisted time in the past is kept so a restart can roll.
+    An already-running event pushes the next attempt to end_time + interval.
+    """
+    state = state or {}
+    next_hourly = float(state.get("next_hourly_attempt") or 0)
+    next_daily = float(state.get("next_daily_attempt") or 0)
+    if next_hourly <= 0:
+        next_hourly = now + hourly_interval
+    if next_daily <= 0:
+        next_daily = now + daily_interval
+
+    last_hourly_id = state.get("last_hourly_event_id") or None
+    last_daily_id = state.get("last_daily_event_id") or None
+
+    if active_hourly:
+        last_hourly_id = active_hourly.get("effects", {}).get("event_id") or last_hourly_id
+        next_hourly = max(next_hourly, float(active_hourly.get("end_time", now)) + hourly_interval)
+    if active_daily:
+        last_daily_id = active_daily.get("effects", {}).get("event_id") or last_daily_id
+        # Live daily start persists now + 24h, which is ~end_time (daily lasts 24h).
+        # Do not add another interval here or a restart delays the next daily by an extra day.
+        next_daily = max(next_daily, float(active_daily.get("end_time", now)))
+
+    return {
+        "next_hourly_attempt": next_hourly,
+        "next_daily_attempt": next_daily,
+        "last_hourly_event_id": last_hourly_id,
+        "last_daily_event_id": last_daily_id,
+        "last_solar_trigger_date": state.get("last_solar_trigger_date") or None,
+        "last_blood_trigger_date": state.get("last_blood_trigger_date") or None,
+    }
 
 
 def get_user_gather_data(user_id: int) -> Dict:
@@ -1901,141 +2662,11 @@ def wipe_guild_crypto(user_ids: list[int]) -> int:
 
 def wipe_user_all(user_id: int) -> None:
     """Reset user's money and all upgrades (basket, shoes, gloves, soil, harvest upgrades, gardeners, GPUs, plants, stocks, crypto).
-    Also resets all achievement-related stats and cooldowns."""
+    Also resets all achievement-related stats, cooldowns, and Battle Pass EXP/LV."""
     users = _get_users_collection()
-    default_balance = _get_default_balance()
     users.update_one(
         {"_id": int(user_id)},
-        {"$set": {
-            "balance": float(default_balance),
-            "basket_upgrades": {
-                "basket": 0,
-                "shoes": 0,
-                "gloves": 0,
-                "soil": 0
-            },
-            "harvest_upgrades": {
-                "car": 0,
-                "chain": 0,
-                "fertilizer": 0,
-                "cooldown": 0
-            },
-            "gardeners": [],
-            "gpus": [],
-            "items": {},
-            "ripeness_stats": {},
-            "almanac_entries": {},
-            "gather_stats": {
-                "total_items": 0,
-                "categories": {},
-                "items": {}
-            },
-            "total_forage_count": 0,
-            "bloom_cycle_plants": 0,
-            "stock_holdings": {},
-            "crypto_holdings": {
-                "RTC": 0.0,
-                "TER": 0.0,
-                "CNY": 0.0
-            },
-            "bloom_count": 0,
-            # Reset all achievement-related stats
-            "achievements": {
-                "gatherer": 0,
-                "coinflip_total": 0,
-                "coinflip_win_streak": 0,
-                "harvesting": 0,
-                "planter": 0,
-                "water_streak": 0,
-                "blooming": 0,
-                "russian_roulette": 0,
-                "slayer": 0,
-                "stealing": 0,
-                "almanac": 0,
-                "hidden_achievements_discovered": 0,
-                "hidden_achievements": {
-                    "john_rockefeller": False,
-                    "beating_the_odds": False,
-                    "beneficiary": False,
-                    "leap_year": False,
-                    "ceo": False,
-                    "blockchain": False,
-                    "almost_got_it": False,
-                    "maxed_out": False,
-                    "social_butterfly": False,
-                    "high_reroller": False,
-                    "no_monkey_business": False,
-                    "grizzly_victory": False,
-                    "black_bear_blues": False,
-                    "polar_power": False,
-                    "tiger_tamer": False,
-                    "panther_pounce": False,
-                    "homeless_hero": False,
-                    "bullet_ant_squasher": False,
-                    "skunkape_slayer": False,
-                    "godzilla_king": False,
-                    "mothron_masher": False,
-                    "plantera_crusher": False,
-                    "retinazer_retired": False,
-                    "spazmatism_silenced": False,
-                    "pve_master": False,
-                    "slots_three_in_a_row": False,
-                    "just_like_tf2": False,
-                    "moist": False,
-                    "no_honor": False,
-                },
-                "areas_unlocked": 0,
-                "slots": 0
-            },
-            "pve_defeated": [],
-            "total_pve_defeats": 0,
-            "coinflip_count": 0,
-            "coinflip_win_streak": 0,
-            "slots_spin_count": 0,
-            "slots_win_streak": 0,
-            "gather_command_count": 0,
-            "harvest_command_count": 0,
-            "consecutive_water_days": 0,
-            "water_count": 0,
-            "russian_games_played": 0,
-            # Reset imbuements
-            "hoe_enchantment": None,
-            "tractor_enchantment": None,
-            # Reset invite rewards (claimed rewards reset on wipe)
-            "invite_stats": {
-                "invites_created": 0,
-                "total_joins": 0,
-                "rewards_earned": 0.0,
-                "invite_codes": [],
-                "claimed_rewards": []
-            },
-            # Reset all cooldowns
-            "last_gather_time": 0.0,
-            "last_harvest_time": 0.0,
-            "last_mine_time": 0.0,
-            "last_roulette_elimination_time": 0.0,
-            "last_coinflip_loss_time": 0.0,
-            "last_water_time": 0.0,
-            # Reset imbuements
-            "hoe_enchantment": None,
-            "tractor_enchantment": None,
-            # Reset unlocked areas
-            "unlocked_areas": {
-                "grove": False,
-                "marsh": False,
-                "bog": False,
-                "mire": False
-            },
-            # Reset daily shop and tree rings
-            "shop_inventory": {},
-            "daily_shop_purchases_count": 0,
-            "daily_shop_last_date_est": "",
-            "slot_token_free_spin_used_date_est": "",
-            "tree_rings": 0,
-            "gathers_stolen": 0,
-            "harvests_stolen": 0,
-            "critical_gathers_count": 0,
-        }},
+        {"$set": _wipe_all_set_payload()},
         upsert=True,
     )
 
@@ -2080,9 +2711,11 @@ def _wipe_all_set_payload() -> dict:
                 "godzilla_king": False, "mothron_masher": False, "plantera_crusher": False,
                 "retinazer_retired": False, "spazmatism_silenced": False, "pve_master": False,
                 "slots_three_in_a_row": False, "just_like_tf2": False, "moist": False, "no_honor": False,
+                "branch_breaker": False, "harvest_complete": False, "fully_stocked": False,
             },
             "areas_unlocked": 0,
-            "slots": 0
+            "slots": 0,
+            "jumping": 0,
         },
         "pve_defeated": [],
         "total_pve_defeats": 0,
@@ -2108,11 +2741,17 @@ def _wipe_all_set_payload() -> dict:
         "shop_inventory": {},
         "daily_shop_purchases_count": 0,
         "daily_shop_last_date_est": "",
+        "daily_shop_slate": None,
+        "daily_shop_slate_date": "",
         "slot_token_free_spin_used_date_est": "",
+        "the_world_used_date_est": "",
         "tree_rings": 0,
         "gathers_stolen": 0,
         "harvests_stolen": 0,
         "critical_gathers_count": 0,
+        "battlepass_exp": 0,
+        "battlepass_lv": 0,
+        "seed_pods": 0,
     }
 
 
@@ -2128,17 +2767,203 @@ def wipe_guild_all(user_ids: list[int]) -> int:
     return result.modified_count
 
 
-_STACKABLE_SHOP_ITEMS = {"nether_star", "black_shard"}
+# Numeric Discord IDs only — skip _id 0 (crypto prices), _id -1 (joined users),
+# and string ids like "jackpot_pool" (strings compare greater than numbers in BSON).
+_NEW_SEASON_USER_FILTER = {"_id": {"$gt": 0, "$type": ["int", "long"]}}
+_NEW_SEASON_CRYPTO_PRICES = {"RTC": 90000.0, "TER": 3100.0, "CNY": 855.0}
 
-def add_shop_item_to_user(user_id: int, item_id: str, amount: int = 1) -> None:
+
+def _new_season_set_payload() -> dict:
+    """$set payload for /newseason: full wipe except invite stats (counts and claimed rewards)."""
+    payload = _wipe_all_set_payload()
+    payload.pop("invite_stats", None)
+    payload["achievements"]["hidden_achievements"] = {}
+    payload["virtual_gardener_stats"] = {}
+    payload["dayboosts"] = {}
+    payload["jump_today_count"] = 0
+    payload["jump_today_date"] = ""
+    payload["total_jumps"] = 0
+    return payload
+
+
+# Consumable invite-award effects that /newseason must put back after the wipe.
+# Flag-only perks (secret gardener, cooldowns, water_double) stay via claimed_rewards.
+_INVITE_REAPPLY_EFFECTS = {
+    1: ("money", 50_000),
+    2: ("money", 200_000),
+    3: ("tree_rings", 5),
+    4: ("money", 1_000_000),
+    5: ("tree_rings", 10),
+    6: ("money", 5_000_000),
+    7: ("money", 10_000_000),
+    8: ("tree_rings", 20),
+    9: ("money", 15_000_000),
+    11: ("tree_rings", 30),
+    16: ("tree_rings", 100),
+    17: ("money", 100_000_000),
+    18: ("tree_rings", 300),
+    20: ("hidden_achievement", 0),
+}
+
+
+def invite_reward_reapply_grants(claimed_tiers) -> dict:
+    """Sum wipe-sensitive invite rewards for already-claimed tiers. No notifications."""
+    money = 0
+    tree_rings = 0
+    social_butterfly = False
+    for raw in claimed_tiers or []:
+        try:
+            tier = int(raw)
+        except (TypeError, ValueError):
+            continue
+        effect = _INVITE_REAPPLY_EFFECTS.get(tier)
+        if not effect:
+            continue
+        kind, amount = effect
+        if kind == "money":
+            money += int(amount)
+        elif kind == "tree_rings":
+            tree_rings += int(amount)
+        elif kind == "hidden_achievement":
+            social_butterfly = True
+    return {
+        "money": money,
+        "tree_rings": tree_rings,
+        "social_butterfly": social_butterfly,
+    }
+
+
+def _invite_reapply_set_fields(claimed_tiers, wipe_payload: dict | None = None) -> dict:
+    """Mongo $set fields that restore claimed invite effects on top of a season wipe."""
+    grants = invite_reward_reapply_grants(claimed_tiers)
+    if not grants["money"] and not grants["tree_rings"] and not grants["social_butterfly"]:
+        return {}
+    payload = wipe_payload if wipe_payload is not None else _new_season_set_payload()
+    fields = {}
+    if grants["money"]:
+        fields["balance"] = float(payload.get("balance", 0)) + float(grants["money"])
+    if grants["tree_rings"]:
+        fields["tree_rings"] = int(payload.get("tree_rings", 0) or 0) + int(grants["tree_rings"])
+    if grants["social_butterfly"]:
+        fields["achievements.hidden_achievements.social_butterfly"] = True
+        fields["achievements.hidden_achievements_discovered"] = 1
+    return fields
+
+
+def _reapply_claimed_invite_rewards(wipe_payload: dict | None = None) -> int:
+    """Silently re-grant claimed invite reward effects after /newseason. No DMs."""
+    users = _get_users_collection()
+    payload = wipe_payload if wipe_payload is not None else _new_season_set_payload()
+    cursor = users.find(
+        {
+            **_NEW_SEASON_USER_FILTER,
+            "invite_stats.claimed_rewards.0": {"$exists": True},
+        },
+        {"invite_stats.claimed_rewards": 1},
+    )
+    applied = 0
+    for doc in cursor:
+        fields = _invite_reapply_set_fields(
+            (doc.get("invite_stats") or {}).get("claimed_rewards") or [],
+            wipe_payload=payload,
+        )
+        if not fields:
+            continue
+        users.update_one({"_id": doc["_id"]}, {"$set": fields})
+        applied += 1
+    return applied
+
+
+def start_new_season() -> int:
+    """Wipe all player progress for a new season, keeping invite stats.
+
+    Resets every user document with a numeric Discord ID, and resets the jackpot
+    pool and crypto prices. Does not touch invite totals, claimed invite rewards,
+    the joined-users anti-farm list, or Discord-tied flags. After the wipe,
+    claimed invite award effects are re-applied silently.
+    Returns the number of user documents modified.
+    """
+    users = _get_users_collection()
+    payload = _new_season_set_payload()
+    result = users.update_many(
+        _NEW_SEASON_USER_FILTER,
+        {"$set": payload},
+    )
+    users.update_one(
+        {"_id": "jackpot_pool"},
+        {"$set": {"amount": 0.0, "dodge_count": 0}},
+        upsert=True,
+    )
+    users.update_one(
+        {"_id": 0},
+        {"$set": {"crypto_prices": dict(_NEW_SEASON_CRYPTO_PRICES)}},
+        upsert=True,
+    )
+    _reapply_claimed_invite_rewards(payload)
+    return int(result.modified_count)
+
+
+def preview_new_season() -> dict:
+    """Count users that /newseason would wipe and how many have invite progress to keep."""
+    users = _get_users_collection()
+    user_count = users.count_documents(_NEW_SEASON_USER_FILTER)
+    invite_progress = users.count_documents({
+        **_NEW_SEASON_USER_FILTER,
+        "invite_stats.total_joins": {"$gte": 1},
+    })
+    return {
+        "user_count": int(user_count),
+        "invite_progress": int(invite_progress),
+    }
+
+
+STACKABLE_SHOP_ITEMS = {"nether_star", "black_shard"}
+_STACKABLE_SHOP_ITEMS = STACKABLE_SHOP_ITEMS
+
+
+def get_user_seed_pods(user_id: int) -> int:
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    doc = users.find_one({"_id": int(user_id)}, {"seed_pods": 1}) or {}
+    return max(0, int(doc.get("seed_pods", 0) or 0))
+
+
+def increment_seed_pods(user_id: int, amount: int = 1) -> int:
+    amount = int(amount)
+    if amount == 0:
+        return get_user_seed_pods(user_id)
+    users = _get_users_collection()
+    _ensure_user_document(user_id)
+    after = users.find_one_and_update(
+        {"_id": int(user_id)},
+        {"$inc": {"seed_pods": amount}},
+        return_document=ReturnDocument.AFTER,
+        upsert=True,
+    ) or {}
+    return max(0, int(after.get("seed_pods", 0) or 0))
+
+
+def consume_seed_pod(user_id: int) -> bool:
+    users = _get_users_collection()
+    result = users.update_one(
+        {"_id": int(user_id), "seed_pods": {"$gte": 1}},
+        {"$inc": {"seed_pods": -1}},
+    )
+    return int(getattr(result, "modified_count", 0) or 0) == 1
+
+
+def add_shop_item_to_user(user_id: int, item_id: str, amount: int = 1) -> bool:
     """Add a daily shop item to a user's inventory (e.g. for admin giveaway or boss drops). Does not deduct tree rings.
-    Nether Star and Black Shard can stack; all other items are capped at 1."""
+    Nether Star and Black Shard can stack; all other items are capped at 1.
+    Returns True if Fully Stocked was newly unlocked."""
     users = _get_users_collection()
     _ensure_user_document(user_id)
     doc = users.find_one({"_id": int(user_id)}, {"shop_inventory": 1})
     inv = dict(doc.get("shop_inventory", {})) if doc else {}
     current = inv.get(item_id, 0)
     new_count = current + int(amount)
+    if item_id == "battle_pass_multi":
+        return False
     if item_id not in _STACKABLE_SHOP_ITEMS:
         new_count = min(new_count, 1)
     inv[item_id] = new_count
@@ -2147,6 +2972,7 @@ def add_shop_item_to_user(user_id: int, item_id: str, amount: int = 1) -> None:
         {"$set": {"shop_inventory": inv}},
         upsert=True,
     )
+    return try_unlock_fully_stocked(user_id)
 
 
 def upsert_giveaway_record(
@@ -3106,6 +3932,7 @@ def get_user_gather_full_data(user_id: int) -> Dict:
             "unlocked_areas": 1,
             "gather_command_count": 1,
             "shop_inventory": 1,
+            "battlepass_lv": 1,
         },
     )
 
@@ -3129,6 +3956,7 @@ def get_user_gather_full_data(user_id: int) -> Dict:
             "unlocked_areas": {},
             "gather_command_count": 0,
             "shop_inventory": {},
+            "battlepass_lv": 0,
         }
 
     upgrades = doc.get("basket_upgrades", {})
@@ -3165,6 +3993,7 @@ def get_user_gather_full_data(user_id: int) -> Dict:
         "unlocked_areas": _merge_bloom_auto_unlock(doc.get("unlocked_areas", {}), int(doc.get("bloom_count", 0))),
         "gather_command_count": int(doc.get("gather_command_count", 0)),
         "shop_inventory": dict(doc.get("shop_inventory", {})),
+        "battlepass_lv": max(0, int(doc.get("battlepass_lv", 0) or 0)),
     }
 
 
@@ -3195,6 +4024,7 @@ def get_user_harvest_full_data(user_id: int) -> Dict:
             "unlocked_areas": 1,
             "harvest_command_count": 1,
             "shop_inventory": 1,
+            "battlepass_lv": 1,
         },
     )
 
@@ -3218,6 +4048,7 @@ def get_user_harvest_full_data(user_id: int) -> Dict:
             "unlocked_areas": {},
             "harvest_command_count": 0,
             "shop_inventory": {},
+            "battlepass_lv": 0,
         }
 
     basket_ups = doc.get("basket_upgrades", {})
@@ -3254,6 +4085,7 @@ def get_user_harvest_full_data(user_id: int) -> Dict:
         "unlocked_areas": _merge_bloom_auto_unlock(doc.get("unlocked_areas", {}), int(doc.get("bloom_count", 0))),
         "harvest_command_count": int(doc.get("harvest_command_count", 0)),
         "shop_inventory": dict(doc.get("shop_inventory", {})),
+        "battlepass_lv": max(0, int(doc.get("battlepass_lv", 0) or 0)),
     }
 
 
@@ -3320,6 +4152,9 @@ def get_user_dossier(user_id: int) -> Dict:
             "server_booster": 1,
             "server_tag_equipped": 1,
             "premium_tier": 1,
+            "battlepass_exp": 1,
+            "battlepass_lv": 1,
+            "seed_pods": 1,
         },
     )
 
@@ -3405,6 +4240,9 @@ def get_user_dossier(user_id: int) -> Dict:
         "server_booster": bool(doc.get("server_booster", False)),
         "server_tag_equipped": bool(doc.get("server_tag_equipped", False)),
         "premium_tier": int(doc.get("premium_tier", 0)),
+        "battlepass_exp": int(doc.get("battlepass_exp", 0) or 0),
+        "battlepass_lv": battlepass_lv_from_exp(int(doc.get("battlepass_exp", 0) or 0)),
+        "seed_pods": max(0, int(doc.get("seed_pods", 0) or 0)),
     }
 
 
@@ -3446,6 +4284,8 @@ def _empty_user_dossier() -> Dict:
         "dayboosts": {},
         "daily_shop_purchases_count": 0,
         "daily_shop_last_date_est": "",
+        "daily_shop_slate": None,
+        "daily_shop_slate_date": "",
         "slot_token_free_spin_used_date_est": "",
         "pve_defeated": [],
         "total_pve_defeats": 0,
@@ -3463,6 +4303,9 @@ def _empty_user_dossier() -> Dict:
         "server_booster": False,
         "server_tag_equipped": False,
         "premium_tier": 0,
+        "battlepass_exp": 0,
+        "battlepass_lv": 0,
+        "seed_pods": 0,
     }
 
 
@@ -3540,6 +4383,35 @@ def perform_harvest_batch_update(
 # ---------------------------------------------------------------------------
 # Steal: revert victim / apply to stealer (for gather and harvest)
 # ---------------------------------------------------------------------------
+
+STEAL_AREA_ORDER = ("forest", "underground-jungle", "grove", "marsh", "bog", "mire")
+
+
+def steal_area_allowed(
+    channel_name: str,
+    unlocked_areas: dict | None,
+    has_bandana: bool = False,
+) -> bool:
+    """Whether a stealer may steal in this channel.
+
+    Bandana skips area locks. Underground jungle is always open. Forest counts as
+    unlocked for everyone. Channels outside the area list are not extra-restricted.
+    """
+    if has_bandana:
+        return True
+    if channel_name == "underground-jungle":
+        return True
+    if channel_name not in STEAL_AREA_ORDER:
+        return True
+    unlocked = dict(unlocked_areas or {})
+    unlocked["forest"] = True
+    idx = STEAL_AREA_ORDER.index(channel_name)
+    adjacent = {
+        STEAL_AREA_ORDER[i]
+        for i in range(max(0, idx - 1), min(len(STEAL_AREA_ORDER), idx + 2))
+    }
+    return any(bool(unlocked.get(area)) for area in adjacent)
+
 
 def steal_revert_gather(
     victim_id: int,

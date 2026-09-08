@@ -71,6 +71,8 @@ def _redact_mongo_uri(uri: str | None) -> str:
 environment = _resolve_environment()
 is_production = environment.lower() == 'production'
 
+from embed_limits import pack_embeds_within_limits
+
 # Database helpers (MongoDB only)
 from database import (
     init_database,
@@ -127,6 +129,9 @@ from database import (
     set_active_event,
     clear_event,
     clear_expired_events,
+    get_event_manager_state,
+    save_event_manager_state,
+    compute_event_manager_schedule,
     get_user_gather_data,
     perform_gather_update,
     perform_batch_gather_update,
@@ -161,6 +166,8 @@ from database import (
     wipe_guild_plants,
     wipe_guild_crypto,
     wipe_guild_all,
+    start_new_season,
+    preview_new_season,
     # Giveaway persistence
     upsert_giveaway_record,
     mark_giveaway_resolved,
@@ -224,6 +231,9 @@ from database import (
     get_user_shop_inventory,
     has_shop_item,
     get_user_daily_shop_purchases,
+    compute_unowned_daily_shop_offerings,
+    peek_daily_shop_slate,
+    lock_daily_shop_slate,
     purchase_daily_shop_item,
     get_roulette_elimination_cooldown_seconds,
     get_slot_token_free_spin_used_date_est,
@@ -236,6 +246,7 @@ from database import (
     steal_apply_gather,
     steal_revert_harvest,
     steal_apply_harvest,
+    steal_area_allowed,
     get_user_beta_tester,
     set_user_beta_tester,
     get_user_server_booster,
@@ -257,6 +268,48 @@ from database import (
     reset_jump_counter,
     get_dayboost_expirations,
     clear_all_jump_multi,
+    BATTLEPASS_MAX_LV,
+    BATTLEPASS_TIERS,
+    BATTLEPASS_EXP_STEAL,
+    BATTLEPASS_EXP_SELL,
+    BATTLEPASS_EXP_SLOTS,
+    BATTLEPASS_EXP_RUSSIAN_WIN,
+    BATTLEPASS_EXP_RUSSIAN_CASHOUT,
+    battlepass_cumulative_for_lv,
+    battlepass_gather_exp,
+    battlepass_harvest_exp,
+    battlepass_coinflip_exp,
+    battlepass_water_exp,
+    battlepass_mine_exp,
+    battlepass_gathemon_exp,
+    battlepass_gathership_exp,
+    battlepass_jump_exp,
+    battlepass_bet_qualifies,
+    battlepass_pve_exp,
+    award_battlepass_exp,
+    get_user_battlepass,
+    set_user_battlepass_level,
+    battlepass_levelup_text,
+    get_user_seed_pods,
+    consume_seed_pod,
+    increment_seed_pods,
+    STACKABLE_SHOP_ITEMS,
+    register_imbue_catalogs,
+    set_fully_stocked_item_ids,
+    BATTLEPASS_3070_NAME,
+    BATTLE_PASS_MULTI_UNLOCK_LV,
+    grant_gpu,
+    get_the_world_used_date_est,
+    try_claim_the_world_today,
+)
+from seedpod import (
+    seedpod_build_pool,
+    seedpod_pick_prize,
+    seedpod_fallback_prize,
+    seedpod_opened_title,
+    seedpod_grants_immediately,
+    seedpod_prize_rarity,
+    seedpod_normalized_loot_weights,
 )
 
 try:
@@ -327,6 +380,9 @@ _invite_cache = {}
 
 # Per-user locks to prevent concurrent /imbue operations for the same user
 _imbue_locks: dict[int, asyncio.Lock] = {}
+
+# Per-user locks so /seedpod cannot be opened twice at once
+_seedpod_locks: dict[int, asyncio.Lock] = {}
 
 # Per-user locks so only one of gather/harvest post-response sends a rank-up embed for the same user
 _planter_role_locks: dict[int, asyncio.Lock] = {}
@@ -671,7 +727,7 @@ GARDENER_NAMES = {
     2: "JOSE",
     3: "ESTEBAN",
     4: "ADRIANA ROMINA MENDOZA BOTTEGA",
-    5: "Gardener #5",
+    5: "LOUIS",
 }
 
 # Gardener prices
@@ -708,6 +764,18 @@ GPU_SHOP = [
     {"name": "NATIVIDIA RooTX 4090", "percent_increase": 2000, "seconds_increase": 60, "price": 1000000},
     {"name": "NATIVIDIA RooTX 5090", "percent_increase": 6000, "seconds_increase": 100, "price": 2000000},
 ]
+BATTLEPASS_3070_STATS = {
+    "name": BATTLEPASS_3070_NAME,
+    "percent_increase": 150,
+    "seconds_increase": 8,
+    "price": 0,
+}
+
+
+def gpu_stats_for(gpu_name: str) -> dict | None:
+    if gpu_name == BATTLEPASS_3070_NAME:
+        return BATTLEPASS_3070_STATS
+    return next((gpu for gpu in GPU_SHOP if gpu["name"] == gpu_name), None)
 
 # BASKET UPGRADE PATHS
 UPGRADE_PRICES = [500, 1500, 4000, 10000, 25000, 60000, 150000, 350000, 700000, 1000000]
@@ -1191,6 +1259,8 @@ TRACTOR_ENCHANTMENTS = {
     ],
 }
 
+register_imbue_catalogs(HOE_ENCHANTMENTS, TRACTOR_ENCHANTMENTS)
+
 
 def roll_attunement(tool_type: str, user_id: int = None, exclude_enchant: dict = None) -> dict:
     """Roll a random imbuement for the given tool type ('hoe' or 'tractor').
@@ -1625,6 +1695,28 @@ GATHERING_AREAS = {
 }
 
 VALID_GATHERING_CHANNELS = set(GATHERING_AREAS.keys())
+HIDDEN_TEST_CHANNEL = "hidden"
+
+
+def _norm_channel_name(name: str) -> str:
+    return (name or "").lower().replace(" ", "-")
+
+
+def _is_hidden_test_channel(name: str) -> bool:
+    """#hidden is the admin test channel; gameplay commands are allowed there."""
+    return _norm_channel_name(name) == HIDDEN_TEST_CHANNEL
+
+
+def _in_allowed_channels(name: str, allowed) -> bool:
+    n = _norm_channel_name(name)
+    return n == HIDDEN_TEST_CHANNEL or n in allowed
+
+
+def _effective_gather_channel(name: str) -> str:
+    """Treat #hidden as #forest so gather/harvest work while testing."""
+    n = _norm_channel_name(name)
+    return "forest" if n == HIDDEN_TEST_CHANNEL else n
+
 
 # Bloom rank auto-unlock: if bloom_count >= threshold, area is unlocked AND planter level check is skipped.
 # CEDAR I+ (3) = grove, BIRCH I+ (6) = marsh, MAPLE I+ (9) = bog, OAK I+ (12) = mire.
@@ -1875,7 +1967,7 @@ active_pve_events: dict[int, dict] = {}
 def _guild_has_active_pve(guild: discord.Guild) -> bool:
     """True if any gathering channel in this guild currently has an active enemy (wild animal or swarm). Used to block boss spawn when an enemy is up."""
     for ch in guild.text_channels:
-        if ch.name in VALID_GATHERING_CHANNELS and ch.id in active_pve_events:
+        if (ch.name in VALID_GATHERING_CHANNELS or _is_hidden_test_channel(ch.name)) and ch.id in active_pve_events:
             return True
     return False
 
@@ -2029,6 +2121,7 @@ PVE_BOSSES = [
         "server_defeat_msg": "Sans has been defeated!",
     },
 ]
+PVE_BOSS_IDS = {boss["id"] for boss in PVE_BOSSES}
 # Twins: spawn both Retinazer and Spazmatism together; both must be defeated to unblock channels.
 PVE_BOSSES_TWINS_IDS = {"retinazer", "spazmatism"}
 # Ender Dragon: spawns in trigger channel; other channels get Obsidian Towers (End Crystals). Dragon regens 2 HP/sec per standing tower.
@@ -2115,6 +2208,7 @@ def check_area_access(member, channel_name: str, user_id: int) -> tuple[bool, st
     Check if a user can gather/harvest in the given channel.
     Returns (allowed, error_message). If allowed, error_message is empty.
     """
+    channel_name = _effective_gather_channel(channel_name)
     # Not a gathering channel at all
     if channel_name not in VALID_GATHERING_CHANNELS:
         channels_list = ", ".join(f"**{GATHERING_AREAS[a]['display_name']}**" for a in GATHERING_AREAS)
@@ -2857,7 +2951,7 @@ ACHIEVEMENTS = {
             {
                 "level": 1,
                 "name": "First Pull",
-                "description": "Click SPIN (0.1% or 1% bet) 1 time",
+                "description": "Click SPIN 1 time",
                 "threshold": 1,
                 "boost": 0.005  # 0.5%
             },
@@ -3290,6 +3384,16 @@ HIDDEN_ACHIEVEMENTS = {
         "name": "Hospitalized",
         "description": "Break the branch when doing /jump",
         "boost": 0.05  # 5%
+    },
+    "harvest_complete": {
+        "name": "Tomato Town",
+        "description": "Reach Battle Pass LV 30",
+        "boost": 0.20  # 20%
+    },
+    "fully_stocked": {
+        "name": "Fully Stocked",
+        "description": "Own every item!! Nice job!",
+        "boost": 0.25  # 25%
     }
 }
 
@@ -3871,6 +3975,28 @@ def get_palace_treasure_money_multiplier(user_id: int) -> float:
     return PALACE_TREASURE_MONEY_MULTIPLIER if has_shop_item(user_id, "palace_treasure") else 1.0
 
 
+BATTLE_PASS_MULTI_FACTOR = 1.20
+QUAVERS_BEAT_FACTOR = 1.10
+
+
+def _inventory_has_item(user_id: int, item_id: str, full_data=None) -> bool:
+    if full_data is not None:
+        return int((full_data.get("shop_inventory") or {}).get(item_id, 0) or 0) >= 1
+    return has_shop_item(user_id, item_id)
+
+
+def get_battle_pass_multi_multiplier(user_id: int, full_data=None) -> float:
+    if full_data is not None and "battlepass_lv" in full_data:
+        lv = int(full_data.get("battlepass_lv", 0) or 0)
+    else:
+        lv = int(get_user_battlepass(user_id).get("lv", 0) or 0)
+    return BATTLE_PASS_MULTI_FACTOR if lv >= BATTLE_PASS_MULTI_UNLOCK_LV else 1.0
+
+
+def get_quavers_beat_multiplier(user_id: int, full_data=None) -> float:
+    return QUAVERS_BEAT_FACTOR if _inventory_has_item(user_id, "quavers_beat", full_data) else 1.0
+
+
 def get_edward_splash_money_multiplier(user_id: int) -> float:
     """Return cumulative 1% money multiplier per item. Edward and Splash Potion of Luck each add 1% (stack multiplicatively)."""
     mult = 1.0
@@ -3931,6 +4057,12 @@ def get_pve_damage_multiplier(user_id: int, is_boss: bool = False) -> int:
         damage += 1  # +1 for enemies
     if inv.get("thorfinns_dagger", 0) >= 1:
         damage += 1  # +1 for enemies
+    if inv.get("resonance_nail", 0) >= 1:
+        damage += 1
+    if inv.get("neo_frontier_axe", 0) >= 1:
+        damage += 2
+    if inv.get("true_judgements_gavel", 0) >= 1:
+        damage += 4
     return damage
 
 
@@ -4340,11 +4472,15 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
     elif full_data is None and has_shop_item(user_id, "alchemists_pocketwatch"):
         alchemist_extra = base_for_buffs * 0.05
     extra_money_from_gamer_multi = base_for_buffs * (gamer_multi_mult - 1.0) if gamer_multi_mult > 1.0 else 0.0
+    battle_pass_multi_mult = get_battle_pass_multi_multiplier(user_id, full_data=full_data)
+    extra_money_from_battlepass_multi = base_for_buffs * (battle_pass_multi_mult - 1.0) if battle_pass_multi_mult > 1.0 else 0.0
+    quavers_beat_mult = get_quavers_beat_multiplier(user_id, full_data=full_data)
+    extra_money_from_quavers_beat = base_for_buffs * (quavers_beat_mult - 1.0) if quavers_beat_mult > 1.0 else 0.0
     jump_multi_mult = get_jump_multi_multiplier(user_id)
     jump_debuff_mult = get_jump_debuff_multiplier(user_id)
     extra_money_from_jump_multi = base_for_buffs * (jump_multi_mult - 1.0) if jump_multi_mult > 1.0 else 0.0
     extra_money_from_jump_debuff = base_for_buffs * (jump_debuff_mult - 1.0) if jump_debuff_mult < 1.0 else 0.0  # negative value
-    final_value = base_for_buffs + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_server_tag + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra + extra_money_from_scarecrow + extra_money_from_bloomstone + extra_money_from_gamer_multi + extra_money_from_jump_multi + extra_money_from_jump_debuff
+    final_value = base_for_buffs + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_server_tag + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + alchemist_extra + extra_money_from_scarecrow + extra_money_from_bloomstone + extra_money_from_gamer_multi + extra_money_from_battlepass_multi + extra_money_from_quavers_beat + extra_money_from_jump_multi + extra_money_from_jump_debuff
 
     # Calculate new balance from pre-fetched data
     current_balance = user_data["balance"]
@@ -4399,6 +4535,8 @@ def _perform_gather_for_user_sync(user_id: int, apply_cooldown: bool = True,
         "extra_money_from_shadow_crystal": extra_money_from_shadow_crystal,
         "gamer_multi_multiplier": gamer_multi_mult,
         "extra_money_from_gamer_multi": extra_money_from_gamer_multi,
+        "battlepass_multi_multiplier": battle_pass_multi_mult,
+        "extra_money_from_battlepass_multi": extra_money_from_battlepass_multi,
         "jump_multi_multiplier": jump_multi_mult,
         "extra_money_from_jump_multi": extra_money_from_jump_multi,
         "jump_debuff_multiplier": jump_debuff_mult,
@@ -4676,6 +4814,13 @@ def _almanac_filled_count(almanac_entries: dict) -> int:
     return sum(1 for k in almanac_entries if k in _ALMANAC_COUNTABLE_KEYS)
 
 
+def _almanac_completion_text(almanac_entries: dict) -> str:
+    filled = _almanac_filled_count(almanac_entries or {})
+    total = _ALMANAC_TOTAL_SLOTS
+    pct = (100.0 * filled / total) if total else 0.0
+    return f"**📚 ALMANAC:** {filled}/{total} ({pct:.1f}%)"
+
+
 def _almanac_section_filled(almanac_entries: dict, category: str) -> bool:
     """True if every (plant, ripeness) slot for this category is filled (excluding Mikellion)."""
     slots = _almanac_slots_by_category().get(category, [])
@@ -4726,6 +4871,26 @@ def get_seasonal_multiplier(month_index: int, category: str) -> tuple:
     if bonus and bonus["category"] == category:
         return bonus["multiplier"], bonus["label"]
     return 1.0, None
+
+
+def _seasonal_embed_badge(label: str | None) -> str | None:
+    if not label:
+        return None
+    if "🌸" in label:
+        return "(+🌸MONTH!)"
+    if "🥬" in label:
+        return "(+🥬MONTH!)"
+    if "🍎" in label:
+        return "(+🍎MONTH!)"
+    return None
+
+
+def _month_embed_value(user_name: str, month_name: str, seasonal_label: str | None, active: bool) -> str:
+    line = f"{user_name} - **{(month_name or '-').upper()}**"
+    badge = _seasonal_embed_badge(seasonal_label) if active else None
+    if badge:
+        return f"{line} {badge}"
+    return line
 
 # Event definitions
 HOURLY_EVENTS = [
@@ -5351,6 +5516,7 @@ class RouletteJoinView(discord.ui.View):
             # Deduct bet
             new_balance = normalize_money(user_balance - bet_amount)
             update_user_balance(user_id, new_balance)
+            game.players[user_id]["battlepass_eligible"] = battlepass_bet_qualifies(bet=bet_amount, balance=user_balance)
             
             # Update the embed
             embed = interaction.message.embeds[0]
@@ -5558,6 +5724,10 @@ class RouletteContinueView(discord.ui.View):
             current_balance = normalize_money(current_balance)
             new_balance = normalize_money(current_balance + winnings)
             update_user_balance(current_player_id, new_balance)
+            bp = None
+            if player.get("battlepass_eligible"):
+                bp = award_battlepass_exp(current_player_id, BATTLEPASS_EXP_RUSSIAN_CASHOUT)
+                await _notify_battlepass_level_up(interaction, bp)
             
             # Remove from active games
             if current_player_id in user_active_games:
@@ -5580,6 +5750,7 @@ class RouletteContinueView(discord.ui.View):
             )
             embed.add_field(name="📈 Multiplier Achieved", value=f"{game.calculate_total_multiplier(player['rounds_survived']):.2f}x", inline=True)
             embed.add_field(name="🎯 Rounds Survived", value=f"{player['rounds_survived']}", inline=True)
+            _apply_battlepass_exp_footer(embed, bp)
             
             try:
                 await interaction.message.edit(embed=embed, view=None)
@@ -5738,6 +5909,11 @@ async def end_roulette_game(channel, game_id):
                 inline=False
             )
         
+        bp = None
+        if winner.get("battlepass_eligible"):
+            bp = award_battlepass_exp(winner_id, BATTLEPASS_EXP_RUSSIAN_WIN)
+            await _notify_battlepass_hidden(winner_id, bp)
+        _apply_battlepass_exp_footer(embed, bp)
         await channel.send(embed=embed)
         
         # Check russian roulette achievement (winner = game completed)
@@ -6210,7 +6386,7 @@ def _gathemon_winner_gathers_sync(user_id: int, num_plants: int) -> tuple[list, 
     return results, total_value
 
 
-async def _gathemon_award_winner_gathers(winner_id: int, loser_id: int, num_plants: int, channel: discord.abc.Messageable):
+async def _gathemon_award_winner_gathers(winner_id: int, loser_id: int, num_plants: int, channel: discord.abc.Messageable, battlepass=None):
     """Award plants instantly (run gathers in thread), then send a single reward embed. Uses winner's highest area + boosts."""
     if num_plants <= 0 or channel is None:
         return
@@ -6252,7 +6428,11 @@ async def _gathemon_award_winner_gathers(winner_id: int, loser_id: int, num_plan
                 winner_name = None
         if winner_name is None:
             winner_name = f"User {winner_id}"
-        reward_embed.set_footer(text=f"{winner_name} now has +25% GAMER MULTI (+25% money) for 30 minutes!")
+        _apply_battlepass_exp_footer(
+            reward_embed, battlepass,
+            extra=f"{winner_name} now has +25% GAMER MULTI (+25% money) for 30 minutes!")
+    else:
+        _apply_battlepass_exp_footer(reward_embed, battlepass)
     try:
         await channel.send(f"<@{winner_id}>", embed=reward_embed)
     except Exception as e:
@@ -6425,18 +6605,37 @@ class GathemonBattleView(discord.ui.View):
             if uid in user_active_gathemon:
                 del user_active_gathemon[uid]
         del active_gathemon_battles[self.game_id]
+        bp = None
+        try:
+            winner_poke = battle.pokemon1 if winner_id == battle.player1_id else battle.pokemon2
+            bp = award_battlepass_exp(
+                winner_id,
+                battlepass_gathemon_exp(
+                    hp=int(winner_poke.get("hp", 0)),
+                    max_hp=int(winner_poke.get("max_hp", 1)),
+                ),
+            )
+            await _notify_battlepass_hidden(winner_id, bp)
+        except Exception as e:
+            print(f"Gathemon forfeit battlepass EXP failed for {winner_id}: {e}")
+            bp = None
+        timeout_embed = discord.Embed(
+            description=f"⏰ <@{forfeiter_id}> ran out of time and forfeits! <@{winner_id}> wins!",
+            color=discord.Color.gold(),
+        )
+        _apply_battlepass_exp_footer(timeout_embed, bp)
         try:
             if battle.message:
                 await battle.message.edit(
-                    content=f"⏰ <@{forfeiter_id}> ran out of time and forfeits! <@{winner_id}> wins!",
-                    embed=None,
+                    content=None,
+                    embed=timeout_embed,
                     view=None,
                 )
         except Exception:
             pass
         channel = bot.get_channel(battle.channel_id) if battle.channel_id else None
         if winner_id and channel:
-            await _gathemon_award_winner_gathers(winner_id, forfeiter_id, battle.bet * 2, channel)
+            await _gathemon_award_winner_gathers(winner_id, forfeiter_id, battle.bet * 2, channel, battlepass=bp)
         else:
             add_user_bloom_cycle_plants(battle.player1_id, battle.bet)
             add_user_bloom_cycle_plants(battle.player2_id, battle.bet)
@@ -6513,7 +6712,18 @@ class GathemonUseMoveButton(discord.ui.Button):
         else:
             battle.current_turn_id = battle.player2_id if battle.current_turn_id == battle.player1_id else battle.player1_id
             view = GathemonBattleView(self.game_id, battle.current_turn_id)
+        bp = None
+        if winner_id is not None and num_plants_won and channel:
+            loser_id = battle.player2_id if winner_id == battle.player1_id else battle.player1_id
+            winner_poke = battle.pokemon1 if winner_id == battle.player1_id else battle.pokemon2
+            bp = await asyncio.to_thread(
+                award_battlepass_exp,
+                winner_id,
+                battlepass_gathemon_exp(hp=int(winner_poke.get("hp", 0)), max_hp=int(winner_poke.get("max_hp", 1))),
+            )
+            await _notify_battlepass_level_up(interaction, bp, user_id=winner_id)
         embed = _gathemon_battle_embed_public(battle)
+        _apply_battlepass_exp_footer(embed, bp)
         try:
             if battle.message:
                 await battle.message.edit(embed=embed, view=view)
@@ -6521,7 +6731,7 @@ class GathemonUseMoveButton(discord.ui.Button):
             print(f"Gathemon edit messages: {e}")
         if winner_id is not None and num_plants_won and channel:
             loser_id = battle.player2_id if winner_id == battle.player1_id else battle.player1_id
-            await _gathemon_award_winner_gathers(winner_id, loser_id, num_plants_won, channel)
+            await _gathemon_award_winner_gathers(winner_id, loser_id, num_plants_won, channel, battlepass=bp)
 
 
 # --- MAYFLOWER (PVP Battleship-style game) ---
@@ -6669,7 +6879,7 @@ async def _gathership_refund_and_cleanup(game_id: str, channel=None):
             pass
 
 
-async def end_gathership_game(channel, game_id: str, winner_id: int, loser_id: int):
+async def end_gathership_game(channel, game_id: str, winner_id: int, loser_id: int, interaction=None):
     if game_id not in active_gathership_games:
         return
     game = active_gathership_games[game_id]
@@ -6688,6 +6898,20 @@ async def end_gathership_game(channel, game_id: str, winner_id: int, loser_id: i
     loser_mention = f"<@{loser_id}>"
     # Grant GAMER MULTI (+25% money) for 30 minutes to the Mayflower winner (if they don't already have it)
     newly_granted_multi = grant_gamer_multi(winner_id)
+    winner_is_host = winner_id == game.host_id
+    winner_ships = game.get_ships(winner_is_host)
+    shot_at = game.get_shot_at(winner_is_host)
+    ships_left = len(winner_ships - shot_at)
+    bp = None
+    try:
+        bp = award_battlepass_exp(
+            winner_id,
+            battlepass_gathership_exp(ships_left=ships_left, num_ships=game.num_ships),
+        )
+    except Exception as e:
+        print(f"Gathership battlepass EXP failed for {winner_id}: {e}")
+    if interaction is not None:
+        await _notify_battlepass_level_up(interaction, bp, user_id=winner_id)
     embed = discord.Embed(
         title="🏆 MAYFLOWER — GAME OVER 🏆",
         description=f"{winner_mention} sank all of {loser_mention}'s ships and wins **{format_money(total_pot)}**!",
@@ -6713,7 +6937,10 @@ async def end_gathership_game(channel, game_id: str, winner_id: int, loser_id: i
                 winner_name = None
         if winner_name is None:
             winner_name = f"User {winner_id}"
-        embed.set_footer(text=f"{winner_name} now has +25% GAMER MULTI (+25% money) for 30 minutes!")
+        _apply_battlepass_exp_footer(
+            embed, bp, extra=f"{winner_name} now has +25% GAMER MULTI (+25% money) for 30 minutes!")
+    else:
+        _apply_battlepass_exp_footer(embed, bp)
     # embed.add_field(name="💰 Winner takes", value=format_money(total_pot), inline=True)
     await channel.send(embed=embed)
 
@@ -7114,7 +7341,7 @@ class GathershipFireView(discord.ui.View):
                 loser_id = game.opponent_id
             if loser_id is not None:
                 winner_id = game.host_id if loser_id == game.opponent_id else game.opponent_id
-                await end_gathership_game(channel, self.game_id, winner_id, loser_id)
+                await end_gathership_game(channel, self.game_id, winner_id, loser_id, interaction=interaction)
                 return
             # Hit = same player shoots again (Battleship rules); miss = switch turn
             if not hit:
@@ -7180,12 +7407,17 @@ def _coinflip_critical_path(user_id: int, bet: float, choice: str) -> dict:
     else:
         new_balance = new_balance_after_bet
 
+    bp = None
+    if won and battlepass_bet_qualifies(bet=bet, balance=current_balance):
+        bp = award_battlepass_exp(user_id, battlepass_coinflip_exp(streak=new_streak))
+
     return {
         "won": won,
         "coin_result": coin_result,
         "new_balance": new_balance,
         "bet": bet,
         "achievements_unlocked": achievements_unlocked,
+        "battlepass": bp,
     }
 
 
@@ -7235,6 +7467,7 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
         coin_result = result["coin_result"]
         new_balance = result["new_balance"]
 
+        bp = result.get("battlepass")
         if won:
             message = (
                 f"You placed **{format_money(bet)}** on **{choice}**!\n"
@@ -7250,7 +7483,16 @@ async def coinflip(interaction: discord.Interaction, bet: float, choice: str):
             )
 
         # Send the main coinflip result message first
-        await safe_interaction_response(interaction, interaction.followup.send, message, ephemeral=False)
+        if bp and int(bp.get("gained", 0) or 0) > 0:
+            flip_embed = discord.Embed(
+                description=message,
+                color=discord.Color.gold() if won else discord.Color.red(),
+            )
+            _apply_battlepass_exp_footer(flip_embed, bp)
+            await safe_interaction_response(interaction, interaction.followup.send, embed=flip_embed)
+        else:
+            await safe_interaction_response(interaction, interaction.followup.send, message, ephemeral=False)
+        await _notify_battlepass_level_up(interaction, bp)
 
         # Then send all achievement notifications as ephemeral (only visible to user)
         for achievement_name, achievement_level in result["achievements_unlocked"]:
@@ -7579,6 +7821,10 @@ def _slots_spin_critical_path(
         set_user_achievement_level(user_id, "slots", new_slots_level)
         achievements_unlocked.append(("slots", new_slots_level))
 
+    bp = None
+    if won:
+        bp = award_battlepass_exp(user_id, BATTLEPASS_EXP_SLOTS)
+
     return {
         "error": None,
         "grid": final_grid,
@@ -7589,6 +7835,7 @@ def _slots_spin_critical_path(
         "use_free_spin": use_free_spin,
         "date_est": date_est,
         "balance": balance,
+        "battlepass": bp,
         "achievements_unlocked": achievements_unlocked,
     }
 
@@ -7730,7 +7977,7 @@ class SlotsView(discord.ui.View):
                 value=f"{lost_text}\nBalance: **{format_money(curr_balance)}**.",
                 inline=False,
             )
-        result_embed.set_footer(text="Click SPIN to play again!")
+        _apply_battlepass_exp_footer(result_embed, result.get("battlepass"), extra="Click SPIN to play again!")
         self.spun = False
         self.locked_columns = set()
         self.grid = generate_slot_grid()
@@ -7739,6 +7986,7 @@ class SlotsView(discord.ui.View):
             if getattr(c, "custom_id", "") != "slots_spin":
                 c.disabled = False
         await interaction.message.edit(embed=result_embed, view=self)
+        await _notify_battlepass_level_up(interaction, result.get("battlepass"))
 
         for item in result["achievements_unlocked"]:
             if item[0] == "hidden":
@@ -7808,7 +8056,7 @@ async def slots(interaction: discord.Interaction):
         if not await safe_defer(interaction, ephemeral=False):
             return
         channel_name = (interaction.channel.name or "").lower().replace(" ", "-")
-        if channel_name not in VALID_SLOTS_CHANNELS:
+        if not _in_allowed_channels(channel_name, VALID_SLOTS_CHANNELS):
             await safe_interaction_response(interaction, interaction.followup.send,
                 "❌ Slots can only be played in **#slots-1**, **#slots-2**, **#slots-3**, **#slots-4**, or **#slots-5**!", ephemeral=True)
             return
@@ -7858,7 +8106,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.playing,
-            name="running /gather on V1.1.3"
+            name="running /gather on V1.2.0"
         )
     )
     try:
@@ -7867,11 +8115,12 @@ async def on_ready():
         cmd_names = [c.name for c in synced]
         if "give" in cmd_names and "bot_pay" in cmd_names and "giveaway" in cmd_names:
             print("Commands verified: /give, /bot_pay, /giveaway are registered.")
-        # In development, also sync to each guild so the dev server sees new/renamed commands immediately (global sync can take up to 1 hour to propagate)
-        env = os.getenv("ENVIRONMENT", "").lower()
-        if env == "development" and bot.guilds:
+        # Dev token: copy globals onto each guild and sync there. Global sync can take
+        # up to an hour, so without this /set never shows new choices like Battle Pass.
+        if not is_production and bot.guilds:
             for guild in bot.guilds:
                 try:
+                    bot.tree.copy_global_to(guild=guild)
                     await bot.tree.sync(guild=guild)
                     print(f"Synced commands to guild: {guild.name} ({guild.id})")
                 except Exception as eg:
@@ -8204,8 +8453,13 @@ async def _post_rares_plant(guild: discord.Guild, user: discord.Member, source: 
 IMBUE_RARES_RARITIES = {"NETHERITE", "LUMINITE", "CELESTIAL", "SECRET"}
 
 
+def _seedpod_rares_line(msg: str) -> str:
+    """Append the seed pod emoji so #rares can tell a pod drop from a normal roll."""
+    return f"{msg} 🫛"
+
+
 async def _post_rares_imbue(guild: discord.Guild, user: discord.Member,
-                            enchant: dict, tool_type: str) -> None:
+                            enchant: dict, tool_type: str, from_seedpod: bool = False) -> None:
     """Post a rolled netherite+ imbue to #rares."""
     if not guild or not enchant:
         return
@@ -8218,6 +8472,8 @@ async def _post_rares_imbue(guild: discord.Guild, user: discord.Member,
     # Leading rarity emoji, rarity in caps, tool type next, imbue name bold+italic, sparkle at end
     # e.g. ":IMBUE_CE: @User rolled a CELESTIAL hoe imbue: CULTISCYTHE OF THE LIGHTBRINGER! ✨"
     msg = f"{rarity_emoji} {user.mention} rolled a **{rarity}** {tool_text}: **_{name}_**! ✨"
+    if from_seedpod:
+        msg = _seedpod_rares_line(msg)
     await _post_to_rares_channel(guild, msg)
 
 
@@ -8330,6 +8586,14 @@ def _gather_critical_path(member, user_id: int, channel_name: str, area: dict) -
             "is_critical_gather": is_crit,
         }
 
+    bp = award_battlepass_exp(
+        user_id,
+        battlepass_gather_exp(
+            ripeness=gather_result.get("ripeness", ""),
+            is_crit=bool(gather_result.get("is_critical_gather")),
+        ),
+    )
+
     return {
         "gather_result": gather_result,
         "full_data": full_data,
@@ -8338,6 +8602,7 @@ def _gather_critical_path(member, user_id: int, channel_name: str, area: dict) -
         "victim_planter_level": user_planter_level,
         "steal_payload": steal_payload,
         "area_mult": area_mult,
+        "battlepass": bp,
     }
 
 
@@ -8447,6 +8712,7 @@ class StealView(discord.ui.View):
         self._window_sec = window_sec
         self._created_at = time.time()
         self._stolen = False
+        self._steal_lock = asyncio.Lock()
         self._message = None  # set by caller after send so on_timeout can edit
 
     def _expired(self) -> bool:
@@ -8470,47 +8736,23 @@ class StealView(discord.ui.View):
                 interaction, interaction.response.send_message,
                 "❌ You can't steal from yourself!", ephemeral=True)
             return
-        if self._stolen:
-            await safe_interaction_response(
-                interaction, interaction.response.send_message,
-                "❌ This has already been stolen!", ephemeral=True)
-            return
-        if self._expired():
-            await safe_interaction_response(
-                interaction, interaction.response.send_message,
-                "❌ Too late! The steal window has closed!", ephemeral=True)
-            return
 
         stealer_id = interaction.user.id
-
-        # Area-based steal restriction: stealer must have the steal channel's area unlocked,
-        # or the area directly above or below it. Underground jungle is a free-for-all.
-        if self.channel_name != "underground-jungle":
-            stealer_unlocked = get_user_unlocked_areas(stealer_id)
-            # Forest is always unlocked
-            stealer_unlocked["forest"] = True
-            area_order = ["forest", "underground-jungle", "grove", "marsh", "bog", "mire"]
-            steal_area = self.channel_name
-            if steal_area in area_order:
-                idx = area_order.index(steal_area)
-                # Allowed if stealer has unlocked this area, or adjacent areas
-                adjacent = {area_order[i] for i in range(max(0, idx - 1), min(len(area_order), idx + 2))}
-                stealer_has_adjacent = any(stealer_unlocked.get(a, False) for a in adjacent)
-                if not stealer_has_adjacent:
-                    await safe_interaction_response(
-                        interaction, interaction.response.send_message,
-                        "❌ You can't steal here! You need a nearby area unlocked.", ephemeral=True)
-                    return
-
-        self._stolen = True
         victim_id = self.victim_id
         payload = self.steal_payload
+        steal_type = self.steal_type
+        channel_name = self.channel_name
+
+        def _area_gate():
+            has_bandana = has_shop_item(stealer_id, "bandana")
+            unlocked = {} if has_bandana else get_user_unlocked_areas(stealer_id)
+            return has_bandana, unlocked
 
         def _do_steal():
             # Van der Linde's Plan: +15% money from gather/harvests you steal
             steal_value_mult = 1.15 if has_shop_item(stealer_id, "van_der_lindes_plan") else 1.0
-            stolen_value = payload["value"] if self.steal_type == "gather" else payload["total_value"]
-            if self.steal_type == "gather":
+            stolen_value = payload["value"] if steal_type == "gather" else payload["total_value"]
+            if steal_type == "gather":
                 gather_value = payload["value"] * steal_value_mult
                 steal_revert_gather(
                     victim_id, payload["value"], payload["item_name"],
@@ -8526,15 +8768,37 @@ class StealView(discord.ui.View):
                 steal_apply_harvest(
                     stealer_id, payload["items_inc"], payload["ripeness_inc"],
                     harvest_value, payload["num_items"])
-            # Decoys: victim gets 15% of stolen value back
+            decoy_refund = 0.0
             if has_shop_item(victim_id, "decoys") and stolen_value > 0:
                 decoy_refund = round(stolen_value * 0.15, 2)
                 victim_bal = get_user_balance(victim_id)
                 update_user_balance(victim_id, victim_bal + decoy_refund)
-            # Return stealer's updated balance for embed
-            return get_user_balance(stealer_id)
+            return get_user_balance(stealer_id), decoy_refund
 
-        stealer_new_balance = await asyncio.to_thread(_do_steal)
+        async with self._steal_lock:
+            if self._stolen:
+                await safe_interaction_response(
+                    interaction, interaction.response.send_message,
+                    "❌ This has already been stolen!", ephemeral=True)
+                return
+            if self._expired():
+                await safe_interaction_response(
+                    interaction, interaction.response.send_message,
+                    "❌ Too late! The steal window has closed!", ephemeral=True)
+                return
+
+            # Area lock: this channel or an adjacent one. Underground jungle is
+            # always open. Bandana skips the lock so crowded servers stay fair.
+            has_bandana, stealer_unlocked = await asyncio.to_thread(_area_gate)
+            if not steal_area_allowed(channel_name, stealer_unlocked, has_bandana=has_bandana):
+                await safe_interaction_response(
+                    interaction, interaction.response.send_message,
+                    "❌ You can't steal here! You need a nearby area unlocked.", ephemeral=True)
+                return
+
+            self._stolen = True
+            stealer_new_balance, decoy_refund = await asyncio.to_thread(_do_steal)
+        bp = await asyncio.to_thread(award_battlepass_exp, stealer_id, BATTLEPASS_EXP_STEAL)
 
         # Check stealing achievement (total steals just incremented in DB)
         def _check_stealing_achievement():
@@ -8557,9 +8821,6 @@ class StealView(discord.ui.View):
             child.disabled = True
 
         stealer_name = interaction.user.display_name
-        # Decoys: show victim's 15% back in embed if applicable
-        stolen_val = payload["value"] if self.steal_type == "gather" else payload["total_value"]
-        decoy_refund = round(stolen_val * 0.15, 2) if has_shop_item(self.victim_id, "decoys") and stolen_val > 0 else 0
         try:
             old_embed = interaction.message.embeds[0] if interaction.message.embeds else None
             if self.steal_type in ("gather", "harvest") and old_embed:
@@ -8588,8 +8849,10 @@ class StealView(discord.ui.View):
                     description=f"🔴 Stolen by **{stealer_name}**!",
                     color=0x8B0000,
                 )
+            _apply_battlepass_exp_footer(embed, bp)
             await safe_interaction_response(
                 interaction, interaction.response.edit_message, embed=embed, view=self)
+            await _notify_battlepass_level_up(interaction, bp)
             if stealing_level_up is not None:
                 await send_achievement_notification(interaction, "stealing", stealing_level_up)
             if no_honor_unlocked:
@@ -8605,9 +8868,13 @@ class StealView(discord.ui.View):
                     await send_hidden_achievement_notification(interaction, "no_honor")
                 except Exception:
                     pass
+            fallback = discord.Embed(
+                description=f"🔴 Stolen by **{stealer_name}**!",
+                color=0x8B0000,
+            )
+            _apply_battlepass_exp_footer(fallback, bp)
             await safe_interaction_response(
-                interaction, interaction.response.send_message,
-                f"🔴 Stolen by **{stealer_name}**!", ephemeral=False)
+                interaction, interaction.response.send_message, embed=fallback, ephemeral=False)
         self.stop()
 
 
@@ -8701,6 +8968,9 @@ class WildAnimalView(discord.ui.View):
             return
         if getattr(interaction, "message", None):
             self.message = interaction.message
+        if self.channel_id not in active_pve_events:
+            self.defeated = True
+            return
         # Compute damage OUTSIDE the lock (DB call doesn't block other attackers)
         damage = await asyncio.to_thread(self._get_damage, interaction.user.id)
         async with self._lock:
@@ -8831,6 +9101,9 @@ class BulletAntView(discord.ui.View):
             return
         if getattr(interaction, "message", None):
             self.message = interaction.message
+        if self.channel_id not in active_pve_events:
+            self.defeated = True
+            return
         damage = await asyncio.to_thread(self._get_damage, interaction.user.id)
         async with self._lock:
             if self.defeated:
@@ -9028,6 +9301,9 @@ class BeeView(discord.ui.View):
             return
         if getattr(interaction, "message", None):
             self.message = interaction.message
+        if self.channel_id not in active_pve_events:
+            self.defeated = True
+            return
         damage = await asyncio.to_thread(self._get_damage, interaction.user.id)
         async with self._lock:
             if self.defeated:
@@ -9275,6 +9551,9 @@ class BossView(discord.ui.View):
             return
         if getattr(interaction, "message", None):
             self.message = interaction.message
+        if self.guild_id not in active_boss_events:
+            self.defeated = True
+            return
         damage = await asyncio.to_thread(self._get_damage, interaction.user.id)
         async with self._lock:
             if self.defeated:
@@ -9882,6 +10161,9 @@ class EnderDragonView(discord.ui.View):
             return
         if getattr(interaction, "message", None):
             self.message = interaction.message
+        if self.guild_id not in active_boss_events:
+            self.defeated = True
+            return
         damage = await asyncio.to_thread(self._get_damage, interaction.user.id)
         async with self._lock:
             if self.defeated:
@@ -10126,6 +10408,9 @@ class PlanteraBulbView(discord.ui.View):
             return
         if self.resolved:
             await safe_interaction_response(interaction, interaction.response.send_message, "Someone already chose!", ephemeral=True)
+            return
+        if self.guild_id not in active_plantera_bulb_guilds:
+            self.resolved = True
             return
         # Do not let Plantera steal a slot from a boss that already warned / is active
         if self.guild_id in active_boss_events:
@@ -10425,6 +10710,31 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
                 print(f"PvE reward DB failed for user {user_id}: {e}")
         _pve_executor.shutdown(wait=False)
 
+        total_damage_all = sum(attackers.values()) if attackers else 0
+        is_boss = str(enemy_id) in PVE_BOSS_IDS
+        bp_results = {}
+        for uid, dmg in attackers.items():
+            try:
+                bp_results[uid] = await asyncio.to_thread(
+                    award_battlepass_exp,
+                    uid,
+                    battlepass_pve_exp(
+                        damage=int(dmg),
+                        max_hp=max_hp,
+                        total_damage=int(total_damage_all),
+                        is_boss=is_boss,
+                    ),
+                    extra=True,
+                )
+            except Exception as e:
+                print(f"PvE battlepass EXP failed for user {uid}: {e}")
+        actor = interaction.user.id
+        for uid, bp in bp_results.items():
+            if uid == actor:
+                await _notify_battlepass_level_up(interaction, bp)
+            else:
+                await _notify_battlepass_hidden(uid, bp)
+
         # Phase 2: Build embeds and fire ALL DMs concurrently
         is_sans = enemy_id == "sans"
 
@@ -10454,7 +10764,8 @@ async def _pve_distribute_rewards(interaction: discord.Interaction, animal: dict
                     color=discord.Color.green())
                 reward_embed.add_field(
                     name="💰 **TOTAL**", value=f"**{format_money(total_value)}**", inline=True)
-                reward_embed.set_footer(text="Thanks for defending the gathering grounds!")
+                _apply_battlepass_exp_footer(
+                    reward_embed, bp_results.get(user_id), extra="Thanks for defending the gathering grounds!")
 
                 try:
                     await member.send(embed=reward_embed)
@@ -10618,7 +10929,8 @@ async def gather(interaction: discord.Interaction):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
-        channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
+        channel_name = _effective_gather_channel(
+            interaction.channel.name if hasattr(interaction.channel, 'name') else "")
         user_id = interaction.user.id
 
         # Quick validation (no DB call)
@@ -10728,9 +11040,11 @@ async def gather(interaction: discord.Interaction):
             embed.add_field(name="**RIPENESS**", value="JackPot", inline=True)
             embed.add_field(name="\U0001f4b0 **TOTAL**", value=f"**{format_money(gather_result['value'])}**", inline=True)
             embed.add_field(name="\U0001f4b5 **NEW BALANCE**", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
+            _apply_battlepass_exp_footer(embed, result.get("battlepass"))
 
             # Send jackpot embed
             await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+            await _notify_battlepass_level_up(interaction, result.get("battlepass"))
 
             # Post to #rares
             area_tag = "[" + channel_name.upper().replace("-", " ") + "]"
@@ -10758,6 +11072,8 @@ async def gather(interaction: discord.Interaction):
             item_boost_sources.append(("Bloomstone", 1))
         if shop_inv.get("alchemists_pocketwatch", 0) >= 1:
             item_boost_sources.append(("Alchemist's Pocketwatch", 1))
+        if shop_inv.get("quavers_beat", 0) >= 1:
+            item_boost_sources.append(("Quaver's Beat", 1))
         if gather_result.get("extra_money_from_nether_star", 0) > 0:
             ns_count = shop_inv.get("nether_star", 0)
             if ns_count > 0:
@@ -10880,6 +11196,12 @@ async def gather(interaction: discord.Interaction):
                 value=f"+{gamer_multi_percent:.2f}% - **+${gather_result['extra_money_from_gamer_multi']:,.2f}**",
                 inline=False,
             )
+        if gather_result.get("extra_money_from_battlepass_multi", 0) > 0:
+            embed.add_field(
+                name="⚔️ **BATTLE PASS MULTI**",
+                value=f"1.2x - **+${gather_result['extra_money_from_battlepass_multi']:,.2f}**",
+                inline=False,
+            )
 
         if gather_result.get("extra_money_from_jump_multi", 0) > 0:
             jump_multi_percent = (gather_result["jump_multi_multiplier"] - 1.0) * 100
@@ -10913,18 +11235,15 @@ async def gather(interaction: discord.Interaction):
         if hoe_enc and hoe_name and hoe_rarity_display:
             embed.add_field(name="\u2728 **IMBUEMENT**", value=f"**{hoe_name}** {hoe_rarity_display}", inline=False)
 
-        if gather_result.get("seasonal_label") and gather_result.get("seasonal_multiplier", 1.0) > 1.0:
-            season_pct = (gather_result["seasonal_multiplier"] - 1.0) * 100
-            embed.add_field(
-                name=f"\U0001f4c5 **{gather_result['seasonal_label']}**",
-                value=f"+{season_pct:.0f}% seasonal bonus",
-                inline=False,
-            )
-
         month_name = gather_result.get("month_name") or "-"
         embed.add_field(
-            name="\U0001f4c5 **MONTH**",
-            value=f"**~**\n{interaction.user.name} - **{month_name.upper()}**",
+            name="\u200b",
+            value=_month_embed_value(
+                interaction.user.name,
+                month_name,
+                gather_result.get("seasonal_label"),
+                gather_result.get("seasonal_multiplier", 1.0) > 1.0,
+            ),
             inline=False,
         )
 
@@ -10938,6 +11257,7 @@ async def gather(interaction: discord.Interaction):
         # Always show TOTAL and NEW BALANCE, regardless of GAMER MULTI
         embed.add_field(name="\U0001f4b0 **TOTAL**", value=f"**{format_money(gather_result['value'])}**", inline=True)
         embed.add_field(name="\U0001f4b5 **NEW BALANCE**", value=f"**{format_money(gather_result['new_balance'])}**", inline=True)
+        _apply_battlepass_exp_footer(embed, result.get("battlepass"))
 
         # === Send the response ASAP (with optional STEAL button) ===
         view = None
@@ -10955,6 +11275,8 @@ async def gather(interaction: discord.Interaction):
                 view._message = msg
         else:
             await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+
+        await _notify_battlepass_level_up(interaction, result.get("battlepass"))
 
         # Chain message (must be after the main embed)
         if chain_triggered:
@@ -11148,11 +11470,14 @@ def _water_critical_path(user_id: int) -> dict:
     if is_first_water_today:
         ach = _sync_water_streak_achievements(user_id, consecutive_days)
 
+    bp = award_battlepass_exp(user_id, battlepass_water_exp(streak=consecutive_days))
+
     return {
         "already_watered": False,
         "message": message,
         "water_streak_level_up": ach["water_streak_level_up"],
         "leap_year_unlocked": ach["leap_year_unlocked"],
+        "battlepass": bp,
     }
 
 
@@ -11179,7 +11504,10 @@ async def water(interaction: discord.Interaction):
             return
 
         message = f"💧 {interaction.user.mention}, " + result["message"]
-        await safe_interaction_response(interaction, interaction.followup.send, message, ephemeral=False)
+        water_embed = discord.Embed(description=message, color=discord.Color.blue())
+        _apply_battlepass_exp_footer(water_embed, result.get("battlepass"))
+        await safe_interaction_response(interaction, interaction.followup.send, embed=water_embed)
+        await _notify_battlepass_level_up(interaction, result.get("battlepass"))
         if result.get("water_streak_level_up") is not None:
             await send_achievement_notification(interaction, "water_streak", result["water_streak_level_up"])
         if result.get("leap_year_unlocked"):
@@ -11431,6 +11759,10 @@ async def stats(interaction: discord.Interaction):
         profile_lines.append(f"<:TreeRing:1474244868288282817> **TREE RINGS:** {tree_rings}")
         profile_lines.append(f"**🔗 CHAIN CHANCE —** Gather: {gather_chain * 100:.1f}%, Harvest: {harvest_chain * 100:.1f}%")
         profile_lines.append(f"**💧 Water Streak:** {water_streak} {day_text} (+{water_streak_pct:.1f}%)")
+        bp_lv = max(0, int(doc.get("battlepass_lv", 0) or 0))
+        bp_exp = int(doc.get("battlepass_exp", 0) or 0)
+        profile_lines.append(f"**⚔️ BATTLE PASS:** LV {bp_lv} ({bp_exp:,} EXP)")
+        profile_lines.append(_almanac_completion_text(doc.get("almanac_entries") or {}))
         # Show remaining time on temporary GAMER MULTI, if active
         if has_gamer_multi(user_id):
             now_ts = time.time()
@@ -11641,6 +11973,10 @@ async def stats(interaction: discord.Interaction):
         if gamer_active:
             # GAMER MULTI is a flat +25% temporary money boost from recent game wins.
             mult_lines.append("**🎮 GAMER MULTI —** +25%")
+        if get_battle_pass_multi_multiplier(user_id, full_data=full_data) > 1.0:
+            mult_lines.append("**⚔️ BATTLE PASS MULTI —** 1.2x")
+        if shop_inv.get("quavers_beat", 0) >= 1:
+            mult_lines.append("**Quaver's Beat —** +10%")
         jump_multi_mult = get_jump_multi_multiplier(user_id)
         jump_debuff_mult = get_jump_debuff_multiplier(user_id)
         if jump_multi_mult > 1.0:
@@ -11658,6 +11994,10 @@ async def stats(interaction: discord.Interaction):
         additive_total += (palace_mult - 1.0) + (edward_mult - 1.0) + (eclipse_mult - 1.0)
         if gamer_active:
             additive_total += 0.25
+        if get_battle_pass_multi_multiplier(user_id, full_data=full_data) > 1.0:
+            additive_total += 0.20
+        if shop_inv.get("quavers_beat", 0) >= 1:
+            additive_total += 0.10
         additive_total += (jump_multi_mult - 1.0) + (jump_debuff_mult - 1.0)
         # Imbue prosperity (Gather + Harvest) counts toward combined %
         imbue_gather_prosperity = (hoe_attunement.get("money_bonus", 0) or 0) if hoe_attunement else 0
@@ -12192,13 +12532,17 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
     extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
     gamer_multi_mult = 1.25 if has_gamer_multi(user_id) else 1.0
     extra_gamer_multi = base_for_buffs * (gamer_multi_mult - 1.0) if gamer_multi_mult > 1.0 else 0.0
+    battle_pass_multi_mult = get_battle_pass_multi_multiplier(user_id, full_data=full_data)
+    extra_battlepass_multi = base_for_buffs * (battle_pass_multi_mult - 1.0) if battle_pass_multi_mult > 1.0 else 0.0
+    quavers_beat_mult = get_quavers_beat_multiplier(user_id, full_data=full_data)
+    extra_quavers_beat = base_for_buffs * (quavers_beat_mult - 1.0) if quavers_beat_mult > 1.0 else 0.0
     jump_multi_mult = get_jump_multi_multiplier(user_id)
     jump_debuff_mult = get_jump_debuff_multiplier(user_id)
     extra_jump_multi = base_for_buffs * (jump_multi_mult - 1.0) if jump_multi_mult > 1.0 else 0.0
     extra_jump_debuff = base_for_buffs * (jump_debuff_mult - 1.0) if jump_debuff_mult < 1.0 else 0.0
     work_lunch_extra = base_for_buffs * 0.10 if (not set_cooldown and has_shop_item(user_id, "work_lunch")) else 0.0
     overtime_extra = base_for_buffs * 1.0 if (not set_cooldown and has_shop_item(user_id, "overtime_approval") and random.random() < 0.10) else 0.0
-    total_value = base_for_buffs + extra_money_from_fuzzy_dice + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_server_tag + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + extra_gamer_multi + extra_jump_multi + extra_jump_debuff
+    total_value = base_for_buffs + extra_money_from_fuzzy_dice + extra_money_from_bloom + extra_money_from_water + extra_money_from_achievement + extra_money_from_daily + extra_money_from_beta_tester + extra_money_from_server_booster + extra_money_from_server_tag + extra_money_from_premium + extra_money_from_nether_star + extra_money_from_black_shard + extra_money_from_shadow_crystal + extra_palace + extra_edward + extra_eclipse + work_lunch_extra + overtime_extra + extra_gamer_multi + extra_battlepass_multi + extra_quavers_beat + extra_jump_multi + extra_jump_debuff
     current_balance = current_balance + total_value
 
     # ----- single batch write: items + ripeness + balance + counts + tree rings + cooldown + almanac -----
@@ -12263,6 +12607,8 @@ def _perform_harvest_for_user_sync(user_id: int, allow_chain: bool = True,
         "extra_money_from_shadow_crystal": extra_money_from_shadow_crystal,
         "gamer_multi_multiplier": gamer_multi_mult,
         "extra_money_from_gamer_multi": extra_gamer_multi,
+        "battlepass_multi_multiplier": battle_pass_multi_mult,
+        "extra_money_from_battlepass_multi": extra_battlepass_multi,
         "jump_multi_multiplier": jump_multi_mult,
         "extra_money_from_jump_multi": extra_jump_multi,
         "jump_debuff_multiplier": jump_debuff_mult,
@@ -12352,6 +12698,9 @@ def _harvest_critical_path(member, user_id: int, channel_name: str, area: dict) 
             "num_items": result["num_items"],
         }
 
+    ripeness_names = [item.get("ripeness", "") for item in result.get("gathered_items") or []]
+    bp = award_battlepass_exp(user_id, battlepass_harvest_exp(ripeness_names))
+
     return {
         "result": result,
         "full_data": full_data,
@@ -12360,6 +12709,7 @@ def _harvest_critical_path(member, user_id: int, channel_name: str, area: dict) 
         "victim_planter_level": user_planter_level,
         "steal_payload": steal_payload,
         "area_mult": area_mult,
+        "battlepass": bp,
     }
 
 
@@ -12455,7 +12805,8 @@ async def harvest(interaction: discord.Interaction):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
-        channel_name = interaction.channel.name.lower() if hasattr(interaction.channel, 'name') else ""
+        channel_name = _effective_gather_channel(
+            interaction.channel.name if hasattr(interaction.channel, 'name') else "")
         user_id = interaction.user.id
 
         # Quick validation (no DB call)
@@ -12629,6 +12980,12 @@ async def harvest(interaction: discord.Interaction):
                 value=f"+{gamer_multi_percent:.2f}% - **+${result['extra_money_from_gamer_multi']:,.2f}**",
                 inline=False,
             )
+        if result.get("extra_money_from_battlepass_multi", 0) > 0:
+            embed.add_field(
+                name="⚔️ **BATTLE PASS MULTI**",
+                value=f"1.2x - **+${result['extra_money_from_battlepass_multi']:,.2f}**",
+                inline=False,
+            )
 
         if result.get("extra_money_from_jump_multi", 0) > 0:
             jump_multi_percent = (result["jump_multi_multiplier"] - 1.0) * 100
@@ -12653,6 +13010,8 @@ async def harvest(interaction: discord.Interaction):
             item_boost_sources.append(("Bloomstone", 1))
         if shop_inv.get("fuzzy_dice", 0) >= 1:
             item_boost_sources.append(("Fuzzy Dice", 1))
+        if shop_inv.get("quavers_beat", 0) >= 1:
+            item_boost_sources.append(("Quaver's Beat", 1))
         if result.get("extra_money_from_nether_star", 0) > 0:
             ns_count = shop_inv.get("nether_star", 0)
             if ns_count > 0:
@@ -12682,21 +13041,20 @@ async def harvest(interaction: discord.Interaction):
             embed.add_field(name="\u2728 **IMBUEMENT**",
                 value=f"**{tractor_name}** {tractor_rarity_display}", inline=False)
 
-        if result.get("seasonal_label") and result.get("total_seasonal_bonus", 0) > 0:
-            embed.add_field(
-                name=f"\U0001f4c5 **{result['seasonal_label']}**",
-                value=f"**+${result['total_seasonal_bonus']:,.2f}** seasonal bonus",
-                inline=False,
-            )
-
         month_name = result.get("month_name") or "-"
         embed.add_field(
-            name="\U0001f4c5 **MONTH**",
-            value=f"**~**\n{interaction.user.name} - **{month_name.upper()}**",
+            name="\u200b",
+            value=_month_embed_value(
+                interaction.user.name,
+                month_name,
+                result.get("seasonal_label"),
+                result.get("total_seasonal_bonus", 0) > 0,
+            ),
             inline=False,
         )
         embed.add_field(name="💰 **TOTAL**", value=f"**{format_money(total_value)}**", inline=True)
         embed.add_field(name="💵 **NEW BALANCE**", value=f"**{format_money(current_balance)}**", inline=True)
+        _apply_battlepass_exp_footer(embed, crit.get("battlepass"))
 
         # === Send the response ASAP (with optional STEAL button) ===
         view = None
@@ -12714,6 +13072,8 @@ async def harvest(interaction: discord.Interaction):
                 view._message = msg
         else:
             await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+
+        await _notify_battlepass_level_up(interaction, crit.get("battlepass"))
 
         # Chain message (must be after the main embed)
         if chain_triggered:
@@ -13379,7 +13739,7 @@ DAILY_SHOP_ITEMS = {
         "name": "Bandana",
         "description": "No face, no case.",
         "cost": 400,
-        "effect": "Steal from ANYONE — no rank restrictions",
+        "effect": "Steal from ANYONE — no area restrictions",
     },
     "paladins_shield": {
         "name": "Paladin's Shield",
@@ -13445,11 +13805,46 @@ DAILY_SHOP_ITEMS = {
 DAILY_SHOP_ITEM_IDS = list(DAILY_SHOP_ITEMS.keys())
 MAX_DAILY_SHOP_PURCHASES = 3
 
+BATTLEPASS_ITEMS = {
+    "resonance_nail": {
+        "name": "Resonance Nail",
+        "description": "Use your cursed technique!",
+        "effect": "+1 ATK to Enemies",
+        "battlepass_only": True,
+    },
+    "quavers_beat": {
+        "name": "Quaver's Beat",
+        "description": "Hopefully planting isn't illegal here..",
+        "effect": "+10% money",
+        "battlepass_only": True,
+    },
+    "neo_frontier_axe": {
+        "name": "Neo Frontier Axe",
+        "description": "I hope we get Lotus.",
+        "effect": "+2 ATK to Enemies",
+        "battlepass_only": True,
+    },
+    "true_judgements_gavel": {
+        "name": "True Judgement's Gavel",
+        "description": "DEADLY SENTENCING!",
+        "effect": "+4 ATK to Enemies",
+        "battlepass_only": True,
+    },
+    "the_world": {
+        "name": "The World",
+        "description": "TOKI WO TOMARE!",
+        "effect": "Reset all cooldowns once per day with /theworld",
+        "battlepass_only": True,
+    },
+}
+set_fully_stocked_item_ids(list(DAILY_SHOP_ITEMS) + list(BATTLEPASS_ITEMS))
+
 
 def get_daily_shop_offerings(date_est: str, user_id: int = None) -> list:
     """
     Return item ids for the given EST date (YYYY-MM-DD).
-    For a user: up to (3 + premium tier) items they don't own (Seed=4, Sprout=5, Sapling=6, Evergreen=7).
+    For a user: lock the first unowned slate of the day so a later grant
+    (seed pod, admin give) does not reshuffle today's shop.
     Without user: up to 3 items.
     """
     seed = f"{date_est}_{user_id}" if user_id is not None else date_est
@@ -13461,18 +13856,14 @@ def get_daily_shop_offerings(date_est: str, user_id: int = None) -> list:
         k = min(3, len(all_ids))
         return rng.sample(all_ids, k)
 
-    # For a user: deterministically shuffle all items, then take the first
-    # (3 + premium tier) that the user does NOT already own.
+    existing = peek_daily_shop_slate(user_id, date_est)
+    if existing is not None:
+        return existing
+
     max_offerings = get_effective_daily_shop_max_purchases(user_id)
-    shuffled = all_ids[:]
-    rng.shuffle(shuffled)
-    offerings_for_day: list[str] = []
-    for item_id in shuffled:
-        if not has_shop_item(user_id, item_id):
-            offerings_for_day.append(item_id)
-            if len(offerings_for_day) >= max_offerings:
-                break
-    return offerings_for_day
+    owned_ids = {item_id for item_id in all_ids if has_shop_item(user_id, item_id)}
+    fresh = compute_unowned_daily_shop_offerings(all_ids, owned_ids, max_offerings, rng)
+    return lock_daily_shop_slate(user_id, date_est, fresh)
 
 
 def _get_date_est() -> str:
@@ -13529,21 +13920,45 @@ def _build_daily_shop_embed_and_view(offerings: list, date_est: str, user_id: in
         description=f"{tree_ring_emoji} Your Tree Rings: **{tree_rings}**{interval_line}",
         color=discord.Color.green()
     )
+    inventory = get_user_shop_inventory(user_id)
+    owned_ids = []
     for item_id in offerings:
-        info = DAILY_SHOP_ITEMS[item_id]
+        info = DAILY_SHOP_ITEMS.get(item_id)
+        if not info:
+            continue
         item_emoji = info.get("emoji", tree_ring_emoji)
+        owned = int(inventory.get(item_id, 0) or 0) >= 1
+        if owned:
+            owned_ids.append(item_id)
+            status = "✅ **ACQUIRED**"
+        else:
+            status = f"Price: **{info['cost']}** {tree_ring_emoji} Tree Rings"
         embed.add_field(
             name=f"{item_emoji} {info['name']}",
-            value=f"{info['description']}\n***{info['effect']}***\nPrice: **{info['cost']}** {tree_ring_emoji} Tree Rings",
+            value=f"{info['description']}\n***{info['effect']}***\n{status}",
             inline=False
         )
     embed.set_footer(text=f"Shop refreshes in {_format_refresh_countdown()}")
-    view = DailyShopView(item_ids=offerings, date_est=date_est)
+    view = DailyShopView(item_ids=offerings, date_est=date_est, owned_ids=owned_ids)
     return embed, view
 
 
+def _apply_invite_reward_tier(user_id: int, tier: int) -> tuple[str, bool]:
+    """Grant one invite reward tier. Returns (line for embed, social_butterfly newly unlocked)."""
+    reward = INVITE_REWARDS[tier]
+    social_new = False
+    if reward["type"] == "money":
+        current_balance = get_user_balance(user_id)
+        update_user_balance(user_id, normalize_money(current_balance + reward["amount"]))
+    elif reward["type"] == "tree_rings":
+        increment_tree_rings(user_id, reward["amount"])
+    elif reward["type"] == "hidden_achievement":
+        social_new = bool(unlock_hidden_achievement(user_id, "social_butterfly"))
+    return (f"• **Tier {tier}** — {reward['description']}", social_new)
+
+
 @bot.tree.command(name="inviteawards", description="Check or claim your invite rewards!")
-@app_commands.describe(action="Check your invite progress or claim rewards")
+@app_commands.describe(action="Check your invite progress or claim all rewards you qualify for")
 @app_commands.choices(action=[
     app_commands.Choice(name="Check", value="check"),
     app_commands.Choice(name="Claim", value="claim"),
@@ -13552,56 +13967,51 @@ async def inviteawards(interaction: discord.Interaction, action: app_commands.Ch
     try:
         if not await safe_defer(interaction, ephemeral=True):
             return
-        
+
         user_id = interaction.user.id
         invite_stats = get_user_invite_stats(user_id)
         total_invites = invite_stats["total_joins"]
         claimed_rewards = invite_stats.get("claimed_rewards", [])
-        
+
         if action.value == "check":
-            # Show invite rewards progress
             embed = discord.Embed(
                 title=f"🎁 {interaction.user.name}'s Invite Awards",
                 color=discord.Color.gold()
             )
             embed.add_field(name="Invites", value=f"**{total_invites}**", inline=False)
-            
+
             rewards_text = ""
+            available = 0
             for tier in range(1, 21):
                 reward = INVITE_REWARDS[tier]
                 is_claimed = tier in claimed_rewards
                 can_claim = total_invites >= tier and not is_claimed
-                
+                if can_claim:
+                    available += 1
                 if is_claimed:
                     prefix = "✅"
                 elif can_claim:
                     prefix = "🟡"
                 else:
                     prefix = "⬜"
-                
                 rewards_text += f"{prefix} {tier} Invite{'s' if tier != 1 else ''}: {reward['description']}\n"
-            
+
             embed.add_field(name="Rewards:", value=rewards_text, inline=False)
-            embed.set_footer(text="Do /inviteawards claim to claim your invite awards!")
-            
+            if available:
+                embed.set_footer(text=f"{available} ready to claim — /inviteawards claim grabs all of them at once!")
+            else:
+                embed.set_footer(text="Do /inviteawards claim to claim all available invite awards!")
+
             await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
-        
+
         elif action.value == "claim":
-            # Try to claim the next unclaimed reward
-            next_tier = None
-            for tier in range(1, 21):
-                if tier not in claimed_rewards and total_invites >= tier:
-                    next_tier = tier
-                    break
-            
-            if next_tier is None:
-                # Check if all are claimed or not enough invites
+            to_claim = [tier for tier in range(1, 21) if tier not in claimed_rewards and total_invites >= tier]
+            if not to_claim:
                 all_claimed = all(t in claimed_rewards for t in range(1, 21))
                 if all_claimed:
                     await safe_interaction_response(interaction, interaction.followup.send,
                         f"🎁 You've already claimed all invite rewards, {interaction.user.name}!", ephemeral=True)
                 else:
-                    # Find next unclaimed tier to show requirement
                     next_unclaimed = next((t for t in range(1, 21) if t not in claimed_rewards), None)
                     if next_unclaimed:
                         await safe_interaction_response(interaction, interaction.followup.send,
@@ -13609,53 +14019,35 @@ async def inviteawards(interaction: discord.Interaction, action: app_commands.Ch
                             ephemeral=True)
                     else:
                         await safe_interaction_response(interaction, interaction.followup.send,
-                            f"❌ No rewards available to claim right now.", ephemeral=True)
+                            "❌ No rewards available to claim right now.", ephemeral=True)
                 return
-            
-            # Claim the reward
-            reward = INVITE_REWARDS[next_tier]
-            success = claim_invite_reward(user_id, next_tier)
-            if not success:
+
+            lines = []
+            social_new = False
+            for tier in to_claim:
+                if not claim_invite_reward(user_id, tier):
+                    continue
+                line, unlocked = _apply_invite_reward_tier(user_id, tier)
+                lines.append(line)
+                if unlocked:
+                    social_new = True
+
+            if not lines:
                 await safe_interaction_response(interaction, interaction.followup.send,
-                    f"❌ You've already claimed this reward!", ephemeral=True)
+                    "❌ You've already claimed this reward!", ephemeral=True)
                 return
-            
-            # Apply the reward
-            reward_msg = ""
-            if reward["type"] == "money":
-                current_balance = get_user_balance(user_id)
-                new_balance = normalize_money(current_balance + reward["amount"])
-                update_user_balance(user_id, new_balance)
-                reward_msg = f"You received {reward['description']}!"
-            elif reward["type"] == "tree_rings":
-                increment_tree_rings(user_id, reward["amount"])
-                reward_msg = f"You received {reward['description']}!"
-            elif reward["type"] == "secret_gardener":
-                reward_msg = f"You unlocked the {reward['description']}! Check `/hire` page 6!"
-            elif reward["type"] == "secret_gardener_harvest":
-                reward_msg = f"You unlocked {reward['description']}"
-            elif reward["type"] == "gather_cooldown":
-                reward_msg = f"You unlocked {reward['description']}!"
-            elif reward["type"] == "harvest_cooldown":
-                reward_msg = f"You unlocked {reward['description']}!"
-            elif reward["type"] == "mine_cooldown":
-                reward_msg = f"You unlocked {reward['description']}!"
-            elif reward["type"] == "water_double":
-                reward_msg = f"You unlocked {reward['description']}!"
-            elif reward["type"] == "hidden_achievement":
-                # Award the social_butterfly hidden achievement
-                newly_unlocked = unlock_hidden_achievement(user_id, "social_butterfly")
-                reward_msg = f"You unlocked a {reward['description']}!"
-                if newly_unlocked:
-                    await send_hidden_achievement_notification(interaction, "social_butterfly")
-            
+
+            if social_new:
+                await send_hidden_achievement_notification(interaction, "social_butterfly")
+
+            n = len(lines)
+            title = "🎁 **INVITE REWARDS CLAIMED!**" if n > 1 else "🎁 **INVITE REWARD CLAIMED!**"
             embed = discord.Embed(
-                title="🎁 **INVITE REWARD CLAIMED!**",
-                description=f"**Tier {next_tier}** — {reward_msg}",
+                title=title,
+                description="\n".join(lines),
                 color=discord.Color.green()
             )
-            embed.set_footer(text=f"Invites: {total_invites} | Use /inviteawards check to see all rewards")
-            
+            embed.set_footer(text=f"Invites: {total_invites} | Claimed {n} reward{'s' if n != 1 else ''} | Use /inviteawards check to see all rewards")
             await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
     except Exception as e:
         print(f"Error in inviteawards command: {e}")
@@ -13665,10 +14057,13 @@ async def inviteawards(interaction: discord.Interaction, action: app_commands.Ch
 class DailyShopView(discord.ui.View):
     """View with Buy buttons for each of today's 3 items, plus Inventory. Stores date_est so buy validation uses the same day the shop was shown."""
 
-    def __init__(self, item_ids: list, date_est: str = None, timeout: float = 180):
+    def __init__(self, item_ids: list, date_est: str = None, owned_ids=None, timeout: float = 180):
         super().__init__(timeout=timeout)
         self.date_est = date_est or _get_date_est()
+        owned = {str(item_id) for item_id in (owned_ids or [])}
         for item_id in item_ids:
+            if str(item_id) in owned:
+                continue
             info = DAILY_SHOP_ITEMS.get(item_id, {})
             label = f"Buy {info.get('name', item_id)}"
             if len(label) > 80:
@@ -13696,6 +14091,11 @@ class DailyShopBuyButton(discord.ui.Button):
             return
         user_id = interaction.user.id
         date_est = getattr(self.view, "date_est", None) or _get_date_est()
+        today_est = _get_date_est()
+        if date_est != today_est:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ This Daily Shop listing expired at midnight Eastern. Use /dailyshop for today's items.", ephemeral=True)
+            return
         # Run all sync DB checks in thread so event loop stays responsive
         has_it = await asyncio.to_thread(has_shop_item, user_id, item_id)
         if has_it:
@@ -13722,6 +14122,7 @@ class DailyShopBuyButton(discord.ui.Button):
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"❌ You need **{cost}** <:TreeRing:1474244868288282817> Tree Rings for **{info['name']}**, but you have **{tree_rings}**.", ephemeral=True)
             return
+        had_stocked = await asyncio.to_thread(has_hidden_achievement, user_id, "fully_stocked")
         success = await asyncio.to_thread(purchase_daily_shop_item, user_id, item_id, cost, date_est)
         if not success:
             await safe_interaction_response(interaction, interaction.followup.send,
@@ -13749,6 +14150,9 @@ class DailyShopBuyButton(discord.ui.Button):
                 pass
         msg = f"✅ You bought **{info['name']}** for **{cost}** <:TreeRing:1474244868288282817> Tree Rings!"
         await safe_interaction_response(interaction, interaction.followup.send, msg, ephemeral=True)
+        if success and not had_stocked:
+            if await asyncio.to_thread(has_hidden_achievement, user_id, "fully_stocked"):
+                await send_hidden_achievement_notification(interaction, "fully_stocked")
 
 
 # Discord embed field value limit
@@ -13765,8 +14169,11 @@ def _format_shop_inventory_field(inv: dict) -> list[str]:
 
     # Build per-item blocks first
     blocks = []
-    for i in sorted(inv.keys(), key=lambda k: (DAILY_SHOP_ITEMS.get(k, {}).get("name", k),)):
-        info = DAILY_SHOP_ITEMS.get(i, {})
+    for i in sorted(
+        (k for k in inv.keys() if k != "battle_pass_multi"),
+        key=lambda k: ((DAILY_SHOP_ITEMS.get(k) or BATTLEPASS_ITEMS.get(k) or {}).get("name", k),),
+    ):
+        info = DAILY_SHOP_ITEMS.get(i) or BATTLEPASS_ITEMS.get(i) or {}
         name = info.get("name", i)
         desc = info.get("description", "")
         effect = info.get("effect", "")
@@ -13803,7 +14210,7 @@ class DailyShopInventoryButton(discord.ui.Button):
             if not inv:
                 embed = discord.Embed(
                     title="🛒 **YOUR SHOP INVENTORY**",
-                    description="Items you've purchased from the Daily Shop.",
+                    description="Items from the Daily Shop and Battle Pass.",
                     color=discord.Color.gold()
                 )
                 embed.add_field(
@@ -13821,7 +14228,7 @@ class DailyShopInventoryButton(discord.ui.Button):
                 title = "🛒 Your Shop Inventory" if idx == 0 else f"🛒 Your Shop Inventory (Page {idx + 1})"
                 embed = discord.Embed(
                     title=title,
-                    description="Items you've purchased from the Daily Shop.",
+                    description="Items from the Daily Shop and Battle Pass.",
                     color=discord.Color.gold()
                 )
                 embed.add_field(name="Items", value=chunk, inline=False)
@@ -13858,7 +14265,7 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
             if not inv:
                 embed = discord.Embed(
                     title="🛒 **DAILY SHOP – YOUR INVENTORY**",
-                    description=f"{interaction.user.mention}'s purchased items (Tree Ring shop)",
+                    description=f"{interaction.user.mention}'s Daily Shop and Battle Pass items",
                     color=discord.Color.gold()
                 )
                 embed.add_field(
@@ -13877,7 +14284,7 @@ async def dailyshop(interaction: discord.Interaction, action: app_commands.Choic
                 title = "🛒 Daily Shop – Your Inventory" if idx == 0 else f"🛒 Daily Shop – Your Inventory (Page {idx + 1})"
                 embed = discord.Embed(
                     title=title,
-                    description=f"{interaction.user.mention}'s purchased items (Tree Ring shop)",
+                    description=f"{interaction.user.mention}'s Daily Shop and Battle Pass items",
                     color=discord.Color.gold()
                 )
                 embed.add_field(name="Items", value=chunk, inline=False)
@@ -13982,6 +14389,833 @@ async def jackpot_cmd(interaction: discord.Interaction):
 # almanac command: sections (flowers/fruits/vegetables), pagination, ??? = 2x HIDDEN, completion % (excluding Mikellion)
 # 4 plants per page for all sections to avoid embed truncation
 ALMANAC_PLANTS_PER_PAGE_BY_SECTION = {"Flower": 4, "Fruit": 4, "Vegetable": 4}
+
+
+
+def _battlepass_exp_footer(bp: dict | None) -> str | None:
+    if not bp:
+        return None
+    gained = int(bp.get("gained", 0) or 0)
+    if gained <= 0:
+        return None
+    return f"⚔️ +{gained} EXP!"
+
+
+def _apply_battlepass_exp_footer(embed: discord.Embed, bp: dict | None, extra: str | None = None) -> None:
+    """Show EXP only in the footer, not as a TOTAL/NEW BALANCE-style field."""
+    exp_text = _battlepass_exp_footer(bp)
+
+    # Drop a leftover EXP field from older embeds / steal rebuilds.
+    idx = 0
+    while idx < len(embed.fields):
+        if embed.fields[idx].name == "⚔️ **EXP**":
+            embed.remove_field(idx)
+            continue
+        idx += 1
+
+    existing = embed.footer.text if embed.footer and embed.footer.text else None
+    kept = []
+    if existing:
+        for part in existing.split("  •  "):
+            part = part.strip()
+            if part and not (part.startswith("⚔️ +") and part.endswith(" EXP!")):
+                kept.append(part)
+    parts = []
+    for part in (extra, *kept, exp_text):
+        if part and part not in parts:
+            parts.append(part)
+    if parts:
+        embed.set_footer(text="  •  ".join(parts))
+
+
+def _battlepass_reward_short(reward: dict) -> str:
+    rtype = reward.get("type")
+    if rtype == "money":
+        return f"${int(round(float(reward.get('amount', 0))))}"
+    return str(reward.get("label", "?"))
+
+
+def _notify_battlepass_text(user_mention: str, result: dict | None) -> str | None:
+    return battlepass_levelup_text(result)
+
+
+async def _notify_battlepass_hidden(user_id: int | None, result: dict | None):
+    if user_id is None or not result:
+        return
+    for key in result.get("unlocked_hidden") or []:
+        await send_hidden_achievement_notification_dm(user_id, key)
+
+
+async def _notify_battlepass_level_up(interaction: discord.Interaction, result: dict | None, user_id: int | None = None):
+    uid = user_id if user_id is not None else getattr(interaction.user, "id", None)
+    await _notify_battlepass_hidden(uid, result)
+    if user_id is not None and getattr(interaction.user, "id", None) != user_id:
+        return
+    text = _notify_battlepass_text(interaction.user.mention, result)
+    if not text:
+        return
+    try:
+        await safe_interaction_response(interaction, interaction.followup.send, text, ephemeral=True)
+    except Exception:
+        pass
+
+
+class BattlePassView(discord.ui.View):
+    """Public battle pass: 6 pages of 5 LVs, left to right."""
+
+    PAGE_SIZE = 5
+    PAGE_COUNT = 6
+
+    def __init__(self, user_id: int, display_name: str, exp: int, lv: int, seed_pods: int = 0, timeout: float = 180):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.display_name = display_name
+        self.exp = int(exp)
+        self.lv = int(lv)
+        self.seed_pods = max(0, int(seed_pods))
+        self.page = max(0, min(self.PAGE_COUNT - 1, (max(self.lv, 1) - 1) // self.PAGE_SIZE))
+
+    def _progress_bar(self, current: int, needed: int, length: int = 15) -> str:
+        if needed <= 0:
+            return "█" * length
+        filled = round((max(0, current) / needed) * length)
+        filled = min(length, max(0, filled))
+        return "█" * filled + "▁" * (length - filled)
+
+    def _node(self, tier: dict) -> str:
+        n = tier["lv"]
+        label = _battlepass_reward_short(tier["reward"])
+        maxed = self.exp >= battlepass_cumulative_for_lv(BATTLEPASS_MAX_LV)
+        if maxed or self.lv > n:
+            icon = "✅"
+        elif self.lv == n and self.lv > 0:
+            icon = "▶"
+        else:
+            icon = "🔒"
+        return f"{icon} **{n}** {label}"
+
+    def _row_ltr(self, start_lv: int) -> str:
+        end = start_lv + self.PAGE_SIZE - 1
+        tiers = BATTLEPASS_TIERS[start_lv - 1:end]
+        return " → ".join(self._node(t) for t in tiers)
+
+    def _build_embed(self) -> discord.Embed:
+        start_lv = self.page * self.PAGE_SIZE + 1
+        max_exp = battlepass_cumulative_for_lv(BATTLEPASS_MAX_LV)
+        if self.exp >= max_exp:
+            progress_line = f"**MAX LV {BATTLEPASS_MAX_LV}** — {self.exp:,} EXP"
+        else:
+            prev_total = battlepass_cumulative_for_lv(self.lv)
+            next_total = battlepass_cumulative_for_lv(min(self.lv + 1, BATTLEPASS_MAX_LV))
+            next_need = max(1, next_total - prev_total)
+            into = max(0, self.exp - prev_total)
+            dest = "MAX" if self.lv + 1 >= BATTLEPASS_MAX_LV else f"LV {self.lv + 1}"
+            bar = self._progress_bar(into, next_need)
+            progress_line = f"{bar} **{into:,} / {next_need:,}** to {dest}"
+
+        lines = [
+            f"**LV {self.lv}**  •  **{self.exp:,} EXP**  •  🫛 **{self.seed_pods}**",
+            progress_line,
+            "",
+            self._row_ltr(start_lv),
+        ]
+        embed = discord.Embed(
+            title="⚔️ BATTLE PASS - SEASON 1",
+            description="\n".join(lines),
+            color=discord.Color.gold(),
+        )
+        embed.set_footer(text=f"Page {self.page + 1}/{self.PAGE_COUNT}")
+        return embed
+
+    async def _edit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            if not await safe_defer(interaction, ephemeral=True):
+                return
+            return
+        await interaction.response.edit_message(embed=self._build_embed(), view=self)
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, custom_id="battlepass_prev")
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if interaction.user.id != self.user_id:
+                await safe_defer(interaction, ephemeral=True)
+                return
+            self.page = max(0, self.page - 1)
+            await self._edit(interaction)
+        except Exception as e:
+            print(f"Error in battlepass prev_page: {e}")
+            await safe_defer(interaction)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary, custom_id="battlepass_next")
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if interaction.user.id != self.user_id:
+                await safe_defer(interaction, ephemeral=True)
+                return
+            self.page = min(self.PAGE_COUNT - 1, self.page + 1)
+            await self._edit(interaction)
+        except Exception as e:
+            print(f"Error in battlepass next_page: {e}")
+            await safe_defer(interaction)
+
+
+@bot.tree.command(name="battlepass", description="View the 30-tier Battle Pass and your LV / EXP")
+async def battlepass(interaction: discord.Interaction):
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        bp, seed_pods = await asyncio.gather(
+            asyncio.to_thread(get_user_battlepass, interaction.user.id),
+            asyncio.to_thread(get_user_seed_pods, interaction.user.id),
+        )
+        view = BattlePassView(
+            user_id=interaction.user.id,
+            display_name=interaction.user.display_name or interaction.user.name,
+            exp=bp["exp"],
+            lv=bp["lv"],
+            seed_pods=seed_pods,
+        )
+        await safe_interaction_response(interaction, interaction.followup.send, embed=view._build_embed(), view=view)
+    except Exception as e:
+        print(f"Error in battlepass command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+SEEDPOD_EMPTY_MESSAGE = "❌ You don't have a SEED POD. Earn them in the BP, then use /seedpod!"
+SEEDPOD_TREE_RING_EMOJI = "<:TreeRing:1474244868288282817>"
+SEEDPOD_SPIN_DELAYS = (0.16, 0.16, 0.20, 0.26, 0.34, 0.45, 0.58, 0.75)
+SEEDPOD_SPIN_FLAVOR = (
+    "The husk rattles...",
+    "Something shifts inside...",
+    "A crack of light...",
+    "This pod feels lucky...",
+    "You can feel the pod's aura...",
+
+)
+
+
+def _seedpod_pool() -> list[dict]:
+    rarity_weights = seedpod_normalized_loot_weights(
+        {row["name"]: float(row["weight"]) for row in ENCHANTMENT_RARITIES}
+    )
+    return seedpod_build_pool(
+        hoe_by_rarity=HOE_ENCHANTMENTS,
+        tractor_by_rarity=TRACTOR_ENCHANTMENTS,
+        shop_items=DAILY_SHOP_ITEMS,
+        rarity_weights=rarity_weights,
+    )
+
+
+def _seedpod_prize_headline(prize: dict) -> tuple[str, int]:
+    rarity = seedpod_prize_rarity(prize)
+    rarity_emoji = RARITY_EMOJI.get(rarity, "")
+    color = RARITY_COLORS.get(rarity, 0x2ecc71)
+    kind = prize.get("kind")
+    if kind == "imbue":
+        enchant = prize.get("enchant") or {}
+        name = enchant.get("name", "Unknown")
+        tool = "GATHER" if prize.get("tool") == "hoe" else "HARVEST"
+        return f"{rarity_emoji} **{name}**\n{rarity}  •  {tool}", color
+    if kind == "tree_rings":
+        amount = int(prize.get("amount") or 0)
+        return f"{SEEDPOD_TREE_RING_EMOJI} **{amount} Tree Rings**\n{rarity}", color
+    if kind == "auto_bloom":
+        return f"🌸 **AUTO-BLOOM**\n{rarity}", color
+    item_id = prize.get("item_id")
+    info = DAILY_SHOP_ITEMS.get(item_id, {})
+    name = info.get("name", item_id)
+    emoji = info.get("emoji", "🛒")
+    return f"{emoji} **{name}**\n{rarity}  •  DAILY SHOP", color
+
+
+def _seedpod_spin_embed(user_name: str, prize: dict, flavor: str) -> discord.Embed:
+    headline, color = _seedpod_prize_headline(prize)
+    embed = discord.Embed(
+        title="🫛 SEED POD",
+        description=f"{flavor}\n\n>>> {headline}",
+        color=discord.Color(color),
+    )
+    embed.set_footer(text=f"{user_name} is cracking a SEED POD...")
+    return embed
+
+
+def _seedpod_result_embed(
+    user_name: str,
+    prize: dict,
+    remaining: int,
+    current_enchant: dict | None = None,
+) -> discord.Embed:
+    opened_title = seedpod_opened_title(prize, RARITY_EMOJI)
+    rarity = seedpod_prize_rarity(prize)
+    color = RARITY_COLORS.get(rarity, 0x2ecc71)
+    kind = prize.get("kind")
+    if kind == "imbue":
+        enchant = prize.get("enchant") or {}
+        tool = prize.get("tool")
+        embed = discord.Embed(
+            title=opened_title,
+            description=f"**{enchant.get('name', 'Unknown')}** burst out of {user_name}'s pod!",
+            color=discord.Color(color),
+        )
+        embed.add_field(name="New Imbuement", value=format_enchant_block(enchant, tool), inline=False)
+        if current_enchant:
+            current_block = format_enchant_block(current_enchant, tool)
+        else:
+            current_block = "**NONE**"
+        embed.add_field(name="Current Imbuement", value=current_block, inline=False)
+    elif kind == "tree_rings":
+        amount = int(prize.get("amount") or 0)
+        embed = discord.Embed(
+            title=opened_title,
+            description=f"{SEEDPOD_TREE_RING_EMOJI} **{amount} Tree Rings** tumbled out of {user_name}'s pod!",
+            color=discord.Color(color),
+        )
+        embed.add_field(
+            name="Effect",
+            value=f"+{amount * 0.5:.1f}% money from Tree Rings (0.5% each).",
+            inline=False,
+        )
+    elif kind == "auto_bloom":
+        embed = discord.Embed(
+            title=opened_title,
+            description=f"🌸 **AUTO-BLOOM** burst out of {user_name}'s pod!",
+            color=discord.Color(color),
+        )
+        embed.add_field(
+            name="This skips PLANTER X and the bloom cost",
+            value=(
+                "Press **BLOOM!** to prestige to the next Bloom Rank even if you can't `/bloom` yet.\n"
+                "Blooming **resets** money, upgrades, gardeners, and unlocked areas. "
+                "You **keep** Tree Rings, Battle Pass, achievements, and lifetime plants."
+            ),
+            inline=False,
+        )
+    else:
+        item_id = prize.get("item_id")
+        info = DAILY_SHOP_ITEMS.get(item_id, {})
+        name = info.get("name", item_id)
+        emoji = info.get("emoji", "🛒")
+        desc = info.get("description", "")
+        effect = info.get("effect", "")
+        embed = discord.Embed(
+            title=opened_title,
+            description=f"{emoji} **{name}** tumbled out of {user_name}'s pod!",
+            color=discord.Color(color),
+        )
+        if desc:
+            embed.add_field(name="Item", value=f'*"{desc}"*', inline=False)
+        if effect:
+            embed.add_field(name="Effect", value=effect, inline=False)
+    embed.set_footer(text=f"SEED PODs remaining: {remaining}")
+    return embed
+
+
+def _grant_seedpod_prize(user_id: int, prize: dict) -> None:
+    kind = prize.get("kind")
+    if kind == "imbue":
+        enchant = dict(prize.get("enchant") or {})
+        if prize.get("tool") == "hoe":
+            set_user_hoe_attunement(user_id, enchant)
+        else:
+            set_user_tractor_attunement(user_id, enchant)
+        return
+    if kind == "tree_rings":
+        increment_tree_rings(user_id, int(prize.get("amount") or 0))
+        return
+    if kind == "auto_bloom":
+        return
+    item_id = prize.get("item_id")
+    if item_id:
+        add_shop_item_to_user(user_id, str(item_id), 1)
+
+
+def _seedpod_open_sync(user_id: int) -> dict:
+    pods = get_user_seed_pods(user_id)
+    if pods <= 0:
+        return {"error": "empty"}
+    hoe = get_user_hoe_attunement(user_id)
+    tractor = get_user_tractor_attunement(user_id)
+    inventory = get_user_shop_inventory(user_id)
+    bloom_count = get_user_bloom_count(user_id)
+    pool = _seedpod_pool()
+    prize = seedpod_pick_prize(
+        pool,
+        hoe=hoe,
+        tractor=tractor,
+        inventory=inventory,
+        stackable_items=STACKABLE_SHOP_ITEMS,
+        bloom_count=bloom_count,
+    )
+    if prize is None:
+        prize = seedpod_fallback_prize()
+    had_stocked = has_hidden_achievement(user_id, "fully_stocked")
+    if not consume_seed_pod(user_id):
+        return {"error": "empty"}
+    try:
+        if seedpod_grants_immediately(prize):
+            _grant_seedpod_prize(user_id, prize)
+    except Exception:
+        increment_seed_pods(user_id, 1)
+        raise
+    remaining = get_user_seed_pods(user_id)
+    unlocked_fully_stocked = (not had_stocked) and has_hidden_achievement(user_id, "fully_stocked")
+    current_enchant = None
+    if prize.get("kind") == "imbue":
+        equipped = hoe if prize.get("tool") == "hoe" else tractor
+        current_enchant = dict(equipped) if equipped else None
+    return {
+        "prize": prize,
+        "pool": pool,
+        "remaining": remaining,
+        "unlocked_fully_stocked": unlocked_fully_stocked,
+        "current_enchant": current_enchant,
+    }
+
+
+class SeedpodEquipView(discord.ui.View):
+    """Public EQUIP NEW IMBUE / KEEP CURRENT choice after a seed-pod imbue."""
+
+    def __init__(
+        self,
+        user_id: int,
+        prize: dict,
+        current_enchant: dict | None,
+        remaining: int,
+        user_name: str,
+        guild: discord.Guild | None = None,
+        member: discord.abc.User | None = None,
+        timeout: float = 60,
+    ):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.prize = prize
+        self.current_enchant = current_enchant
+        self.remaining = remaining
+        self.user_name = user_name
+        self.guild = guild
+        self.member = member
+        self._done = False
+        self.message = None
+
+    def _disable(self):
+        for child in self.children:
+            child.disabled = True
+
+    async def _owner_or_stop(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.user_id:
+            return True
+        await safe_interaction_response(
+            interaction, interaction.followup.send,
+            "❌ This isn't your seed pod!",
+            ephemeral=True,
+        )
+        return False
+
+    async def _edit_result(self, interaction: discord.Interaction, embed: discord.Embed):
+        self._disable()
+        try:
+            await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self)
+        except Exception as e:
+            print(f"Error editing seedpod choice message: {e}")
+
+    def _prize_color(self) -> discord.Color:
+        rarity = seedpod_prize_rarity(self.prize)
+        return discord.Color(RARITY_COLORS.get(rarity, 0x2ecc71))
+
+    def _equipped_embed(self) -> discord.Embed:
+        enchant = self.prize.get("enchant") or {}
+        tool = self.prize.get("tool")
+        tool_label = "hoe" if tool == "hoe" else "tractor"
+        confirm = discord.Embed(
+            title=seedpod_opened_title(self.prize, RARITY_EMOJI),
+            description=f"**{enchant.get('name', 'Unknown')}** is now imbued on {self.user_name}'s **{tool_label}**!",
+            color=self._prize_color(),
+        )
+        confirm.add_field(name="Imbuement", value=format_enchant_block(enchant, tool), inline=False)
+        confirm.set_footer(text=f"SEED PODs remaining: {self.remaining}")
+        return confirm
+
+    async def _apply_new_imbue(self, interaction: discord.Interaction | None = None):
+        await asyncio.to_thread(_grant_seedpod_prize, self.user_id, self.prize)
+        embed = self._equipped_embed()
+        if interaction is not None:
+            await self._edit_result(interaction, embed)
+        else:
+            self._disable()
+            if self.message is not None:
+                try:
+                    await self.message.edit(embed=embed, view=self)
+                except Exception:
+                    pass
+        enchant = self.prize.get("enchant") or {}
+        tool = self.prize.get("tool")
+        user = interaction.user if interaction is not None else self.member
+        guild = getattr(interaction, "guild", None) if interaction is not None else self.guild
+        if guild and user and enchant.get("rarity") in IMBUE_RARES_RARITIES:
+            asyncio.create_task(_post_rares_imbue(guild, user, enchant, tool, from_seedpod=True))
+        if enchant.get("rarity") in {"NETHERITE", "LUMINITE", "CELESTIAL", "SECRET"}:
+            if await asyncio.to_thread(unlock_hidden_achievement, self.user_id, "high_reroller"):
+                if interaction is not None:
+                    try:
+                        await interaction.followup.send(
+                            embed=discord.Embed(
+                                title="🏆 HIDDEN ACHIEVEMENT UNLOCKED!",
+                                description="**High Reroller**\nGet an imbue enchantment that is NETHERITE, LUMINITE, CELESTIAL, or SECRET",
+                                color=discord.Color.gold(),
+                            ),
+                            ephemeral=True,
+                        )
+                    except Exception as e:
+                        print(f"Error sending High Reroller from seedpod: {e}")
+                        await send_hidden_achievement_notification_dm(self.user_id, "high_reroller")
+                else:
+                    await send_hidden_achievement_notification_dm(self.user_id, "high_reroller")
+        self.stop()
+
+    @discord.ui.button(label="EQUIP NEW IMBUE", style=discord.ButtonStyle.green)
+    async def equip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if not await self._owner_or_stop(interaction):
+            return
+        if self._done:
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "This choice was already applied.",
+                ephemeral=True,
+            )
+            return
+        self._done = True
+        await self._apply_new_imbue(interaction)
+
+    @discord.ui.button(label="KEEP CURRENT", style=discord.ButtonStyle.blurple)
+    async def keep_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if not await self._owner_or_stop(interaction):
+            return
+        if self._done:
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "This choice was already applied.",
+                ephemeral=True,
+            )
+            return
+        self._done = True
+        tool = self.prize.get("tool")
+        keep = discord.Embed(
+            title=seedpod_opened_title(self.prize, RARITY_EMOJI),
+            description=f"{self.user_name} kept their current imbuement.",
+            color=self._prize_color(),
+        )
+        if self.current_enchant:
+            keep.add_field(
+                name="Current Imbuement",
+                value=format_enchant_block(self.current_enchant, tool),
+                inline=False,
+            )
+        else:
+            keep.add_field(name="Current Imbuement", value="**NONE**", inline=False)
+        keep.set_footer(text=f"SEED PODs remaining: {self.remaining}")
+        await self._edit_result(interaction, keep)
+        self.stop()
+
+    async def on_timeout(self):
+        if self._done:
+            return
+        self._done = True
+        await self._apply_new_imbue()
+
+
+class SeedpodAutoBloomView(discord.ui.View):
+    """SECRET Auto-Bloom: skip /bloom requirements after they confirm the reset."""
+
+    def __init__(
+        self,
+        user_id: int,
+        prize: dict,
+        remaining: int,
+        user_name: str,
+        timeout: float = 900,
+    ):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.prize = prize
+        self.remaining = remaining
+        self.user_name = user_name
+        self._done = False
+        self.message = None
+
+    def _disable(self):
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(label="BLOOM!", emoji="🌸", style=discord.ButtonStyle.green)
+    async def bloom_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if interaction.user.id != self.user_id:
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ This isn't your seed pod!",
+                ephemeral=True,
+            )
+            return
+        if self._done:
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "This Auto-Bloom was already used.",
+                ephemeral=True,
+            )
+            return
+        user_id = self.user_id
+        if user_id in user_active_games:
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ You cannot bloom while in an active **/russian** game! Finish or cash out first.",
+                ephemeral=True,
+            )
+            return
+        if user_id in user_active_gathership:
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ You cannot bloom while in an active **Mayflower** game! Finish the game first.",
+                ephemeral=True,
+            )
+            return
+        if user_id in user_active_gathemon:
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ You cannot bloom while in an active **GathéMon** battle! Finish the battle first.",
+                ephemeral=True,
+            )
+            return
+        if user_id in users_pending_pve_rewards:
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ You cannot bloom yet! Your rewards from a Wild Animal or Boss are still being distributed. Wait a moment and try again.",
+                ephemeral=True,
+            )
+            return
+        guild = interaction.guild
+        if not guild:
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ Auto-Bloom must be used in a server.",
+                ephemeral=True,
+            )
+            return
+        self._done = True
+        old_rank = get_bloom_rank(user_id)
+        tree_rings = get_user_tree_rings(user_id)
+        await asyncio.to_thread(perform_bloom, user_id)
+        new_rank = get_bloom_rank(user_id)
+        await asyncio.to_thread(set_user_bloom_cycle_plants, user_id, 0)
+        try:
+            member = await guild.fetch_member(user_id)
+        except Exception as e:
+            print(f"Error fetching member for seedpod auto-bloom: {e}")
+            member = interaction.user
+        try:
+            await assign_gatherer_role(member, guild, force_planter_role="PLANTER I")
+        except Exception as e:
+            print(f"Error resetting planter role after seedpod auto-bloom: {e}")
+        try:
+            await assign_bloom_rank_role(member, guild)
+        except Exception as e:
+            print(f"Error assigning bloom rank role after seedpod auto-bloom: {e}")
+        success = discord.Embed(
+            title=seedpod_opened_title(self.prize, RARITY_EMOJI),
+            description=f"{interaction.user.mention} Auto-Bloomed to **{new_rank}**!",
+            color=discord.Color.gold(),
+        )
+        success.add_field(name="🌲 Bloom Rank", value=f"**{old_rank}** → **{new_rank}**", inline=False)
+        multiplier = get_bloom_multiplier(user_id)
+        if tree_rings > 0:
+            rings_value = f"**{tree_rings}** (+{(multiplier - 1.0) * 100:.1f}%)"
+        else:
+            rings_value = f"**{tree_rings}**"
+        success.add_field(name=f"{SEEDPOD_TREE_RING_EMOJI} Tree Rings", value=rings_value, inline=False)
+        success.add_field(
+            name="🗺️ Reset, PLANTER X → PLANTER I",
+            value="Money, upgrades, gardeners, and unlocked areas have been reset.",
+            inline=False,
+        )
+        success.set_footer(text=f"SEED PODs remaining: {self.remaining}")
+        self._disable()
+        try:
+            await interaction.followup.edit_message(interaction.message.id, embed=success, view=self)
+        except Exception as e:
+            print(f"Error editing seedpod auto-bloom message: {e}")
+        asyncio.create_task(_post_to_rares_channel(
+            guild,
+            _seedpod_rares_line(
+                f"🌸 {interaction.user.mention} Auto-Bloomed from a SEED POD: **{old_rank}** → **{new_rank}**!"
+            ),
+        ))
+        try:
+            await update_marketboard_message(guild)
+        except Exception as e:
+            print(f"Error updating marketboard after seedpod auto-bloom: {e}")
+        bloom_count = get_user_bloom_count(user_id)
+        new_blooming_level = get_achievement_level_for_stat("blooming", bloom_count)
+        current_blooming_level = get_user_achievement_level(user_id, "blooming")
+        if new_blooming_level > current_blooming_level:
+            set_user_achievement_level(user_id, "blooming", new_blooming_level)
+            await send_achievement_notification(interaction, "blooming", new_blooming_level)
+        self.stop()
+
+    async def on_timeout(self):
+        if self._done:
+            return
+        self._done = True
+        self._disable()
+        if self.message is not None:
+            try:
+                expire = discord.Embed(
+                    title=seedpod_opened_title(self.prize, RARITY_EMOJI),
+                    description=f"{self.user_name}'s Auto-Bloom expired. Bloom Rank unchanged.",
+                    color=discord.Color.light_grey(),
+                )
+                expire.set_footer(text=f"SEED PODs remaining: {self.remaining}")
+                await self.message.edit(embed=expire, view=self)
+            except Exception:
+                pass
+        self.stop()
+
+
+@bot.tree.command(name="seedpod", description="Crack open a SEED POD from the Battle Pass")
+async def seedpod_command(interaction: discord.Interaction):
+    try:
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        lock = _seedpod_locks.setdefault(interaction.user.id, asyncio.Lock())
+        async with lock:
+            result = await asyncio.to_thread(_seedpod_open_sync, interaction.user.id)
+            if result.get("error") == "empty":
+                try:
+                    await interaction.edit_original_response(content=SEEDPOD_EMPTY_MESSAGE)
+                except discord.errors.NotFound:
+                    return
+                except Exception:
+                    await safe_interaction_response(
+                        interaction, interaction.followup.send,
+                        SEEDPOD_EMPTY_MESSAGE,
+                        ephemeral=True,
+                    )
+                return
+            prize = result["prize"]
+            pool = result["pool"]
+            remaining = result["remaining"]
+            current_enchant = result.get("current_enchant")
+            user_name = interaction.user.display_name or interaction.user.name
+            spin_prize = random.choice(pool) if pool else prize
+            try:
+                msg = await interaction.original_response()
+                await msg.edit(embed=_seedpod_spin_embed(user_name, spin_prize, SEEDPOD_SPIN_FLAVOR[0]))
+            except Exception:
+                msg = await interaction.followup.send(
+                    embed=_seedpod_spin_embed(user_name, spin_prize, SEEDPOD_SPIN_FLAVOR[0]),
+                    wait=True,
+                )
+            for i, delay in enumerate(SEEDPOD_SPIN_DELAYS):
+                await asyncio.sleep(delay)
+                preview = prize if i == len(SEEDPOD_SPIN_DELAYS) - 1 else random.choice(pool)
+                flavor = SEEDPOD_SPIN_FLAVOR[min(i, len(SEEDPOD_SPIN_FLAVOR) - 1)]
+                try:
+                    await msg.edit(embed=_seedpod_spin_embed(user_name, preview, flavor))
+                except Exception as e:
+                    print(f"Error editing seedpod spin: {e}")
+                    break
+            await asyncio.sleep(0.35)
+            result_embed = _seedpod_result_embed(user_name, prize, remaining, current_enchant)
+            view = None
+            if prize.get("kind") == "imbue":
+                view = SeedpodEquipView(
+                    user_id=interaction.user.id,
+                    prize=prize,
+                    current_enchant=current_enchant,
+                    remaining=remaining,
+                    user_name=user_name,
+                    guild=interaction.guild,
+                    member=interaction.user,
+                )
+            elif prize.get("kind") == "auto_bloom":
+                view = SeedpodAutoBloomView(
+                    user_id=interaction.user.id,
+                    prize=prize,
+                    remaining=remaining,
+                    user_name=user_name,
+                )
+            try:
+                await msg.edit(embed=result_embed, view=view)
+            except Exception as e:
+                print(f"Error editing seedpod result: {e}")
+                sent = await safe_interaction_response(
+                    interaction, interaction.followup.send,
+                    embed=result_embed,
+                    view=view,
+                    wait=True,
+                )
+                if sent is not None:
+                    msg = sent
+            if view is not None:
+                view.message = msg
+            if prize.get("item_id") == "nether_star" and interaction.guild:
+                rares_msg = _seedpod_rares_line(
+                    f"{NETHER_STAR_EMOJI} {interaction.user.mention} sprouted a **Nether Star** from a SEED POD!"
+                )
+                asyncio.create_task(_post_to_rares_channel(interaction.guild, rares_msg))
+            elif prize.get("item_id") == "black_shard" and interaction.guild:
+                rares_msg = _seedpod_rares_line(
+                    f"{BLACK_SHARD_EMOJI} {interaction.user.mention} sprouted a **Black Shard** from a SEED POD!"
+                )
+                asyncio.create_task(_post_to_rares_channel(interaction.guild, rares_msg))
+            if result.get("unlocked_fully_stocked"):
+                await send_hidden_achievement_notification_dm(interaction.user.id, "fully_stocked")
+    except discord.errors.NotFound:
+        print(f"Interaction expired for user {getattr(interaction.user, 'id', 'unknown')}")
+        return
+    except Exception as e:
+        print(f"Error in seedpod command: {e}")
+        traceback.print_exc()
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+@bot.tree.command(name="theworld", description="Reset all cooldowns once per day (requires The World)")
+async def theworld_command(interaction: discord.Interaction):
+    try:
+        user_id = interaction.user.id
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        if not await asyncio.to_thread(has_shop_item, user_id, "the_world"):
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ You don't have that stand! (unlocked at BP LV29)",
+                ephemeral=True,
+            )
+            return
+        date_est = _get_date_est()
+        claimed = await asyncio.to_thread(try_claim_the_world_today, user_id, date_est)
+        if not claimed:
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ Sorry, you're still learning how to use your stand. **The World** will refresh at midnight EST.",
+                ephemeral=True,
+            )
+            return
+        await asyncio.to_thread(reset_user_cooldowns, user_id)
+        embed = discord.Embed(
+            title="THE WORLD, STOP TIME!",
+            description=f"{interaction.user.mention} has ALL their cooldowns reset!!",
+            color=discord.Color.gold(),
+        )
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+    except Exception as e:
+        print(f"Error in theworld command: {e}")
+        if interaction.response.is_done():
+            return
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 class AlmanacView(discord.ui.View):
@@ -14796,7 +16030,7 @@ async def imbue(interaction: discord.Interaction, tool: app_commands.Choice[str]
             return
 
         # Channel restriction: #imbue only
-        if not hasattr(interaction.channel, 'name') or interaction.channel.name != "imbue":
+        if not hasattr(interaction.channel, 'name') or not _in_allowed_channels(interaction.channel.name, ("imbue",)):
             await safe_interaction_response(interaction, interaction.followup.send,
                 "\u274c This command can only be used in the #imbue channel!", ephemeral=True)
             return
@@ -15664,13 +16898,7 @@ async def startcelestialevent(interaction: discord.Interaction, password: str, e
         if existing:
             await asyncio.to_thread(clear_event, existing.get("event_id", ""))
 
-        # End any active hourly and daily (send their end embeds, then clear) before starting celestial
-        for ev_type in ("hourly", "daily"):
-            other = get_active_event_by_type(ev_type)
-            if other:
-                await asyncio.to_thread(clear_event, other.get("event_id", ""))
-                await _send_end_embed_all_guilds(other)
-                print(f"Admin start celestial: ended active {ev_type} event.")
+        await _end_hourly_and_daily_for_celestial("admin celestial start")
 
         start_time = time.time()
         end_time = start_time + duration * 60
@@ -15827,6 +17055,178 @@ async def endrussian(interaction: discord.Interaction, password: str):
         print(f"Admin {interaction.user.name} force-ended roulette game {game_id} in channel {channel_id}")
     except Exception as e:
         print(f"Error in endrussian command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+
+async def _clear_stuck_pve_state(*, reason: str, announce: bool = True, guild: discord.Guild | None = None, dry_run: bool = False) -> dict:
+    """Clear stuck wild animals, bosses, and related in-memory locks. Returns counts cleared.
+
+    If guild is set, only that guild's locks are cleared. User-level locks (pending
+    rewards, Sans timers) are limited to members of that guild when available.
+    dry_run=True reports the same counts without changing memory.
+    """
+    guild_id = guild.id if guild else None
+    member_ids = {m.id for m in guild.members} if guild else None
+
+    def _channel_in_scope(ch_id: int) -> bool:
+        if guild_id is None:
+            return True
+        ch = bot.get_channel(ch_id)
+        return bool(ch and getattr(ch, "guild", None) and ch.guild.id == guild_id)
+
+    pve_channels = [cid for cid in list(active_pve_events) if _channel_in_scope(cid)]
+    boss_guild_ids = [gid for gid in list(active_boss_events) if guild_id is None or gid == guild_id]
+    boss_channel_ids = {
+        entry.get("channel_id")
+        for gid in boss_guild_ids
+        for entry in (active_boss_events.get(gid) or [])
+        if entry.get("channel_id")
+    }
+    pending_gids = [gid for gid in list(pending_boss_spawn_guild_ids) if guild_id is None or gid == guild_id]
+    plantera_gids = [gid for gid in list(active_plantera_bulb_guilds) if guild_id is None or gid == guild_id]
+    dragon_gids = [gid for gid in list(ender_dragon_towers) if guild_id is None or gid == guild_id]
+    reward_users = [uid for uid in list(users_pending_pve_rewards) if member_ids is None or uid in member_ids]
+    sans_users = [uid for uid in list(sans_death_timers) if member_ids is None or uid in member_ids]
+
+    counts = {
+        "wild_animals": len(pve_channels),
+        "bosses": len(boss_guild_ids),
+        "pending_boss_spawns": len(pending_gids),
+        "plantera_bulbs": len(plantera_gids),
+        "pending_rewards": len(reward_users),
+        "sans_timers": len(sans_users),
+        "ender_dragon_towers": sum(len(ender_dragon_towers.get(gid, set())) for gid in dragon_gids),
+    }
+    if dry_run:
+        return counts
+
+    for cid in pve_channels:
+        active_pve_events.pop(cid, None)
+    for gid in boss_guild_ids:
+        active_boss_events.pop(gid, None)
+    for gid in pending_gids:
+        task = pending_boss_spawn_tasks.pop(gid, None)
+        if task:
+            task.cancel()
+        pending_boss_spawn_guild_ids.discard(gid)
+    for gid in plantera_gids:
+        active_plantera_bulb_guilds.discard(gid)
+        plantera_bulb_eligible_guilds.pop(gid, None)
+    if guild_id is None:
+        plantera_bulb_eligible_guilds.clear()
+    for gid in dragon_gids:
+        ender_dragon_towers.pop(gid, None)
+        ender_dragon_tower_attackers.pop(gid, None)
+        task = ender_dragon_regen_tasks.pop(gid, None)
+        if task:
+            task.cancel()
+        _pve_boss_defeated_pending.pop(gid, None)
+    if guild_id is None:
+        _pve_boss_defeated_pending.clear()
+    for uid in reward_users:
+        users_pending_pve_rewards.discard(uid)
+    for uid in sans_users:
+        sans_death_timers.pop(uid, None)
+
+    if announce:
+        for ch_id in pve_channels:
+            ch = bot.get_channel(ch_id)
+            if ch:
+                try:
+                    await ch.send(embed=discord.Embed(
+                        title="🌿 The wild animal fled!",
+                        description=reason,
+                        color=discord.Color.orange(),
+                    ))
+                except Exception:
+                    pass
+        for ch_id in boss_channel_ids:
+            ch = bot.get_channel(ch_id)
+            if ch:
+                try:
+                    await ch.send(embed=discord.Embed(
+                        title="🌙 The boss retreated!",
+                        description=reason,
+                        color=discord.Color.purple(),
+                    ))
+                except Exception:
+                    pass
+    return counts
+
+
+@bot.tree.command(name="unstick", description="[ADMIN] Silently clear stuck wild animals, bosses, and PvE locks")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(password="Admin password", preview="If true, only show stuck counts without clearing")
+async def unstick(interaction: discord.Interaction, password: str, preview: bool = False):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
+            return
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+        if not hasattr(interaction.channel, "name") or interaction.channel.name != "hidden":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
+                ephemeral=True)
+            return
+
+        counts = await _clear_stuck_pve_state(
+            reason="",
+            announce=False,
+            guild=interaction.guild,
+            dry_run=True,
+        )
+        lines = [
+            f"• Wild animals: **{counts['wild_animals']}**",
+            f"• Boss fights: **{counts['bosses']}**",
+            f"• Pending boss spawns: **{counts['pending_boss_spawns']}**",
+            f"• Plantera bulbs: **{counts['plantera_bulbs']}**",
+            f"• Pending PvE rewards: **{counts['pending_rewards']}**",
+            f"• Sans death timers: **{counts['sans_timers']}**",
+            f"• Ender Dragon towers: **{counts['ender_dragon_towers']}**",
+        ]
+        if preview:
+            embed = discord.Embed(
+                title="🔓 Stuck PvE preview",
+                description="Nothing was cleared. Run `/unstick` without preview to clear these.",
+                color=discord.Color.gold(),
+            )
+            embed.add_field(name="In-memory locks", value="\n".join(lines), inline=False)
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+            return
+
+        cleared = await _clear_stuck_pve_state(
+            reason="",
+            announce=False,
+            guild=interaction.guild,
+        )
+        embed = discord.Embed(
+            title="🔓 Cleared stuck PvE state",
+            description="Wild animals, bosses, and related in-memory locks were cleared. Gathering can spawn again.",
+            color=discord.Color.green(),
+        )
+        embed.add_field(
+            name="Cleared",
+            value="\n".join([
+                f"• Wild animals: **{cleared['wild_animals']}**",
+                f"• Boss fights: **{cleared['bosses']}**",
+                f"• Pending boss spawns: **{cleared['pending_boss_spawns']}**",
+                f"• Plantera bulbs: **{cleared['plantera_bulbs']}**",
+                f"• Pending PvE rewards: **{cleared['pending_rewards']}**",
+                f"• Sans death timers: **{cleared['sans_timers']}**",
+                f"• Ender Dragon towers: **{cleared['ender_dragon_towers']}**",
+            ]),
+            inline=False,
+        )
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+        print(f"Admin {interaction.user.name} ran /unstick: {cleared}")
+    except Exception as e:
+        print(f"Error in unstick command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
@@ -16108,6 +17508,11 @@ async def user_admin(interaction: discord.Interaction, password: str, member: di
         day_text = "day" if water_streak == 1 else "days"
         water_streak_pct = (daily_bonus_multiplier - 1.0) * 100
         embed_stats.add_field(name="💧 Water Streak", value=f"**{water_streak}** {day_text} (+{water_streak_pct:.1f}%)", inline=True)
+        embed_stats.add_field(
+            name="⚔️ Battle Pass",
+            value=f"**LV {max(0, int(doc.get('battlepass_lv', 0) or 0))}** ({int(doc.get('battlepass_exp', 0) or 0):,} EXP)  •  🫛 **{int(doc.get('seed_pods', 0) or 0)}**",
+            inline=True,
+        )
         if hoe_attunement:
             hoe_name = hoe_attunement.get("name", "Unknown")
             hoe_rarity = hoe_attunement.get("rarity", "COMMON")
@@ -16235,8 +17640,14 @@ async def user_admin(interaction: discord.Interaction, password: str, member: di
             inline=False
         )
 
-        await safe_interaction_response(interaction, interaction.followup.send,
-            embeds=[embed_stats, embed_items, embed_shop, embed_ach, embed_hidden, embed_ref], ephemeral=True)
+        # Discord caps combined embed characters per message at 6000. /user's
+        # hidden + achievements embeds alone exceed that, so send in batches.
+        for batch in pack_embeds_within_limits(
+            [embed_stats, embed_items, embed_shop, embed_ach, embed_hidden, embed_ref]
+        ):
+            await safe_interaction_response(
+                interaction, interaction.followup.send, embeds=batch, ephemeral=True
+            )
     except Exception as e:
         import traceback
         print(f"Error in user admin command: {e}")
@@ -16588,7 +17999,7 @@ async def wipe(interaction: discord.Interaction, password: str, type: str):
                 description=f"Reset everything for **{wiped_count}** users in this server.\nAll users have been set to **PLANTER I** rank and **PINE I** Bloom rank.\n\n**Market has been reset** - all shares returned, making all stocks available at max capacity.",
                 color=discord.Color.red()
             )
-            embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Stock holdings (shares)\n• Crypto holdings (portfolio)\n• Collected items\n• Gather stats\n• Ripeness stats\n• Tree Rings\n• Rank (set to PLANTER I)\n• Bloom rank (set to PINE I)\n• All achievements and achievement stats\n• All cooldowns\n• Daily shop inventory and purchase count", inline=False)
+            embed.add_field(name="What was reset", value="• Money (balance)\n• Basket upgrades\n• Shoes upgrades\n• Gloves upgrades\n• Soil upgrades\n• Harvest upgrades (Car, Yield, Fertilizer, Workers)\n• Gardeners\n• GPUs\n• Stock holdings (shares)\n• Crypto holdings (portfolio)\n• Collected items\n• Gather stats\n• Ripeness stats\n• Tree Rings\n• Rank (set to PLANTER I)\n• Bloom rank (set to PINE I)\n• All achievements and achievement stats\n• All cooldowns\n• Daily shop inventory and purchase count\n• Battle Pass EXP and LV\n• Unopened SEED PODs", inline=False)
 
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
         print(f"Admin {interaction.user.name} wiped {type} data for {wiped_count} users")
@@ -16597,14 +18008,386 @@ async def wipe(interaction: discord.Interaction, password: str, type: str):
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
+
+async def _reset_guild_stock_prices(guild_id: int) -> int:
+    """Reset in-memory stock prices and news multipliers to real-life API values."""
+    await initialize_stocks(guild_id)
+    reset_count = 0
+    if guild_id not in stock_data:
+        return 0
+    for symbol, info in stock_data[guild_id].items():
+        info["news_multiplier"] = 1.0
+        real_ticker = REAL_STOCK_MAPPING.get(symbol)
+        if real_ticker:
+            real_data = await asyncio.to_thread(fetch_real_stock_data, real_ticker)
+            if real_data:
+                info["real_price"] = real_data["price"]
+                info["price"] = real_data["price"]
+                info["shares_outstanding"] = real_data["shares_outstanding"]
+                info["market_cap"] = real_data.get("market_cap")
+                info["price_history"] = [real_data["price"]] * 6
+                info["last_api_fetch"] = time.time()
+                reset_count += 1
+                continue
+        real_price = info.get("real_price", info.get("price", 0))
+        info["price"] = real_price
+        info["price_history"] = [real_price] * 6
+        reset_count += 1
+    return reset_count
+
+
+async def _cancel_live_season_activity(guild: discord.Guild) -> dict:
+    """Cancel events, live games, PvE, and giveaways. Returns counts for the admin summary."""
+    counts = {
+        "events": 0, "roulette": 0, "pve": 0, "bosses": 0,
+        "giveaways": 0, "gathemon": 0, "mayflower": 0,
+    }
+
+    events = await asyncio.to_thread(get_active_events)
+    for ev in events:
+        await asyncio.to_thread(clear_event, ev.get("event_id", ""))
+        try:
+            await send_event_end_embed(guild, ev)
+        except Exception as e:
+            print(f"Error sending season event-end embed: {e}")
+        counts["events"] += 1
+
+    for game_id in list(active_roulette_games.keys()):
+        game = active_roulette_games.get(game_id)
+        channel = bot.get_channel(game.channel_id) if game and getattr(game, "channel_id", None) else None
+        if channel is None and game:
+            for ch_id, tracked in list(active_roulette_channel_games.items()):
+                if tracked == game_id:
+                    channel = bot.get_channel(ch_id)
+                    break
+        _force_cleanup_roulette_game(game_id, refund=True)
+        if channel:
+            try:
+                embed = discord.Embed(
+                    title="🛑 RUSSIAN ROULETTE ENDED 🛑",
+                    description=(
+                        "This game ended because a **new season** started.\n"
+                        "Remaining players were refunded before the season wipe."
+                    ),
+                    color=discord.Color.red(),
+                )
+                await channel.send(embed=embed)
+            except Exception as e:
+                print(f"Error posting roulette season cancel: {e}")
+        counts["roulette"] += 1
+
+    pve_counts = await _clear_stuck_pve_state(
+        reason="A **new season** began, so this fight was cancelled. Gathering is open again.",
+    )
+    counts["pve"] = pve_counts["wild_animals"]
+    counts["bosses"] = pve_counts["bosses"]
+
+    for msg_id, data in list(_active_giveaways.items()):
+        if data.get("guild_id") != guild.id:
+            continue
+        _active_giveaways.pop(msg_id, None)
+        try:
+            mark_giveaway_resolved(msg_id)
+        except Exception as e:
+            print(f"Error marking giveaway resolved: {e}")
+        ch = bot.get_channel(data.get("channel_id"))
+        if ch:
+            try:
+                await ch.send("🫐 This giveaway was **cancelled** because a new season started. No prizes were awarded.")
+            except Exception:
+                pass
+        counts["giveaways"] += 1
+    try:
+        pending = await asyncio.to_thread(get_pending_giveaways)
+        for g in pending:
+            if g.get("guild_id") == guild.id:
+                await asyncio.to_thread(mark_giveaway_resolved, g["message_id"])
+                _active_giveaways.pop(g["message_id"], None)
+    except Exception as e:
+        print(f"Error resolving leftover giveaways: {e}")
+
+    for battle in list(active_gathemon_battles.values()):
+        try:
+            add_user_bloom_cycle_plants(battle.player1_id, battle.bet)
+            add_user_bloom_cycle_plants(battle.player2_id, battle.bet)
+        except Exception:
+            pass
+        ch = bot.get_channel(battle.channel_id)
+        if ch:
+            try:
+                await ch.send("⚔️ GathéMon battle cancelled — a **new season** started.")
+            except Exception:
+                pass
+        counts["gathemon"] += 1
+    active_gathemon_battles.clear()
+    active_gathemon_challenges.clear()
+    user_active_gathemon.clear()
+
+    for gid in list(active_gathership_games.keys()):
+        game = active_gathership_games.get(gid)
+        ch = bot.get_channel(game.channel_id) if game else None
+        await _gathership_refund_and_cleanup(gid, ch)
+        counts["mayflower"] += 1
+
+    return counts
+
+
+# New season command - Admin only, #hidden channel
+@bot.tree.command(name="newseason", description="[ADMIN] Start a new season: wipe all progress except invite rewards")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    password="Admin password",
+    confirm="Type NEWSEASON to run, or PREVIEW to see what would happen",
+)
+async def newseason(interaction: discord.Interaction, password: str, confirm: str):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
+            return
+
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+
+        if not hasattr(interaction.channel, 'name') or interaction.channel.name != "hidden":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
+                ephemeral=True)
+            return
+
+        guild = interaction.guild
+        if not guild:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: Could not get guild information.", ephemeral=True)
+            return
+
+        if confirm == "PREVIEW":
+            preview = await asyncio.to_thread(preview_new_season)
+            live_events = await asyncio.to_thread(get_active_events)
+            giveaway_n = sum(1 for g in _active_giveaways.values() if g.get("guild_id") == guild.id)
+            live_lines = [
+                f"• Events: **{len(live_events)}**",
+                f"• Russian Roulette: **{len(active_roulette_games)}**",
+                f"• Wild animals: **{len(active_pve_events)}**",
+                f"• Boss fights: **{len(active_boss_events)}**",
+                f"• Giveaways: **{giveaway_n}**",
+                f"• GathéMon: **{len(active_gathemon_battles)}**",
+                f"• Mayflower: **{len(active_gathership_games)}**",
+            ]
+            embed = discord.Embed(
+                title="🔭 New Season Preview",
+                description="No data was changed. Type `NEWSEASON` in confirm to actually run it.",
+                color=discord.Color.gold(),
+            )
+            embed.add_field(name="Players that would be wiped", value=f"**{preview['user_count']}**", inline=True)
+            embed.add_field(name="Invite records kept", value=f"**{preview['invite_progress']}**", inline=True)
+            embed.add_field(name="Live activity that would be cancelled", value="\n".join(live_lines), inline=False)
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+            return
+
+        if confirm != "NEWSEASON":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ Type `NEWSEASON` to start a new season, or `PREVIEW` to see what would happen. This cannot be undone.",
+                ephemeral=True)
+            return
+
+        await safe_interaction_response(
+            interaction, interaction.followup.send,
+            "🌱 Starting new season… cancelling live games and events first.",
+            ephemeral=True,
+        )
+
+        live_counts = await _cancel_live_season_activity(guild)
+        wiped_count = await asyncio.to_thread(start_new_season)
+        reset_jump_counter(guild.id)
+        _jump_cooldowns.clear()
+        _gamer_multi_expires.clear()
+        crypto_price_history.clear()
+        initialize_crypto_history()
+        stocks_reset = await _reset_guild_stock_prices(guild.id)
+
+        members = [m for m in guild.members if not m.bot]
+        _ROLE_CHUNK = 25
+        for i in range(0, len(members), _ROLE_CHUNK):
+            chunk = members[i : i + _ROLE_CHUNK]
+            gather_tasks = []
+            for m in chunk:
+                gather_tasks.append(assign_gatherer_role(m, guild, force_planter_role="PLANTER I"))
+                gather_tasks.append(assign_bloom_rank_role(m, guild))
+            await asyncio.gather(*gather_tasks, return_exceptions=True)
+
+        try:
+            await asyncio.gather(
+                update_leaderboard_message(guild, "plants"),
+                update_leaderboard_message(guild, "money"),
+                update_leaderboard_message(guild, "ranks"),
+                update_marketboard_message(guild, tick_prices=False),
+                update_coinbase_message(guild),
+            )
+        except Exception as e:
+            print(f"Error refreshing boards after newseason: {e}")
+
+        reset_lines = [
+            "• Money, upgrades, gardeners, GPUs, imbues",
+            "• Plants, items, almanac, tree rings, cooldowns",
+            "• Achievements and all hidden achievements",
+            "• Bloom rank, planter rank, unlocked areas",
+            "• Stocks (holdings + prices), crypto, jackpot, jump",
+            "• Daily shop, dayboosts",
+            "• Battle Pass EXP / LV and unopened SEED PODs",
+        ]
+        kept_lines = [
+            "• Invite join counts and claimed invite rewards (re-applied silently)",
+            "• Premium / booster / server tag / beta tester status",
+        ]
+        cancelled_bits = []
+        if live_counts["events"]:
+            cancelled_bits.append(f"events ({live_counts['events']})")
+        if live_counts["roulette"]:
+            cancelled_bits.append(f"roulette ({live_counts['roulette']})")
+        if live_counts["pve"]:
+            cancelled_bits.append(f"wild animals ({live_counts['pve']})")
+        if live_counts["bosses"]:
+            cancelled_bits.append(f"bosses ({live_counts['bosses']})")
+        if live_counts["giveaways"]:
+            cancelled_bits.append(f"giveaways ({live_counts['giveaways']})")
+        if live_counts["gathemon"]:
+            cancelled_bits.append(f"GathéMon ({live_counts['gathemon']})")
+        if live_counts["mayflower"]:
+            cancelled_bits.append(f"Mayflower ({live_counts['mayflower']})")
+
+        embed = discord.Embed(
+            title="🌱 New Season Started",
+            description=(
+                f"Reset progress for **{wiped_count}** users.\n"
+                "Everyone currently in the server is **PLANTER I** / **PINE I**.\n\n"
+                "**Invite rewards were kept** and re-applied silently — claimed tiers stay claimed, and their effects come back without a notification."
+            ),
+            color=discord.Color.red()
+        )
+        embed.add_field(name="What was reset", value="\n".join(reset_lines), inline=False)
+        embed.add_field(
+            name="Live activity cancelled",
+            value=", ".join(cancelled_bits) if cancelled_bits else "Nothing was running.",
+            inline=False,
+        )
+        embed.add_field(
+            name="Boards refreshed",
+            value=f"Plants / money / ranks leaderboards, #grow-jones ({stocks_reset} tickers), and #fernbase.",
+            inline=False,
+        )
+        embed.add_field(name="What was kept", value="\n".join(kept_lines), inline=False)
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+        print(f"Admin {interaction.user.name} started a new season ({wiped_count} users)")
+    except Exception as e:
+        print(f"Error in newseason command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+_SET_TYPE_ALIASES = {
+    "money": "money",
+    "plants": "plants",
+    "crypto": "crypto",
+    "invites": "invites",
+    "battlepass": "battlepass",
+    "battle pass": "battlepass",
+    "battle_pass": "battlepass",
+    "bp": "battlepass",
+    "pass": "battlepass",
+    "setbp": "battlepass",
+}
+
+_GIVE_TYPE_ALIASES = {
+    "money": "money",
+    "imbue": "imbue",
+    "water_streak": "water_streak",
+    "water streak": "water_streak",
+    "tree_rings": "tree_rings",
+    "tree rings": "tree_rings",
+    "shop_item": "shop_item",
+    "shop item": "shop_item",
+    "bp_item": "bp_item",
+    "bp item": "bp_item",
+    "battle pass item": "bp_item",
+    "battlepass item": "bp_item",
+    "battlepass": "bp_item",
+    "battle pass": "bp_item",
+    "bp": "bp_item",
+}
+
+
+def _normalize_admin_choice(raw: str | None, aliases: dict[str, str]) -> str:
+    key = " ".join(str(raw or "").strip().lower().replace("_", " ").replace("-", " ").split())
+    compact = key.replace(" ", "")
+    by_compact = {
+        alias.replace(" ", "").replace("_", "").replace("-", ""): canonical
+        for alias, canonical in aliases.items()
+    }
+    return aliases.get(key) or aliases.get(compact) or by_compact.get(compact) or compact
+
+
+def _parse_battlepass_lv(amount) -> int | None:
+    try:
+        value = float(amount)
+        lv = int(round(value))
+    except (TypeError, ValueError):
+        return None
+    if abs(value - lv) > 1e-6:
+        return None
+    if lv < 0 or lv > BATTLEPASS_MAX_LV:
+        return None
+    return lv
+
+
+def _battlepass_set_embed(target_user, result: dict) -> discord.Embed:
+    new_lv = int(result["new_lv"])
+    if result.get("reset"):
+        description = (
+            f"{target_user.mention}'s Battle Pass was reset to **LV {new_lv}** (0 EXP).\n"
+            f"Owned items were kept."
+        )
+    else:
+        description = (
+            f"{target_user.mention}'s Battle Pass is now **LV {new_lv}** "
+            f"({int(result['exp']):,} EXP)."
+        )
+    embed = discord.Embed(
+        title="✅ Battle Pass Set",
+        description=description,
+        color=discord.Color.green(),
+    )
+    embed.add_field(name="Previous LV", value=str(int(result["old_lv"])), inline=True)
+    embed.add_field(name="New LV", value=str(new_lv), inline=True)
+    reward_lines = []
+    for row in result.get("rewards") or []:
+        item_id = row.get("item_id")
+        info = BATTLEPASS_ITEMS.get(item_id) if item_id else None
+        name = (info or {}).get("name") or row.get("label") or "?"
+        reward_lines.append(f"LV {int(row['lv'])}: **{name}**")
+    unlocks_value = "\n".join(reward_lines) if reward_lines else "None (already owned or reset)"
+    if len(unlocks_value) > _EMBED_FIELD_VALUE_MAX:
+        kept = []
+        used = 0
+        suffix = "\n*...and more*"
+        for line in reward_lines:
+            extra = (1 if kept else 0) + len(line)
+            if used + extra + len(suffix) > _EMBED_FIELD_VALUE_MAX:
+                break
+            kept.append(line)
+            used += extra
+        unlocks_value = "\n".join(kept) + suffix
+    embed.add_field(name="Unlocks granted", value=unlocks_value, inline=False)
+    return embed
+
+
 # Set command - Admin only, #hidden channel
-@bot.tree.command(name="set", description="[ADMIN] Set a user's money, plants, crypto, or invites")
+@bot.tree.command(name="set", description="[ADMIN] Set a user's money, plants, crypto, invites, or Battle Pass LV")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     password="Admin password",
     user="The user to set the value for (defaults to yourself)",
-    amount="The amount to set",
-    type="The type of value to set: money, plants, crypto, or invites",
+    amount="The amount to set (Battle Pass: LV 0-30)",
+    type="The type of value to set: money, plants, crypto, invites, or Battle Pass",
     coin="The crypto coin type (RTC, TER, or CNY) - required if type is crypto"
 )
 @app_commands.choices(type=[
@@ -16612,6 +18395,7 @@ async def wipe(interaction: discord.Interaction, password: str, type: str):
     app_commands.Choice(name="Plants", value="plants"),
     app_commands.Choice(name="Crypto", value="crypto"),
     app_commands.Choice(name="Invites", value="invites"),
+    app_commands.Choice(name="Battle Pass", value="battlepass"),
 ])
 @app_commands.choices(coin=[
     app_commands.Choice(name="RTC", value="RTC"),
@@ -16650,10 +18434,11 @@ async def set_command(
         user_id = target_user.id
         
         # Validate and normalize type
-        type_lower = type.lower()
-        if type_lower not in ["money", "plants", "crypto", "invites"]:
+        type_lower = _normalize_admin_choice(type, _SET_TYPE_ALIASES)
+        if type_lower not in ["money", "plants", "crypto", "invites", "battlepass"]:
+            print(f"Admin {interaction.user.name} /set unmatched type={type!r}")
             await safe_interaction_response(interaction, interaction.followup.send,
-                "\u274c **Error**: Type must be one of: `money`, `plants`, `crypto`, or `invites`.",
+                "\u274c **Error**: Type must be one of: `money`, `plants`, `crypto`, `invites`, or `battlepass` (Battle Pass / bp also work).",
                 ephemeral=True)
             return
         
@@ -16745,11 +18530,66 @@ async def set_command(
                 color=discord.Color.green()
             )
             print(f"Admin {interaction.user.name} used /set to set {target_user.name}'s {coin_upper} to {amount:,.2f}")
+
+        elif type_lower == "battlepass":
+            target_lv = _parse_battlepass_lv(amount)
+            if target_lv is None:
+                await safe_interaction_response(interaction, interaction.followup.send,
+                    f"❌ **Error**: Battle Pass LV must be a whole number from **0** to **{BATTLEPASS_MAX_LV}**.",
+                    ephemeral=True)
+                return
+            result = set_user_battlepass_level(user_id, target_lv)
+            embed = _battlepass_set_embed(target_user, result)
+            for hidden_key in result.get("unlocked_hidden") or []:
+                asyncio.create_task(send_hidden_achievement_notification_dm(user_id, hidden_key))
+            print(f"Admin {interaction.user.name} used /set to set {target_user.name}'s Battle Pass to LV {int(result['new_lv'])}")
         
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
     except Exception as e:
         print(f"Error in set command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "\u274c An error occurred. Please try again.", ephemeral=True)
+
+
+@bot.tree.command(name="setbp", description="[ADMIN] Set Battle Pass LV 0-30 and grant unlocks. Use in #hidden.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    password="Admin password",
+    level="Battle Pass LV to set (0 resets EXP; 1-30 grants unlocks through that LV)",
+    user="The user to set (defaults to yourself)",
+)
+async def setbp_command(
+    interaction: discord.Interaction,
+    password: str,
+    level: app_commands.Range[int, 0, 30],
+    user: discord.Member = None,
+):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if password != "Fullmetal":
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
+            return
+        if not interaction.user.guild_permissions.administrator:
+            await safe_interaction_response(interaction, interaction.followup.send,
+                "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+            return
+        if not hasattr(interaction.channel, "name") or interaction.channel.name != "hidden":
+            await safe_interaction_response(interaction, interaction.followup.send,
+                f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
+                ephemeral=True)
+            return
+        target_user = user if user else interaction.user
+        result = set_user_battlepass_level(target_user.id, int(level))
+        embed = _battlepass_set_embed(target_user, result)
+        for hidden_key in result.get("unlocked_hidden") or []:
+            asyncio.create_task(send_hidden_achievement_notification_dm(target_user.id, hidden_key))
+        print(f"Admin {interaction.user.name} used /setbp to set {target_user.name}'s Battle Pass to LV {int(result['new_lv'])}")
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+    except ValueError as e:
+        await safe_interaction_response(interaction, interaction.followup.send, f"❌ {e}", ephemeral=True)
+    except Exception as e:
+        print(f"Error in setbp command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 
 # Setrank admin command - set a user's BLOOM rank (PINE → REDWOOD)
@@ -17026,22 +18866,246 @@ async def _give_imbue_name_autocomplete(
     return [app_commands.Choice(name=n, value=n) for n in matches[:25]]
 
 
+def _normalize_give_item_query(value: str) -> str:
+    return "".join(ch for ch in (value or "").lower() if ch.isalnum())
+
+
+_GIVE_ITEM_ALIASES = {
+    "the_world": (
+        "world", "theworld", "the world", "toki", "tokiwotomare", "stand",
+        "zawarudo", "za warudo", "dio", "stoptime", "theworldstoptime",
+    ),
+    "resonance_nail": (
+        "bpnail", "resonancenail", "resonance", "resonantnail", "cursednail",
+        "hollowknight",
+    ),
+    "quavers_beat": (
+        "quaver", "quavers", "quaversbeat", "quaverbeat", "quaver's beat",
+        "quavers beat", "quaver s beat", "beat", "quaversbeatbattlepass",
+        "quaver's beat (battle pass)", "quavers beat (battle pass)",
+        "quaver'sbeat", "quaverbeatbp",
+    ),
+    "neo_frontier_axe": (
+        "neofrontieraxe", "bpaxe", "neoaxe", "frontieraxe", "axe",
+        "neo frontier", "neofrontier", "tf2axe",
+    ),
+    "true_judgements_gavel": (
+        "gavel", "truejudgement", "truejudgment", "judgement", "judgment",
+        "truejudgementsgavel", "truejudgmentsgavel", "deadlysentencing",
+        "true judgement's gavel", "true judgements gavel",
+    ),
+    "bp_3070": (
+        "3070", "natividia3070", "rootx3070", "natividiarootx3070", "bpgpu",
+        "rootx", "natividia", "gpu3070", "natividia rootx 3070",
+    ),
+}
+
+
+def _giveable_bp_catalog() -> dict:
+    """Battle Pass exclusives /give can grant, including the 3070 GPU."""
+    catalog = {item_id: dict(info) for item_id, info in BATTLEPASS_ITEMS.items()}
+    catalog["bp_3070"] = {
+        "name": BATTLEPASS_3070_NAME,
+        "description": "Battle Pass exclusive GPU.",
+        "effect": "+150% /sell value and +8s /sell time (stacks with shop GPUs)",
+        "battlepass_only": True,
+        "grant_type": "gpu",
+        "gpu_name": BATTLEPASS_3070_NAME,
+    }
+    return catalog
+
+
+def _giveable_shop_catalog() -> dict:
+    """Daily Shop + Battle Pass items that /give can grant."""
+    catalog = dict(DAILY_SHOP_ITEMS)
+    catalog.update(_giveable_bp_catalog())
+    return catalog
+
+
+def _plain_item_name(name: str) -> str:
+    return (
+        str(name or "")
+        .replace("'", "")
+        .replace("’", "")
+        .replace("`", "")
+        .replace("★", "*")
+    )
+
+
+def _give_choice_label(item_id: str, info: dict) -> str:
+    """ASCII-safe Discord choice name. Apostrophes make some clients drop the option."""
+    name = _plain_item_name(info.get("name") or item_id)
+    tag = "BP" if info.get("battlepass_only") else "Shop"
+    label = f"{name} [{tag}] ({item_id})"
+    return label[:100]
+
+
+def _item_id_in_query(query: str, catalog: dict) -> str | None:
+    raw = str(query or "").strip()
+    if raw in catalog:
+        return raw
+    start = raw.rfind("(")
+    end = raw.rfind(")")
+    if start != -1 and end > start:
+        maybe = raw[start + 1:end].strip()
+        if maybe in catalog:
+            return maybe
+    needle = _normalize_give_item_query(raw)
+    for item_id in catalog:
+        if needle == _normalize_give_item_query(item_id):
+            return item_id
+    return None
+
+
+def _item_search_norms(item_id: str, info: dict) -> set[str]:
+    name = str(info.get("name") or "")
+    plain = _plain_item_name(name)
+    label = _give_choice_label(item_id, info)
+    raw = [
+        item_id,
+        item_id.replace("_", " "),
+        item_id.replace("_", ""),
+        name,
+        plain,
+        f"{plain} battle pass",
+        f"{plain} (battle pass)",
+        f"{name} (Battle Pass)",
+        label,
+        *_GIVE_ITEM_ALIASES.get(item_id, ()),
+    ]
+    if info.get("battlepass_only"):
+        blob = f"{name} {plain}"
+        word = []
+        words = []
+        for ch in blob:
+            if ch.isalnum():
+                word.append(ch)
+            elif word:
+                words.append("".join(word))
+                word = []
+        if word:
+            words.append("".join(word))
+        raw.extend(part for part in words if len(part) >= 3)
+    norms = {_normalize_give_item_query(part) for part in raw if part}
+    return {n for n in norms if n}
+
+
+def _resolve_giveable_item(query: str | None, catalog: dict) -> tuple[str, dict] | None:
+    """Match a /give shop_item value by id, display name, alias, or autocomplete label."""
+    if not query:
+        return None
+    raw = str(query).strip()
+    extracted = _item_id_in_query(raw, catalog)
+    if extracted:
+        return extracted, catalog[extracted]
+    needle = _normalize_give_item_query(raw)
+    if not needle:
+        return None
+
+    exact = []
+    partial = []
+    for item_id, info in catalog.items():
+        norms = _item_search_norms(item_id, info)
+        if needle in norms:
+            exact.append((item_id, info))
+        elif any(needle in name or name in needle for name in norms):
+            partial.append((item_id, info))
+
+    matches = exact or partial
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    bp_matches = [m for m in matches if m[1].get("battlepass_only")]
+    if len(bp_matches) == 1 and (exact and all(m[1].get("battlepass_only") for m in exact) or needle in {
+        "quaver", "quavers", "beat", "gavel", "axe", "world", "3070", "nail",
+    }):
+        if needle != "nail":
+            return bp_matches[0]
+    for item_id, info in matches:
+        if _normalize_give_item_query(_plain_item_name(info.get("name") or "")) == needle:
+            return item_id, info
+        if _normalize_give_item_query(str(info.get("name") or "")) == needle:
+            return item_id, info
+    if bp_matches:
+        return bp_matches[0]
+    return matches[0]
+
+
+def _give_item_autocomplete_choices(current: str, catalog: dict) -> list[app_commands.Choice[str]]:
+    """Battle Pass items first so Discord's 25-choice cap does not hide them."""
+    current_upper = (current or "").strip().upper()
+    current_norm = _normalize_give_item_query(current)
+    bp_choices = []
+    shop_choices = []
+    seen_names = set()
+    for item_id, info in catalog.items():
+        name = info.get("name", item_id)
+        label = _give_choice_label(item_id, info)
+        haystacks = [
+            name,
+            _plain_item_name(name),
+            item_id.replace("_", " "),
+            item_id,
+            label,
+            *_GIVE_ITEM_ALIASES.get(item_id, ()),
+        ]
+        if current_upper:
+            matched = any(current_upper in str(part).upper() for part in haystacks)
+            if not matched and current_norm:
+                matched = any(current_norm in _normalize_give_item_query(str(part)) for part in haystacks if part)
+            if not matched:
+                continue
+        unique_name = label
+        suffix = 2
+        while unique_name.lower() in seen_names:
+            unique_name = f"{label[:90]} {suffix}"[:100]
+            suffix += 1
+        seen_names.add(unique_name.lower())
+        try:
+            choice = app_commands.Choice(name=unique_name[:100], value=str(item_id)[:100])
+        except Exception:
+            choice = app_commands.Choice(name=str(item_id)[:100], value=str(item_id)[:100])
+        if info.get("battlepass_only"):
+            bp_choices.append(choice)
+        else:
+            shop_choices.append(choice)
+    if current and not bp_choices and not shop_choices:
+        return _give_item_autocomplete_choices("", catalog)
+    bp_choices.sort(key=lambda c: c.name.upper())
+    shop_choices.sort(key=lambda c: c.name.upper())
+    return (bp_choices + shop_choices)[:25]
+
+
 async def _give_shop_item_autocomplete(
     interaction: discord.Interaction,
     current: str,
 ) -> list[app_commands.Choice[str]]:
-    """Autocomplete for daily shop item – filters by typed text. Supports 25+ items (Discord limit is 25 static choices)."""
-    current_upper = (current or "").strip().upper()
-    choices = []
-    for item_id, info in DAILY_SHOP_ITEMS.items():
-        name = info.get("name", item_id)
-        if not current_upper or current_upper in name.upper() or current_upper in item_id.upper().replace("_", " "):
-            choices.append(app_commands.Choice(name=name, value=item_id))
-    choices.sort(key=lambda c: c.name.upper())
-    return choices[:25]
+    """Autocomplete for Daily Shop and Battle Pass items. Discord limit is 25 choices."""
+    try:
+        type_raw = str(getattr(interaction.namespace, "type", "") or "").lower()
+        catalog = _giveable_bp_catalog() if type_raw == "bp_item" else _giveable_shop_catalog()
+        choices = _give_item_autocomplete_choices(current, catalog)
+        if type_raw == "bp_item" and not choices:
+            choices = _give_item_autocomplete_choices("", _giveable_bp_catalog())
+        return choices
+    except Exception as e:
+        print(f"Error in give shop_item autocomplete: {e}")
+        try:
+            return _give_item_autocomplete_choices("", _giveable_bp_catalog())
+        except Exception:
+            return []
 
 
-@bot.tree.command(name="give", description="[ADMIN] Give a user money, imbues, water streak, tree rings, or daily shop items")
+async def _giveaway_shop_item_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    """Giveaways stay Daily Shop-only."""
+    return _give_item_autocomplete_choices(current, DAILY_SHOP_ITEMS)
+
+
+@bot.tree.command(name="give", description="[ADMIN] Give a user money, imbues, water streak, tree rings, Daily Shop, or Battle Pass items")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     password="Admin password",
@@ -17051,7 +19115,7 @@ async def _give_shop_item_autocomplete(
     tool_type="Hoe or Tractor (required for imbue type)",
     rarity="Imbue rarity tier (required for imbue type)",
     imbue_name="Specific imbue name (required for imbue type) – autocompletes based on tool & rarity",
-    shop_item="Daily shop item to give (required for shop_item type) – type to search",
+    shop_item="Daily Shop or Battle Pass item (Shop Item / Battle Pass Item) – type a name like World",
 )
 @app_commands.choices(type=[
     app_commands.Choice(name="Money", value="money"),
@@ -17059,6 +19123,7 @@ async def _give_shop_item_autocomplete(
     app_commands.Choice(name="Water Streak", value="water_streak"),
     app_commands.Choice(name="Tree Rings", value="tree_rings"),
     app_commands.Choice(name="Shop Item", value="shop_item"),
+    app_commands.Choice(name="Battle Pass Item", value="bp_item"),
 ])
 @app_commands.choices(tool_type=[
     app_commands.Choice(name="Hoe (Gather)", value="hoe"),
@@ -17107,7 +19172,7 @@ async def give(
             return
 
         user_id = user.id
-        type_lower = type.lower()
+        type_lower = _normalize_admin_choice(type, _GIVE_TYPE_ALIASES)
 
         # ── MONEY ──
         if type_lower == "money":
@@ -17235,27 +19300,43 @@ async def give(
             embed.set_footer(text=f"Given by {interaction.user.name}")
             print(f"Admin {interaction.user.name} used /give tree_rings to give {user.name} {rings} rings")
 
-        # ── SHOP ITEM (Daily Shop) ──
-        elif type_lower == "shop_item":
-            if not shop_item or shop_item not in DAILY_SHOP_ITEMS:
+        # ── SHOP ITEM / BATTLE PASS ITEM ──
+        elif type_lower in {"shop_item", "bp_item"}:
+            catalog = _giveable_bp_catalog() if type_lower == "bp_item" else _giveable_shop_catalog()
+            resolved = _resolve_giveable_item(shop_item, catalog)
+            if not resolved and type_lower == "bp_item":
+                resolved = _resolve_giveable_item(shop_item, _giveable_shop_catalog())
+                if resolved and not resolved[1].get("battlepass_only"):
+                    resolved = None
+            if not resolved:
+                bp_ids = ", ".join(f"`{item_id}`" for item_id in _giveable_bp_catalog())
+                typed = (shop_item or "").strip() or "(nothing)"
+                print(f"Admin {interaction.user.name} /give {type_lower} unmatched shop_item={typed!r}")
                 await safe_interaction_response(interaction, interaction.followup.send,
-                    "❌ **Error**: Please select a valid `shop_item` from the Daily Shop list.", ephemeral=True)
+                    f"❌ **Error**: Could not match `{typed}`.\n"
+                    f"Pick it from autocomplete, or type a Battle Pass id: {bp_ids}",
+                    ephemeral=True)
                 return
-            qty = 1  # Daily shop items are one-per-user; giveaway gives 1 (add_shop_item_to_user caps at 1)
-            add_shop_item_to_user(user_id, shop_item, qty)
-            info = DAILY_SHOP_ITEMS[shop_item]
+            item_id, info = resolved
+            if info.get("grant_type") == "gpu":
+                grant_gpu(user_id, str(info.get("gpu_name") or BATTLEPASS_3070_NAME))
+            else:
+                unlocked_stocked = add_shop_item_to_user(user_id, item_id, 1)
+                if unlocked_stocked:
+                    asyncio.create_task(send_hidden_achievement_notification_dm(user_id, "fully_stocked"))
+            source = "Battle Pass Item" if info.get("battlepass_only") else "Daily Shop Item"
             embed = discord.Embed(
-                title="🎉 Giveaway – Daily Shop Item",
+                title=f"🎉 Giveaway – {source}",
                 description=f"**{info['name']}** has been given to {user.mention}!",
                 color=discord.Color.gold()
             )
             embed.add_field(name="Effect", value=f"***{info['effect']}***", inline=False)
             embed.set_footer(text=f"Given by {interaction.user.name}")
-            print(f"Admin {interaction.user.name} used /give shop_item to give {user.name} {info['name']}")
+            print(f"Admin {interaction.user.name} used /give {type_lower} to give {user.name} {info['name']}")
 
         else:
             await safe_interaction_response(interaction, interaction.followup.send,
-                "❌ **Error**: Invalid type. Choose from: `money`, `imbue`, `water_streak`, `tree_rings`, `shop_item`.",
+                "❌ **Error**: Invalid type. Choose from: `money`, `imbue`, `water_streak`, `tree_rings`, `shop_item`, `bp_item`.",
                 ephemeral=True)
             return
 
@@ -17348,6 +19429,8 @@ async def _giveaway_end_task(
     """Wait until giveaway ends, then resolve winners and post congrats."""
     try:
         await asyncio.sleep(max(0, end_at_ts - time.time()))
+        if message_id not in _active_giveaways:
+            return
         _active_giveaways.pop(message_id, None)
         channel = bot.get_channel(channel_id)
         if not channel or not isinstance(channel, discord.TextChannel):
@@ -17459,7 +19542,7 @@ async def _giveaway_end_task(
     app_commands.Choice(name="Celestial", value="CELESTIAL"),
     app_commands.Choice(name="Secret", value="SECRET"),
 ])
-@app_commands.autocomplete(shop_item=_give_shop_item_autocomplete, imbue_name=_give_imbue_name_autocomplete)
+@app_commands.autocomplete(shop_item=_giveaway_shop_item_autocomplete, imbue_name=_give_imbue_name_autocomplete)
 async def giveaway(
     interaction: discord.Interaction,
     password: str,
@@ -18287,7 +20370,7 @@ def calculate_available_shares(guild_id: int, symbol: str) -> int:
     available = shares_outstanding - total_owned
     return max(0, available)  # Ensure it doesn't go negative
 
-async def update_marketboard_message(guild: discord.Guild):
+async def update_marketboard_message(guild: discord.Guild, tick_prices: bool = True):
     """Update or create the marketboard message in #grow-jones channel."""
     # Find the grow-jones channel
     market_channel = discord.utils.get(guild.text_channels, name="grow-jones")
@@ -18298,8 +20381,9 @@ async def update_marketboard_message(guild: discord.Guild):
     # Initialize stocks for this guild
     await initialize_stocks(guild.id)
     
-    # Update stock prices
-    await update_stock_prices(guild.id)
+    # Update stock prices (skip after a season reset so boards show the reset prices)
+    if tick_prices:
+        await update_stock_prices(guild.id)
     
     # Create embed
     embed = discord.Embed(
@@ -19208,17 +21292,11 @@ async def gpu_background_task():
             for user_id, gpus in users_with_gpus:
                 # Process each GPU
                 for gpu_name in gpus:
-                    # Find GPU info in shop to get tier index and percent_increase
-                    gpu_info = None
-                    tier_index = 0
-                    for idx, gpu in enumerate(GPU_SHOP):
-                        if gpu["name"] == gpu_name:
-                            gpu_info = gpu
-                            tier_index = idx
-                            break
-                    
+                    gpu_info = gpu_stats_for(gpu_name)
                     if not gpu_info:
-                        continue  # Skip if GPU not found in shop
+                        continue
+                    lookup_name = "NATIVIDIA RooTX 3070" if gpu_name == BATTLEPASS_3070_NAME else gpu_name
+                    tier_index = next((idx for idx, gpu in enumerate(GPU_SHOP) if gpu["name"] == lookup_name), 0)
                     
                     # Calculate mining chance based on GPU tier
                     # Formula: base_chance * (1 + tier_index * 0.5) where base_chance = 0.03 (3%)
@@ -19502,7 +21580,8 @@ def _apply_auto_water_for_user(user_id: int, now_est: datetime.datetime) -> bool
     if is_first_water_today and consecutive_days > 0 and consecutive_days % 5 == 0:
         increment_tree_rings(user_id, 10)
     ach = _sync_water_streak_achievements(user_id, consecutive_days)
-    return {"applied": True, **ach}
+    bp = award_battlepass_exp(user_id, battlepass_water_exp(streak=consecutive_days))
+    return {"applied": True, "battlepass": bp, **ach}
 
 
 async def irrigation_auto_water_task():
@@ -19523,6 +21602,19 @@ async def irrigation_auto_water_task():
                             result = await asyncio.to_thread(_apply_auto_water_for_user, uid, now_est)
                             if result.get("applied"):
                                 print(f"Irrigation: auto-watered user {uid}")
+                                bp = result.get("battlepass")
+                                try:
+                                    user = bot.get_user(uid) or await bot.fetch_user(uid)
+                                    water_embed = discord.Embed(
+                                        description="💧 Your **Irrigation System** watered your plants!",
+                                        color=discord.Color.blue(),
+                                    )
+                                    _apply_battlepass_exp_footer(water_embed, bp)
+                                    await user.send(embed=water_embed)
+                                except Exception:
+                                    pass
+                                for key in (bp or {}).get("unlocked_hidden") or []:
+                                    await send_hidden_achievement_notification_dm(uid, key)
                             if result.get("water_streak_level_up") is not None:
                                 await send_achievement_notification_dm(uid, "water_streak", result["water_streak_level_up"])
                             if result.get("leap_year_unlocked"):
@@ -19571,6 +21663,46 @@ async def _claim_and_announce_expired(ev_type: str) -> dict | None:
     return claimed
 
 
+async def _end_hourly_and_daily_for_celestial(reason: str) -> tuple[str | None, str | None]:
+    """End active hourly/daily events so a Blood Moon or Solar Eclipse can take the window."""
+    last_hourly = None
+    last_daily = None
+    for ev_type in ("hourly", "daily"):
+        existing = await asyncio.to_thread(get_active_event_by_type, ev_type)
+        if existing:
+            await asyncio.to_thread(clear_event, existing.get("event_id", ""))
+            await _send_end_embed_all_guilds(existing)
+            eid = existing.get("effects", {}).get("event_id")
+            if ev_type == "hourly" and eid:
+                last_hourly = eid
+            elif ev_type == "daily" and eid:
+                last_daily = eid
+            print(f"Event manager: ended active {ev_type} event for {reason}.")
+    return last_hourly, last_daily
+
+
+async def _persist_event_manager_state(
+    next_hourly_attempt: float,
+    next_daily_attempt: float,
+    last_hourly_event_id: str | None,
+    last_daily_event_id: str | None,
+    last_solar_trigger_date: str | None,
+    last_blood_trigger_date: str | None,
+) -> None:
+    try:
+        await asyncio.to_thread(
+            save_event_manager_state,
+            next_hourly_attempt=next_hourly_attempt,
+            next_daily_attempt=next_daily_attempt,
+            last_hourly_event_id=last_hourly_event_id,
+            last_daily_event_id=last_daily_event_id,
+            last_solar_trigger_date=last_solar_trigger_date,
+            last_blood_trigger_date=last_blood_trigger_date,
+        )
+    except Exception as e:
+        print(f"Event manager: failed to persist schedule: {e}")
+
+
 async def event_manager_loop():
     """Single unified background task that manages ALL event lifecycle.
 
@@ -19587,28 +21719,36 @@ async def event_manager_loop():
     await bot.wait_until_ready()
     await asyncio.sleep(5)
 
-    # Timing: next allowed attempt to START a new hourly/daily event.
-    # Delay first attempt by a full interval so reconnects/restarts do not instantly spam events.
     now = time.time()
-    next_hourly_attempt = now + HOURLY_EVENT_INTERVAL
-    next_daily_attempt = now + DAILY_EVENT_INTERVAL
-
-    # Celestial dedup: only trigger once per calendar day in Eastern
-    last_solar_trigger_date = None  # (year, month, day)
-    last_blood_trigger_date = None
-
-    # No consecutive repeats (same event id back-to-back)
-    last_hourly_event_id = None
-    last_daily_event_id = None
+    persisted = await asyncio.to_thread(get_event_manager_state)
     active_hourly = await asyncio.to_thread(get_active_event_by_type, "hourly")
-    if active_hourly:
-        last_hourly_event_id = active_hourly.get("effects", {}).get("event_id")
-        next_hourly_attempt = max(next_hourly_attempt, float(active_hourly.get("end_time", now)) + HOURLY_EVENT_INTERVAL)
     active_daily = await asyncio.to_thread(get_active_event_by_type, "daily")
-    if active_daily:
-        last_daily_event_id = active_daily.get("effects", {}).get("event_id")
-        next_daily_attempt = max(next_daily_attempt, float(active_daily.get("end_time", now)) + DAILY_EVENT_INTERVAL)
+    schedule = compute_event_manager_schedule(
+        now=now,
+        hourly_interval=HOURLY_EVENT_INTERVAL,
+        daily_interval=DAILY_EVENT_INTERVAL,
+        state=persisted,
+        active_hourly=active_hourly,
+        active_daily=active_daily,
+    )
+    next_hourly_attempt = schedule["next_hourly_attempt"]
+    next_daily_attempt = schedule["next_daily_attempt"]
+    last_hourly_event_id = schedule["last_hourly_event_id"]
+    last_daily_event_id = schedule["last_daily_event_id"]
+    last_solar_trigger_date = schedule["last_solar_trigger_date"]
+    last_blood_trigger_date = schedule["last_blood_trigger_date"]
 
+    async def persist_schedule():
+        await _persist_event_manager_state(
+            next_hourly_attempt,
+            next_daily_attempt,
+            last_hourly_event_id,
+            last_daily_event_id,
+            last_solar_trigger_date,
+            last_blood_trigger_date,
+        )
+
+    await persist_schedule()
     print("Event manager loop started.")
 
     while not bot.is_closed():
@@ -19622,13 +21762,13 @@ async def event_manager_loop():
                         last_hourly_event_id = eid
                     elif ev_type == "daily" and eid:
                         last_daily_event_id = eid
+                    await persist_schedule()
 
             # Also sweep any orphaned events of unknown type (safety net)
             await asyncio.to_thread(clear_expired_events)
 
             now = time.time()
 
-            # Check if celestial is active (blocks hourly/daily starts)
             celestial_active = (
                 await asyncio.to_thread(get_active_event_by_type, "solar_eclipse")
                 or await asyncio.to_thread(get_active_event_by_type, "blood_moon")
@@ -19640,6 +21780,7 @@ async def event_manager_loop():
                 if existing_hourly:
                     # Interval elapsed while an event is still running — wait until after it ends + full interval
                     next_hourly_attempt = float(existing_hourly.get("end_time", now)) + HOURLY_EVENT_INTERVAL
+                    await persist_schedule()
                 else:
                     # Guarantee end embed before any start (covers races with set_active_event wipe)
                     await _claim_and_announce_expired("hourly")
@@ -19680,12 +21821,14 @@ async def event_manager_loop():
                         print(f"Event manager: started hourly event '{event_info['name']}' for {duration_minutes} minutes")
                     else:
                         print("Event manager: hourly check rolled miss (no event started)")
+                    await persist_schedule()
 
             # ── Step 3: Maybe start a new daily event ──
             if now >= next_daily_attempt and not celestial_active:
                 existing_daily = await asyncio.to_thread(get_active_event_by_type, "daily")
                 if existing_daily:
                     next_daily_attempt = float(existing_daily.get("end_time", now)) + DAILY_EVENT_INTERVAL
+                    await persist_schedule()
                 else:
                     await _claim_and_announce_expired("daily")
                     next_daily_attempt = now + DAILY_EVENT_INTERVAL
@@ -19714,28 +21857,24 @@ async def event_manager_loop():
                         print(f"Event manager: started daily event '{event_info['name']}' for 24 hours")
                     else:
                         print("Event manager: daily check rolled miss (no event started)")
+                    await persist_schedule()
 
             # ── Step 4: Celestial triggers (DST-aware Eastern time) ──
             now_est = _now_est()
-            today_est = (now_est.year, now_est.month, now_est.day)
+            today_est = now_est.date().isoformat()
             now_ts = time.time()
 
             # Solar Eclipse at 4:30 AM Eastern
             if (now_est.hour, now_est.minute) == CELESTIAL_DAY_START_EST and today_est != last_solar_trigger_date:
                 last_solar_trigger_date = today_est
+                await persist_schedule()
                 if not await asyncio.to_thread(get_active_event_by_type, "solar_eclipse") and random.random() < CELESTIAL_TRIGGER_CHANCE:
-                    # End active hourly and daily first (send END before celestial START)
-                    for ev_type in ("hourly", "daily"):
-                        existing = await asyncio.to_thread(get_active_event_by_type, ev_type)
-                        if existing:
-                            await asyncio.to_thread(clear_event, existing.get("event_id", ""))
-                            await _send_end_embed_all_guilds(existing)
-                            eid = existing.get("effects", {}).get("event_id")
-                            if ev_type == "hourly" and eid:
-                                last_hourly_event_id = eid
-                            elif ev_type == "daily" and eid:
-                                last_daily_event_id = eid
-                            print(f"Event manager: ended active {ev_type} event for Solar Eclipse start.")
+                    ended_h, ended_d = await _end_hourly_and_daily_for_celestial("Solar Eclipse start")
+                    if ended_h:
+                        last_hourly_event_id = ended_h
+                    if ended_d:
+                        last_daily_event_id = ended_d
+                    await persist_schedule()
                     end_est = now_est.replace(hour=CELESTIAL_NIGHT_START_EST[0], minute=CELESTIAL_NIGHT_START_EST[1], second=0, microsecond=0)
                     end_ts = end_est.timestamp()
                     event_id = f"solar_eclipse_{int(now_ts)}"
@@ -19758,19 +21897,14 @@ async def event_manager_loop():
             # Blood Moon at 7:30 PM Eastern
             if (now_est.hour, now_est.minute) == CELESTIAL_NIGHT_START_EST and today_est != last_blood_trigger_date:
                 last_blood_trigger_date = today_est
+                await persist_schedule()
                 if not await asyncio.to_thread(get_active_event_by_type, "blood_moon") and random.random() < CELESTIAL_TRIGGER_CHANCE:
-                    # End active hourly and daily first (send END before celestial START)
-                    for ev_type in ("hourly", "daily"):
-                        existing = await asyncio.to_thread(get_active_event_by_type, ev_type)
-                        if existing:
-                            await asyncio.to_thread(clear_event, existing.get("event_id", ""))
-                            await _send_end_embed_all_guilds(existing)
-                            eid = existing.get("effects", {}).get("event_id")
-                            if ev_type == "hourly" and eid:
-                                last_hourly_event_id = eid
-                            elif ev_type == "daily" and eid:
-                                last_daily_event_id = eid
-                            print(f"Event manager: ended active {ev_type} event for Blood Moon start.")
+                    ended_h, ended_d = await _end_hourly_and_daily_for_celestial("Blood Moon start")
+                    if ended_h:
+                        last_hourly_event_id = ended_h
+                    if ended_d:
+                        last_daily_event_id = ended_d
+                    await persist_schedule()
                     next_day = now_est.date() + datetime.timedelta(days=1)
                     end_est = now_est.replace(year=next_day.year, month=next_day.month, day=next_day.day,
                                              hour=CELESTIAL_DAY_START_EST[0], minute=CELESTIAL_DAY_START_EST[1], second=0, microsecond=0)
@@ -19997,7 +22131,16 @@ class MiningView(discord.ui.View):
             if self.blockchain_achievement_unlocked:
                 timeout_embed.add_field(name="🎉 HIDDEN ACHIEVEMENT UNLOCKED!", value="**Blockchain**", inline=False)
 
-            timeout_embed.set_footer(text="Use /sell to sell your crypto")
+            duration = 60 + int(self.gpu_seconds_boost or 0)
+            bp = await asyncio.to_thread(
+                award_battlepass_exp,
+                self.user_id,
+                battlepass_mine_exp(clicks=self.total_mines, duration_seconds=duration),
+            )
+            _apply_battlepass_exp_footer(timeout_embed, bp, extra="Use /sell to sell your crypto")
+            last_ix = getattr(self, "_last_interaction", None)
+            if last_ix is not None:
+                await _notify_battlepass_level_up(last_ix, bp, user_id=self.user_id)
         else:
             timeout_embed.description = "**TIME'S UP!**"
         
@@ -20019,6 +22162,7 @@ class MiningView(discord.ui.View):
             # DEFER IMMEDIATELY - This is critical to prevent interaction timeouts
             if not await safe_defer(interaction, ephemeral=False):
                 return
+            self._last_interaction = interaction
             
             # Check if already timed out - do this early
             if self.timed_out:
@@ -20138,7 +22282,7 @@ async def mine(interaction: discord.Interaction):
             return
 
         # Check if command is being used in the correct channel
-        if not hasattr(interaction.channel, 'name') or interaction.channel.name != "gathercoin":
+        if not hasattr(interaction.channel, 'name') or not _in_allowed_channels(interaction.channel.name, ("gathercoin",)):
             await safe_interaction_response(interaction, interaction.followup.send,
                 f"❌ This command can only be used in the #gathercoin channel, {interaction.user.name}!",
                 ephemeral=True)
@@ -20184,8 +22328,7 @@ async def mine(interaction: discord.Interaction):
         gpus_used = []
         
         for gpu_name in user_gpus:
-            # Find GPU info in shop
-            gpu_info = next((gpu for gpu in GPU_SHOP if gpu["name"] == gpu_name), None)
+            gpu_info = gpu_stats_for(gpu_name)
             if gpu_info:
                 total_percent_boost += gpu_info["percent_increase"]
                 total_seconds_boost += gpu_info["seconds_increase"]
@@ -20231,6 +22374,12 @@ def _sell_initial_sync(member, user_id: int) -> dict:
     return {"holdings": holdings, "prices": prices}
 
 
+def _sell_success(user_id: int, embed: discord.Embed) -> dict:
+    bp = award_battlepass_exp(user_id, BATTLEPASS_EXP_SELL)
+    _apply_battlepass_exp_footer(embed, bp)
+    return {"embed": embed, "battlepass": bp}
+
+
 def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -> dict:
     """
     Run in thread: all DB work + math for /sell.
@@ -20238,7 +22387,7 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
     Returns a dict describing either an error:
         {"error": <message>, "ephemeral": bool}
     or a success:
-        {"embed": discord.Embed}
+        {"embed": discord.Embed, "battlepass": dict}
     so the async /sell handler can send the response without touching the DB.
     """
     initial = _sell_initial_sync(member, user_id)
@@ -20321,11 +22470,15 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
         extra_msi = base_for_buffs * 0.20 if has_shop_item(user_id, "msi_afterburner") else 0.0
         extra_gamer_multi = base_for_buffs * (gamer_multi_mult - 1.0) if gamer_multi_mult > 1.0 else 0.0
+        battle_pass_multi_mult = get_battle_pass_multi_multiplier(user_id)
+        extra_battlepass_multi = base_for_buffs * (battle_pass_multi_mult - 1.0) if battle_pass_multi_mult > 1.0 else 0.0
+        quavers_beat_mult = get_quavers_beat_multiplier(user_id)
+        extra_quavers_beat = base_for_buffs * (quavers_beat_mult - 1.0) if quavers_beat_mult > 1.0 else 0.0
         jump_multi_mult = get_jump_multi_multiplier(user_id)
         jump_debuff_mult = get_jump_debuff_multiplier(user_id)
         extra_jump_multi = base_for_buffs * (jump_multi_mult - 1.0) if jump_multi_mult > 1.0 else 0.0
         extra_jump_debuff = base_for_buffs * (jump_debuff_mult - 1.0) if jump_debuff_mult < 1.0 else 0.0
-        total_sale_value = base_for_buffs + extra_beta + extra_booster + extra_tag + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi + extra_gamer_multi + extra_jump_multi + extra_jump_debuff
+        total_sale_value = base_for_buffs + extra_beta + extra_booster + extra_tag + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi + extra_gamer_multi + extra_battlepass_multi + extra_quavers_beat + extra_jump_multi + extra_jump_debuff
 
         # Add money to balance (with boosts)
         current_balance = get_user_balance(user_id)
@@ -20409,6 +22562,12 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
                 value=f"+{gamer_percent:.2f}% - **+${extra_gamer_multi:.2f}**",
                 inline=False,
             )
+        if extra_battlepass_multi > 0:
+            embed.add_field(
+                name="⚔️ **BATTLE PASS MULTI**",
+                value=f"1.2x - **+${extra_battlepass_multi:.2f}**",
+                inline=False,
+            )
         if extra_jump_multi > 0:
             jump_multi_percent = (jump_multi_mult - 1.0) * 100
             embed.add_field(
@@ -20426,6 +22585,8 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
 
         # Item Boosts (shop / dailyshop items affecting this sale)
         item_boost_sources = []
+        if extra_quavers_beat > 0:
+            item_boost_sources.append(("Quaver's Beat", 1))
         if nether_mult > 1.0:
             ns_count = get_user_shop_inventory(user_id).get("nether_star", 0)
             if ns_count > 0:
@@ -20453,7 +22614,7 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         embed.add_field(name="💰 **TOTAL**", value=f"**${total_sale_value:,.2f}**", inline=True)
         embed.add_field(name="💵 **NEW BALANCE**", value=f"**${new_balance:,.2f}**", inline=True)
 
-        return {"embed": embed}
+        return _sell_success(user_id, embed)
 
     # --- Selling a specific coin ---
     user_holding = holdings.get(coin, 0.0)
@@ -20525,7 +22686,11 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
     extra_edward = base_for_buffs * (edward_mult - 1.0) if edward_mult > 1.0 else 0.0
     extra_eclipse = base_for_buffs * (eclipse_mult - 1.0) if eclipse_mult > 1.0 else 0.0
     extra_msi = base_for_buffs * 0.20 if has_shop_item(user_id, "msi_afterburner") else 0.0
-    sale_value = base_for_buffs + extra_beta + extra_booster + extra_tag + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi
+    battle_pass_multi_mult = get_battle_pass_multi_multiplier(user_id)
+    extra_battlepass_multi = base_for_buffs * (battle_pass_multi_mult - 1.0) if battle_pass_multi_mult > 1.0 else 0.0
+    quavers_beat_mult = get_quavers_beat_multiplier(user_id)
+    extra_quavers_beat = base_for_buffs * (quavers_beat_mult - 1.0) if quavers_beat_mult > 1.0 else 0.0
+    sale_value = base_for_buffs + extra_beta + extra_booster + extra_tag + extra_premium + extra_ns + extra_bs + extra_sc + extra_edward + extra_eclipse + extra_msi + extra_battlepass_multi + extra_quavers_beat
 
     # Update holdings (subtract) in DB and locally
     update_user_crypto_holdings(user_id, coin, -amount)
@@ -20601,6 +22766,12 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
             value=f"+{tag_percent:.2f}% - **+${extra_tag:.2f}**",
             inline=False,
         )
+    if extra_battlepass_multi > 0:
+        embed.add_field(
+            name="⚔️ **BATTLE PASS MULTI**",
+            value=f"1.2x - **+${extra_battlepass_multi:.2f}**",
+            inline=False,
+        )
     premium_tier = get_user_premium_tier(user_id)
     if extra_premium > 0:
         mult = PREMIUM_MONEY_MULTIPLIERS.get(premium_tier, 1.0)
@@ -20612,6 +22783,8 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
         )
     # Item Boosts (shop / dailyshop items affecting this sale)
     item_boost_sources = []
+    if extra_quavers_beat > 0:
+        item_boost_sources.append(("Quaver's Beat", 1))
     if has_shop_item(user_id, "cryptobro_shadow"):
         item_boost_sources.append(("Cryptobro's Shadow", 1))
     if nether_mult > 1.0:
@@ -20641,7 +22814,7 @@ def _sell_critical_path(member, user_id: int, coin: str, amount: float | None) -
     embed.add_field(name="💰 **TOTAL**", value=f"**${sale_value:,.2f}**", inline=True)
     embed.add_field(name="💵 **NEW BALANCE**", value=f"**${new_balance:,.2f}**", inline=True)
 
-    return {"embed": embed}
+    return _sell_success(user_id, embed)
 
 
 @bot.tree.command(name="sell", description="Sell your cryptocurrency holdings")
@@ -20672,6 +22845,7 @@ async def sell(interaction: discord.Interaction, coin: str, amount: float = None
 
         embed: discord.Embed = result["embed"]
         await safe_interaction_response(interaction, interaction.followup.send, embed=embed)
+        await _notify_battlepass_level_up(interaction, result.get("battlepass"))
     except Exception as e:
         print(f"Error in sell command: {e}")
         await safe_interaction_response(
@@ -21100,6 +23274,7 @@ async def russian(
         # deduct bet from host
         new_balance = normalize_money(user_balance - bet)
         update_user_balance(user_id, new_balance)
+        game.players[user_id]["battlepass_eligible"] = battlepass_bet_qualifies(bet=bet, balance=user_balance)
         # increase bullet multiplier
         bullet_multiplier = 1.2 ** bullets
 
@@ -21176,7 +23351,7 @@ async def gathemon(interaction: discord.Interaction, user: discord.Member, plant
         if not await safe_defer(interaction, ephemeral=False):
             return
         channel_name = (interaction.channel.name or "").lower().replace(" ", "-")
-        if channel_name not in VALID_GATHEMON_CHANNELS:
+        if not _in_allowed_channels(channel_name, VALID_GATHEMON_CHANNELS):
             await safe_interaction_response(interaction, interaction.followup.send,
                 "❌ GathéMon can only be played in **#gathemon-1** through **#gathemon-5**!", ephemeral=False)
             return
@@ -21241,7 +23416,7 @@ async def gathership(interaction: discord.Interaction, user: discord.Member, bet
         opponent_name = user.name
         channel_id = interaction.channel.id
         channel_name = (interaction.channel.name or "").lower().replace(" ", "-")
-        if channel_name not in VALID_MAYFLOWER_CHANNELS:
+        if not _in_allowed_channels(channel_name, VALID_MAYFLOWER_CHANNELS):
             await safe_interaction_response(interaction, interaction.followup.send,
                 "❌ Mayflower can only be played in **#mayflower-1** through **#mayflower-5**!", ephemeral=True)
             return
@@ -21377,6 +23552,7 @@ def _jump_critical_path(
             "total_buff_percent": 0.0,
             "repair_until": 0.0,
             "remaining_today": 0,
+            "battlepass": None,
         }
         base.update(overrides)
         return base
@@ -21454,6 +23630,8 @@ def _jump_critical_path(
                 total_buff_percent = JUMP_MULTI_PERCENT * buff_count * 100
                 user_total = get_user_total_jumps(user_id)
 
+            successful = max(0, used - 1) if broke else used
+            bp = award_battlepass_exp(user_id, battlepass_jump_exp(successful))
             return _result(
                 broke=broke,
                 broke_on=broke_on,
@@ -21467,6 +23645,7 @@ def _jump_critical_path(
                 total_buff_percent=total_buff_percent,
                 repair_until=out_repair_until,
                 remaining_today=JUMP_MAX_PER_DAY - (used_today + used),
+                battlepass=bp,
             )
 
 
@@ -21687,7 +23866,7 @@ async def jumpcheck(interaction: discord.Interaction):
         await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
         return
 
-    if not isinstance(interaction.channel, discord.TextChannel) or interaction.channel.name != "spring":
+    if not isinstance(interaction.channel, discord.TextChannel) or not _in_allowed_channels(interaction.channel.name, ("spring",)):
         await interaction.response.send_message(
             "❌ You can only use `/jumpcheck` in the **#spring** channel!",
             ephemeral=True,
@@ -21715,7 +23894,7 @@ async def jump(
         await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
         return
 
-    if not isinstance(interaction.channel, discord.TextChannel) or interaction.channel.name != "spring":
+    if not isinstance(interaction.channel, discord.TextChannel) or not _in_allowed_channels(interaction.channel.name, ("spring",)):
         await interaction.response.send_message("❌ You can only use `/jump` in the **#spring** channel!", ephemeral=True)
         return
 
@@ -21817,7 +23996,10 @@ async def jump(
             repair_until=result["repair_until"],
             user_total=user_total,
         )
+        _apply_battlepass_exp_footer(
+            break_embed, result.get("battlepass"), extra=f"JUMP TOTAL: {user_total}")
         await _jump_publish_result(interaction, break_embed)
+        await _notify_battlepass_level_up(interaction, result.get("battlepass"))
         await _post_to_rares_channel(
             guild,
             f"🪵 {interaction.user.mention} **BROKE** the **BRANCH**! "
@@ -21837,7 +24019,10 @@ async def jump(
             jumps_left=jumps_left,
             user_total=user_total,
         )
+        _apply_battlepass_exp_footer(
+            success_embed, result.get("battlepass"), extra=f"JUMP TOTAL: {user_total}")
         await _jump_publish_result(interaction, success_embed)
+        await _notify_battlepass_level_up(interaction, result.get("battlepass"))
         if jumping_up:
             await send_achievement_notification(interaction, "jumping", jumping_up)
 
