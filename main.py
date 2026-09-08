@@ -4627,7 +4627,6 @@ GATHERABLE_ITEMS = [
     {"category": "Vegetable","name": "Mushroom 🍄", "base_value": 9},
     {"category": "Vegetable","name": "Peanuts 🥜", "base_value": 4},
     {"category": "Vegetable","name": "Beans 🫘", "base_value": 3},
-    {"category": "Vegetable","name": "Pea Pod 🫛", "base_value": 2},
     {"category": "Vegetable","name": "Eggplant 🍆", "base_value": 6},
     {"category": "Vegetable","name": "Sweet Potato 🍠", "base_value": 13.13},
 ]
@@ -4708,7 +4707,6 @@ ITEM_DESCRIPTIONS = {
     "Mushroom 🍄": "Fungi among us, earthy and savory!",
     "Peanuts 🥜": "Crunchy legumes, great for snacking!",
     "Beans 🫘": "Protein-packed pods of goodness!",
-    "Pea Pod 🫛": "Sweet little green pearls in a pod!",
     "Eggplant 🍆": "Purple and versatile, a kitchen staple!",
     "Sweet Potato 🍠": "Naturally sweet and nutritious root vegetable!",
      "Golden Apple": "Half-a-heartedly comes in clutch! Commonly referred to as a Gapple.",
