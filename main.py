@@ -168,6 +168,9 @@ from database import (
     wipe_guild_all,
     start_new_season,
     preview_new_season,
+    create_database_backup,
+    restore_database_backup,
+    get_database_backup_info,
     # Giveaway persistence
     upsert_giveaway_record,
     mark_giveaway_resolved,
@@ -18280,6 +18283,288 @@ async def newseason(interaction: discord.Interaction, password: str, confirm: st
         print(f"Admin {interaction.user.name} started a new season ({wiped_count} users)")
     except Exception as e:
         print(f"Error in newseason command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+def _format_backup_timestamp(ts: float) -> str:
+    dt = datetime.datetime.fromtimestamp(float(ts), tz=datetime.timezone.utc)
+    return f"{discord.utils.format_dt(dt, 'F')} ({discord.utils.format_dt(dt, 'R')})"
+
+
+def _backup_count_lines(counts: dict) -> str:
+    labels = (
+        ("users", "Users / global docs"),
+        ("giveaways", "Giveaways"),
+        ("events", "Events"),
+        ("jump_state", "Jump state"),
+    )
+    return "\n".join(f"• {label}: **{int((counts or {}).get(key, 0))}**" for key, label in labels)
+
+
+async def _drop_live_activity_after_restore(guild: discord.Guild) -> dict:
+    """Drop in-memory games without refunds so restored balances stay intact."""
+    counts = {
+        "roulette": 0,
+        "pve": 0,
+        "bosses": 0,
+        "gathemon": 0,
+        "mayflower": 0,
+        "giveaways_rescheduled": 0,
+    }
+
+    for game_id in list(active_roulette_games.keys()):
+        game = active_roulette_games.get(game_id)
+        channel = bot.get_channel(game.channel_id) if game and getattr(game, "channel_id", None) else None
+        if channel is None and game:
+            for ch_id, tracked in list(active_roulette_channel_games.items()):
+                if tracked == game_id:
+                    channel = bot.get_channel(ch_id)
+                    break
+        _force_cleanup_roulette_game(game_id, refund=False)
+        if channel:
+            try:
+                embed = discord.Embed(
+                    title="🛑 RUSSIAN ROULETTE ENDED 🛑",
+                    description="This game ended because an admin **restored** the database.",
+                    color=discord.Color.red(),
+                )
+                await channel.send(embed=embed)
+            except Exception as e:
+                print(f"Error posting roulette restore cancel: {e}")
+        counts["roulette"] += 1
+
+    pve_counts = await _clear_stuck_pve_state(
+        reason="This fight was cancelled because an admin **restored** the database.",
+        guild=guild,
+    )
+    counts["pve"] = pve_counts["wild_animals"]
+    counts["bosses"] = pve_counts["bosses"]
+
+    for battle in list(active_gathemon_battles.values()):
+        ch = bot.get_channel(battle.channel_id)
+        if ch:
+            try:
+                await ch.send("⚔️ GathéMon battle cancelled — the database was restored.")
+            except Exception:
+                pass
+        counts["gathemon"] += 1
+    active_gathemon_battles.clear()
+    active_gathemon_challenges.clear()
+    user_active_gathemon.clear()
+
+    for gid in list(active_gathership_games.keys()):
+        game = active_gathership_games.get(gid)
+        ch = bot.get_channel(game.channel_id) if game else None
+        if game:
+            for uid in (game.host_id, game.opponent_id):
+                user_active_gathership.pop(uid, None)
+        for ch_id, tracked in list(channel_gathership.items()):
+            if tracked == gid:
+                channel_gathership.pop(ch_id, None)
+        active_gathership_games.pop(gid, None)
+        if ch:
+            try:
+                await ch.send("❌ Mayflower game cancelled because the database was restored.")
+            except Exception:
+                pass
+        counts["mayflower"] += 1
+
+    _jump_cooldowns.clear()
+    _gamer_multi_expires.clear()
+
+    previously_tracked = set(_active_giveaways)
+    _active_giveaways.clear()
+    try:
+        pending = await asyncio.to_thread(get_pending_giveaways)
+        for g in pending:
+            msg_id = g.get("message_id")
+            if msg_id is None:
+                continue
+            _active_giveaways[msg_id] = {
+                "channel_id": g.get("channel_id"),
+                "guild_id": g.get("guild_id"),
+                "end_at_ts": g.get("end_at_ts", time.time()),
+                "prize_display": g.get("prize_display", ""),
+                "prize_data": g.get("prize_data", {}),
+                "num_winners": g.get("num_winners", 1),
+            }
+            if msg_id not in previously_tracked:
+                asyncio.create_task(
+                    _giveaway_end_task(
+                        msg_id,
+                        g.get("channel_id"),
+                        g.get("guild_id"),
+                        g.get("end_at_ts", time.time()),
+                        g.get("prize_display", ""),
+                        g.get("prize_data", {}),
+                        g.get("num_winners", 1),
+                    )
+                )
+                counts["giveaways_rescheduled"] += 1
+    except Exception as e:
+        print(f"Error resyncing giveaways after restore: {e}")
+
+    crypto_price_history.clear()
+    try:
+        prices = await asyncio.to_thread(get_crypto_prices)
+        for symbol, price in prices.items():
+            crypto_price_history[symbol] = [float(price)] * 6
+    except Exception as e:
+        print(f"Error reloading crypto history after restore: {e}")
+        initialize_crypto_history()
+
+    return counts
+
+
+async def _admin_backup_gate(interaction: discord.Interaction, password: str) -> bool:
+    if password != "Fullmetal":
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ Incorrect admin password.", ephemeral=True)
+        return False
+    if not interaction.user.guild_permissions.administrator:
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: You need administrator permissions to use this command.", ephemeral=True)
+        return False
+    if not hasattr(interaction.channel, "name") or interaction.channel.name != "hidden":
+        await safe_interaction_response(
+            interaction, interaction.followup.send,
+            f"❌ This command can only be used in the #hidden channel, {interaction.user.name}!",
+            ephemeral=True,
+        )
+        return False
+    return True
+
+
+@bot.tree.command(name="backup", description="[ADMIN] Overwrite the database backup slot with the current live state")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(password="Admin password")
+async def backup(interaction: discord.Interaction, password: str):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if not await _admin_backup_gate(interaction, password):
+            return
+
+        meta = await asyncio.to_thread(
+            create_database_backup,
+            created_by=interaction.user.id,
+            created_by_name=interaction.user.name,
+        )
+        embed = discord.Embed(
+            title="💾 Database Backup Saved",
+            description="The single backup slot now holds everything at this moment. `/restore` will roll live data back to this snapshot.",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="Saved", value=_format_backup_timestamp(meta["created_at"]), inline=False)
+        embed.add_field(name="Captured", value=_backup_count_lines(meta.get("counts")), inline=False)
+        if meta.get("replaced_previous_at"):
+            embed.add_field(
+                name="Replaced previous snapshot",
+                value=_format_backup_timestamp(meta["replaced_previous_at"]),
+                inline=False,
+            )
+        else:
+            embed.add_field(name="Replaced previous snapshot", value="None — this is the first backup.", inline=False)
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+        print(f"Admin {interaction.user.name} saved a database backup")
+    except Exception as e:
+        print(f"Error in backup command: {e}")
+        await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
+
+
+@bot.tree.command(name="restore", description="[ADMIN] Replace live database data with the current backup slot")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    password="Admin password",
+    confirm="Type RESTORE to run, or leave blank to see the current snapshot",
+)
+async def restore(interaction: discord.Interaction, password: str, confirm: str = ""):
+    try:
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if not await _admin_backup_gate(interaction, password):
+            return
+
+        guild = interaction.guild
+        if not guild:
+            await safe_interaction_response(interaction, interaction.followup.send, "❌ **Error**: Could not get guild information.", ephemeral=True)
+            return
+
+        info = await asyncio.to_thread(get_database_backup_info)
+        if not info:
+            await safe_interaction_response(
+                interaction, interaction.followup.send,
+                "❌ There is no backup yet. Run `/backup` first.",
+                ephemeral=True,
+            )
+            return
+
+        if confirm != "RESTORE":
+            created_by = info.get("created_by_name") or info.get("created_by") or "unknown"
+            embed = discord.Embed(
+                title="🔭 Restore Preview",
+                description="No data was changed. Type `RESTORE` in confirm to replace the live database with this snapshot. This cannot be undone.",
+                color=discord.Color.gold(),
+            )
+            embed.add_field(name="Snapshot", value=_format_backup_timestamp(info["created_at"]), inline=False)
+            embed.add_field(name="Created by", value=str(created_by), inline=True)
+            embed.add_field(name="Captured", value=_backup_count_lines(info.get("counts")), inline=False)
+            await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+            return
+
+        await safe_interaction_response(
+            interaction, interaction.followup.send,
+            "♻️ Restoring the database from the backup slot…",
+            ephemeral=True,
+        )
+
+        restored = await asyncio.to_thread(restore_database_backup)
+        live_counts = await _drop_live_activity_after_restore(guild)
+
+        try:
+            await asyncio.gather(
+                update_leaderboard_message(guild, "plants"),
+                update_leaderboard_message(guild, "money"),
+                update_leaderboard_message(guild, "ranks"),
+                update_marketboard_message(guild, tick_prices=False),
+                update_coinbase_message(guild),
+            )
+        except Exception as e:
+            print(f"Error refreshing boards after restore: {e}")
+
+        cancelled_bits = []
+        if live_counts["roulette"]:
+            cancelled_bits.append(f"roulette ({live_counts['roulette']})")
+        if live_counts["pve"]:
+            cancelled_bits.append(f"wild animals ({live_counts['pve']})")
+        if live_counts["bosses"]:
+            cancelled_bits.append(f"bosses ({live_counts['bosses']})")
+        if live_counts["gathemon"]:
+            cancelled_bits.append(f"GathéMon ({live_counts['gathemon']})")
+        if live_counts["mayflower"]:
+            cancelled_bits.append(f"Mayflower ({live_counts['mayflower']})")
+
+        embed = discord.Embed(
+            title="♻️ Database Restored",
+            description="Live data was replaced with the backup slot. In-memory games were cancelled without refunds so restored balances stay intact.",
+            color=discord.Color.orange(),
+        )
+        embed.add_field(name="Restored snapshot", value=_format_backup_timestamp(restored["created_at"]), inline=False)
+        embed.add_field(name="Restored", value=_backup_count_lines(restored.get("restored_counts") or restored.get("counts")), inline=False)
+        embed.add_field(
+            name="Live activity cancelled",
+            value=", ".join(cancelled_bits) if cancelled_bits else "Nothing was running.",
+            inline=False,
+        )
+        embed.add_field(
+            name="Boards refreshed",
+            value="Plants / money / ranks leaderboards, #grow-jones, and #fernbase.",
+            inline=False,
+        )
+        await safe_interaction_response(interaction, interaction.followup.send, embed=embed, ephemeral=True)
+        print(f"Admin {interaction.user.name} restored the database backup")
+    except ValueError as e:
+        await safe_interaction_response(interaction, interaction.followup.send, f"❌ {e}", ephemeral=True)
+    except Exception as e:
+        print(f"Error in restore command: {e}")
         await safe_interaction_response(interaction, interaction.followup.send, "❌ An error occurred. Please try again.", ephemeral=True)
 
 _SET_TYPE_ALIASES = {

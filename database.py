@@ -1,3 +1,4 @@
+import copy
 import os
 import random
 import time
@@ -14,6 +15,9 @@ _users_collection: Optional[Collection] = None
 # Lazily-initialized collections that share the same Mongo client
 _giveaways_collection: Optional[Collection] = None
 _jump_state_collection: Optional[Collection] = None
+_backups_collection: Optional[Collection] = None
+_backup_data_collection: Optional[Collection] = None
+_BACKUP_SLOT_ID = "current"
 
 
 def _get_environment() -> str:
@@ -88,6 +92,38 @@ def _get_giveaways_collection() -> Collection:
     db_name = os.getenv("MONGODB_DB_NAME", "slashgather")
     _giveaways_collection = _client[db_name]["giveaways"]
     return _giveaways_collection
+
+
+def _get_backups_collection() -> Collection:
+    """Return the MongoDB collection used for the single backup-slot metadata."""
+    global _client, _backups_collection
+    if _client is None:
+        _get_users_collection()
+    if _backups_collection is not None:
+        return _backups_collection
+    db_name = os.getenv("MONGODB_DB_NAME", "slashgather")
+    _backups_collection = _client[db_name]["backups"]
+    return _backups_collection
+
+
+def _get_backup_data_collection() -> Collection:
+    """Return the MongoDB collection used to store copied live documents."""
+    global _client, _backup_data_collection
+    if _client is None:
+        _get_users_collection()
+    if _backup_data_collection is not None:
+        return _backup_data_collection
+    db_name = os.getenv("MONGODB_DB_NAME", "slashgather")
+    _backup_data_collection = _client[db_name]["backup_data"]
+    return _backup_data_collection
+
+
+def _iter_live_backup_collections():
+    """Yield (name, collection) for every collection included in a snapshot."""
+    yield "users", _get_users_collection()
+    yield "giveaways", _get_giveaways_collection()
+    yield "events", _get_events_collection()
+    yield "jump_state", _get_jump_state_collection()
 
 
 
@@ -981,6 +1017,9 @@ def init_database() -> None:
     # Ensure events indexes exist
     events = _get_events_collection()
     events.create_index([("event_type", 1), ("end_time", 1)])
+
+    backup_data = _get_backup_data_collection()
+    backup_data.create_index("col")
 
     # Trigger a ping to verify connectivity
     users.database.client.admin.command("ping")
@@ -4583,3 +4622,67 @@ def claim_jackpot_pool() -> float:
         {"$set": {"amount": 0.0, "dodge_count": 0}},
     )
     return doc.get("amount", 0.0) if doc else 0.0
+
+
+def get_database_backup_info() -> Optional[Dict]:
+    """Return the current backup-slot metadata, or None if no backup exists."""
+    return _get_backups_collection().find_one({"_id": _BACKUP_SLOT_ID})
+
+
+def create_database_backup(*, created_by: int, created_by_name: str = "") -> Dict:
+    """Overwrite the single backup slot with a snapshot of all live collections."""
+    backups = _get_backups_collection()
+    backup_data = _get_backup_data_collection()
+    previous = backups.find_one({"_id": _BACKUP_SLOT_ID})
+
+    backup_data.delete_many({})
+    counts: Dict[str, int] = {}
+    rows = []
+    for name, collection in _iter_live_backup_collections():
+        docs = list(collection.find())
+        counts[name] = len(docs)
+        for doc in docs:
+            rows.append({
+                "_id": f"{name}:{doc.get('_id')}",
+                "col": name,
+                "doc": copy.deepcopy(doc),
+            })
+    if rows:
+        backup_data.insert_many(rows)
+
+    meta = {
+        "_id": _BACKUP_SLOT_ID,
+        "created_at": time.time(),
+        "created_by": int(created_by),
+        "created_by_name": str(created_by_name or ""),
+        "counts": counts,
+        "replaced_previous_at": previous.get("created_at") if previous else None,
+    }
+    backups.replace_one({"_id": _BACKUP_SLOT_ID}, meta, upsert=True)
+    return meta
+
+
+def restore_database_backup() -> Dict:
+    """Replace live collections from the current backup slot.
+
+    Does not modify the backup slot, so the same snapshot can be restored again.
+    """
+    backups = _get_backups_collection()
+    backup_data = _get_backup_data_collection()
+    meta = backups.find_one({"_id": _BACKUP_SLOT_ID})
+    if not meta:
+        raise ValueError("No backup exists")
+
+    restored_counts: Dict[str, int] = {}
+    for name, collection in _iter_live_backup_collections():
+        snapshots = list(backup_data.find({"col": name}))
+        docs = [copy.deepcopy(row["doc"]) for row in snapshots if row.get("doc") is not None]
+        collection.delete_many({})
+        if docs:
+            collection.insert_many(docs)
+        restored_counts[name] = len(docs)
+
+    _clear_events_cache()
+    result = dict(meta)
+    result["restored_counts"] = restored_counts
+    return result
