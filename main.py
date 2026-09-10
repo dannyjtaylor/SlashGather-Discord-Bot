@@ -132,6 +132,16 @@ from database import (
     get_event_manager_state,
     save_event_manager_state,
     compute_event_manager_schedule,
+    combat_pve_id,
+    combat_boss_id,
+    combat_attackers_to_rows,
+    combat_attackers_from_rows,
+    save_active_combat,
+    list_active_combats,
+    delete_active_combat,
+    delete_active_combats_for_channels,
+    delete_active_combats_for_guilds,
+    clear_all_active_combats,
     get_user_gather_data,
     perform_gather_update,
     perform_batch_gather_update,
@@ -2170,6 +2180,7 @@ active_boss_events: dict[int, list] = {}  # guild_id -> list of {channel_id, bos
 pending_boss_spawn_guild_ids: set[int] = set()  # guilds with a 1-min delayed boss spawn scheduled (prevents double intro/spawn)
 # Ender Dragon: guild_id -> set of channel_ids that still have an active (not broken) Obsidian Tower
 ender_dragon_towers: dict[int, set[int]] = {}
+ender_dragon_tower_views: dict[int, dict[int, object]] = {}
 # Ender Dragon: guild_id -> {user_id: total_tower_hits} for plant rewards when dragon is defeated (towers are NOT counted as enemies defeated)
 ender_dragon_tower_attackers: dict[int, dict[int, int]] = {}
 # Ender Dragon regen task per guild (so we can cancel when dragon is defeated)
@@ -8099,6 +8110,200 @@ async def mongodb_keepalive_task():
 
 
 
+async def _fetch_combat_channel_message(channel_id, message_id):
+    channel = bot.get_channel(int(channel_id)) if channel_id else None
+    if channel is None and channel_id:
+        try:
+            channel = await bot.fetch_channel(int(channel_id))
+        except Exception:
+            return None, None
+    if channel is None or not message_id:
+        return channel, None
+    try:
+        return channel, await channel.fetch_message(int(message_id))
+    except Exception:
+        return channel, None
+
+
+async def _restore_wild_combat(doc: dict) -> bool:
+    channel, msg = await _fetch_combat_channel_message(doc.get("channel_id"), doc.get("message_id"))
+    if channel is None or msg is None:
+        await _delete_combat_now(doc.get("_id") or combat_pve_id(doc.get("channel_id") or 0))
+        return False
+    animal = doc.get("animal") or {}
+    max_hp = int(doc.get("max_hp") or doc.get("hp") or 1)
+    hp = int(doc.get("hp") or max_hp)
+    area_mult = float(doc.get("area_multiplier") or 1.0)
+    view = WildAnimalView(animal=animal, hp=max_hp, channel_id=channel.id, area_multiplier=area_mult)
+    view.hp = hp
+    view.max_hp = max_hp
+    view.attackers = combat_attackers_from_rows(doc.get("attackers"))
+    view.message = msg
+    active_pve_events[channel.id] = {
+        "animal": animal,
+        "hp": hp,
+        "start_time": float(doc.get("start_time") or time.time()),
+        "message_id": msg.id,
+    }
+    try:
+        await msg.edit(view=view)
+    except Exception as e:
+        print(f"Wild combat restore edit failed: {e}")
+        active_pve_events.pop(channel.id, None)
+        await _delete_combat_now(doc.get("_id") or combat_pve_id(channel.id))
+        return False
+    return True
+
+
+async def _restore_swarm_combat(doc: dict) -> bool:
+    channel_id = int(doc.get("channel_id") or 0)
+    swarm_type = doc.get("swarm_type") or "bullet_ant"
+    units = list(doc.get("units") or [])
+    remaining_key = "bees_remaining" if swarm_type == "bee" else "ants_remaining"
+    swarm_state = {
+        "intro_message_id": doc.get("intro_message_id"),
+        remaining_key: int(doc.get(remaining_key) or sum(1 for u in units if not u.get("defeated"))),
+        "attackers": combat_attackers_from_rows(doc.get("attackers")),
+        "defeat_msg": doc.get("defeat_msg") or "",
+        "area_multiplier": float(doc.get("area_multiplier") or 1.0),
+        "channel_id": channel_id,
+        "total_hp": doc.get("total_hp"),
+        "units": units,
+    }
+    active_pve_events[channel_id] = {
+        "swarm": True,
+        "swarm_type": swarm_type,
+        "swarm_state": swarm_state,
+        "start_time": float(doc.get("start_time") or time.time()),
+    }
+    rebound = 0
+    for unit in units:
+        if unit.get("defeated"):
+            continue
+        _ch, msg = await _fetch_combat_channel_message(channel_id, unit.get("message_id"))
+        if msg is None:
+            continue
+        hp = int(unit.get("hp") or 1)
+        max_hp = int(unit.get("max_hp") or hp)
+        unit_id = int(unit.get("unit_id") or 0)
+        if swarm_type == "bee":
+            view = BeeView(bee_hp=max_hp, channel_id=channel_id, swarm_state=swarm_state, unit_id=unit_id)
+        else:
+            view = BulletAntView(ant_hp=max_hp, channel_id=channel_id, swarm_state=swarm_state, unit_id=unit_id)
+        view.hp = hp
+        view.max_hp = max_hp
+        view.message = msg
+        try:
+            await msg.edit(view=view)
+            rebound += 1
+        except Exception as e:
+            print(f"Swarm unit restore edit failed: {e}")
+    if rebound <= 0:
+        active_pve_events.pop(channel_id, None)
+        await _delete_combat_now(doc.get("_id") or combat_pve_id(channel_id))
+        return False
+    return True
+
+
+async def _restore_boss_combat(doc: dict) -> bool:
+    guild_id = int(doc.get("guild_id") or 0)
+    area_mult = float(doc.get("area_multiplier") or 1.0)
+    entries = []
+    rebound = 0
+    for boss_doc in doc.get("bosses") or []:
+        channel, msg = await _fetch_combat_channel_message(boss_doc.get("channel_id"), boss_doc.get("message_id"))
+        boss = boss_doc.get("boss") or {}
+        hp = int(boss_doc.get("hp") or 1)
+        max_hp = int(boss_doc.get("max_hp") or hp)
+        entry = {
+            "channel_id": boss_doc.get("channel_id"),
+            "boss": boss,
+            "hp": hp,
+            "max_hp": max_hp,
+            "message_id": boss_doc.get("message_id"),
+        }
+        view_type = boss_doc.get("view_type") or "boss"
+        if channel is None or msg is None:
+            continue
+        if view_type == "sans":
+            view = SansView(boss=boss, hp=max_hp, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_mult, boss_state_ref=entry)
+            sans = boss_doc.get("sans") or {}
+            view.total_attempts = int(sans.get("total_attempts") or 0)
+            view.attack_attempts = combat_attackers_from_rows(sans.get("attack_attempts"))
+            view.mercy_users = set(int(uid) for uid in (sans.get("mercy_users") or []))
+            view.hp = hp
+        elif view_type == "ender":
+            view = EnderDragonView(boss=boss, entry=entry, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_mult)
+            view.attackers = combat_attackers_from_rows(boss_doc.get("attackers"))
+        else:
+            view = BossView(boss=boss, hp=max_hp, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_mult, boss_state_ref=entry)
+            view.hp = hp
+            view.attackers = combat_attackers_from_rows(boss_doc.get("attackers"))
+        view.message = msg
+        try:
+            await msg.edit(view=view)
+            rebound += 1
+            entries.append(entry)
+        except Exception as e:
+            print(f"Boss combat restore edit failed: {e}")
+    if rebound <= 0:
+        await _delete_combat_now(doc.get("_id") or combat_boss_id(guild_id))
+        return False
+    active_boss_events[guild_id] = entries
+    tower_attackers = combat_attackers_from_rows(doc.get("tower_attackers"))
+    if tower_attackers:
+        ender_dragon_tower_attackers[guild_id] = tower_attackers
+    tower_channels = set()
+    for tower in doc.get("towers") or []:
+        channel, msg = await _fetch_combat_channel_message(tower.get("channel_id"), tower.get("message_id"))
+        if channel is None or msg is None:
+            continue
+        tower_view = ObsidianTowerView(channel_id=channel.id, guild_id=guild_id)
+        tower_view.tower_hp = int(tower.get("hp") or ENDER_DRAGON_TOWER_HP)
+        tower_view.defeated = bool(tower.get("defeated"))
+        tower_view.message = msg
+        if tower_view.tower_hp <= 0 and not tower_view.defeated and len(tower_view.children) > 1:
+            tower_view.children[1].disabled = False
+            tower_view.children[1].style = discord.ButtonStyle.primary
+        try:
+            await msg.edit(view=tower_view)
+            if not tower_view.defeated:
+                tower_channels.add(channel.id)
+        except Exception as e:
+            print(f"Tower restore edit failed: {e}")
+    if tower_channels:
+        ender_dragon_towers[guild_id] = tower_channels
+    if any((e.get("boss") or {}).get("id") == ENDER_DRAGON_ID for e in entries):
+        task = asyncio.create_task(_ender_dragon_regen_loop(guild_id))
+        ender_dragon_regen_tasks[guild_id] = task
+    return True
+
+
+async def _restore_persisted_combats() -> int:
+    docs = await asyncio.to_thread(list_active_combats)
+    restored = 0
+    for doc in docs:
+        try:
+            kind = doc.get("kind")
+            ok = False
+            if kind == "wild":
+                ok = await _restore_wild_combat(doc)
+            elif kind == "swarm":
+                ok = await _restore_swarm_combat(doc)
+            elif kind == "boss":
+                ok = await _restore_boss_combat(doc)
+            else:
+                if doc.get("_id"):
+                    await _delete_combat_now(doc["_id"])
+            if ok:
+                restored += 1
+        except Exception as e:
+            print(f"Combat restore failed for {doc.get('_id')}: {e}")
+            if doc.get("_id"):
+                await _delete_combat_now(doc["_id"])
+    return restored
+
+
 # on ready
 @bot.event
 async def on_ready():
@@ -8190,6 +8395,15 @@ async def on_ready():
             print("Event recovery at startup completed")
         except Exception as e:
             print(f"Error during event recovery at startup: {e}")
+            import traceback
+            traceback.print_exc()
+
+        try:
+            restored_combats = await _restore_persisted_combats()
+            if restored_combats:
+                print(f"Restored {restored_combats} active combat(s) from the database.")
+        except Exception as e:
+            print(f"Error restoring combats at startup: {e}")
             import traceback
             traceback.print_exc()
 
@@ -8885,6 +9099,137 @@ class StealView(discord.ui.View):
 
 # Debounce for PvE embed updates (hits apply instantly; message edits batched). Pass message into task so edit always has correct reference.
 PVE_EMBED_UPDATE_DEBOUNCE_SEC = 0.05
+PVE_COMBAT_PERSIST_SEC = 2.0
+
+
+def _pve_suffix_custom_ids(view: discord.ui.View, suffix: str) -> None:
+    """Make button custom_ids unique per fight so concurrent views do not collide."""
+    for child in view.children:
+        cid = getattr(child, "custom_id", None)
+        if cid and f":{suffix}" not in str(cid):
+            child.custom_id = f"{cid}:{suffix}"
+
+
+async def _persist_combat_now(doc: dict) -> None:
+    try:
+        await asyncio.to_thread(save_active_combat, doc)
+    except Exception as e:
+        print(f"Combat persist failed: {e}")
+
+
+async def _delete_combat_now(doc_id: str) -> None:
+    try:
+        await asyncio.to_thread(delete_active_combat, doc_id)
+    except Exception as e:
+        print(f"Combat delete failed: {e}")
+
+
+async def _maybe_persist_combat(view, snapshot: dict) -> None:
+    now = time.time()
+    if now - getattr(view, "_last_persist", 0) < PVE_COMBAT_PERSIST_SEC:
+        return
+    if snapshot.get("kind") == "swarm":
+        if not snapshot.get("units"):
+            return
+    elif snapshot.get("kind") == "boss":
+        if not snapshot.get("bosses"):
+            return
+    elif not snapshot.get("message_id"):
+        return
+    view._last_persist = now
+    await _persist_combat_now(snapshot)
+
+
+def _update_swarm_unit(swarm_state: dict, unit_id: int, *, hp: int, defeated: bool = False, message_id: int | None = None) -> None:
+    units = swarm_state.setdefault("units", [])
+    for unit in units:
+        if int(unit.get("unit_id", -1)) == int(unit_id):
+            unit["hp"] = hp
+            unit["defeated"] = defeated
+            if message_id is not None:
+                unit["message_id"] = message_id
+            return
+    units.append({
+        "unit_id": int(unit_id),
+        "hp": hp,
+        "max_hp": hp,
+        "defeated": defeated,
+        "message_id": message_id,
+    })
+
+
+def _swarm_combat_snapshot(channel_id: int, swarm_state: dict, swarm_type: str) -> dict:
+    event = active_pve_events.get(channel_id, {})
+    return {
+        "_id": combat_pve_id(channel_id),
+        "kind": "swarm",
+        "swarm_type": swarm_type,
+        "channel_id": channel_id,
+        "intro_message_id": swarm_state.get("intro_message_id"),
+        "area_multiplier": swarm_state.get("area_multiplier", event.get("area_multiplier", 1.0)),
+        "start_time": event.get("start_time", time.time()),
+        "ants_remaining": swarm_state.get("ants_remaining"),
+        "bees_remaining": swarm_state.get("bees_remaining"),
+        "total_hp": swarm_state.get("total_hp"),
+        "defeat_msg": swarm_state.get("defeat_msg"),
+        "attackers": combat_attackers_to_rows(swarm_state.get("attackers")),
+        "units": list(swarm_state.get("units") or []),
+    }
+
+
+def _boss_combat_snapshot_from_views(guild_id: int) -> dict:
+    bosses = []
+    area_multiplier = 1.0
+    for entry in active_boss_events.get(guild_id, []) or []:
+        view = entry.get("view")
+        hp = entry.get("hp")
+        attackers = {}
+        view_type = "boss"
+        sans = None
+        if view is not None:
+            area_multiplier = getattr(view, "area_multiplier", area_multiplier)
+            attackers = getattr(view, "attackers", {}) or {}
+            name = view.__class__.__name__
+            if name == "SansView":
+                view_type = "sans"
+                hp = getattr(view, "hp", hp)
+                sans = {
+                    "total_attempts": getattr(view, "total_attempts", 0),
+                    "attack_attempts": combat_attackers_to_rows(getattr(view, "attack_attempts", {})),
+                    "mercy_users": [int(uid) for uid in getattr(view, "mercy_users", set())],
+                }
+            elif name == "EnderDragonView":
+                view_type = "ender"
+                hp = (getattr(view, "entry", None) or entry).get("hp", hp)
+            else:
+                hp = getattr(view, "hp", hp)
+        bosses.append({
+            "channel_id": entry.get("channel_id"),
+            "message_id": entry.get("message_id") or getattr(getattr(view, "message", None), "id", None),
+            "boss": entry.get("boss"),
+            "hp": hp,
+            "max_hp": entry.get("max_hp"),
+            "attackers": combat_attackers_to_rows(attackers),
+            "view_type": view_type,
+            "sans": sans,
+        })
+    towers = []
+    for ch_id, tower_view in (ender_dragon_tower_views.get(guild_id) or {}).items():
+        towers.append({
+            "channel_id": ch_id,
+            "message_id": getattr(getattr(tower_view, "message", None), "id", None),
+            "hp": getattr(tower_view, "tower_hp", ENDER_DRAGON_TOWER_HP),
+            "defeated": bool(getattr(tower_view, "defeated", False)),
+        })
+    return {
+        "_id": combat_boss_id(guild_id),
+        "kind": "boss",
+        "guild_id": guild_id,
+        "area_multiplier": area_multiplier,
+        "bosses": bosses,
+        "towers": towers,
+        "tower_attackers": combat_attackers_to_rows(ender_dragon_tower_attackers.get(guild_id)),
+    }
 
 class WildAnimalView(discord.ui.View):
     """Interactive button view for the PvE wild animal event.
@@ -8908,6 +9253,24 @@ class WildAnimalView(discord.ui.View):
         self._last_hit_name: str | None = None
         self._update_task: asyncio.Task | None = None
         self._damage_cache: dict[int, int] = {}  # user_id -> cached damage (weapons don't change mid-fight)
+        self._last_persist = 0.0
+        _pve_suffix_custom_ids(self, str(channel_id))
+
+    def _combat_snapshot(self) -> dict:
+        msg = getattr(self, "message", None)
+        event = active_pve_events.get(self.channel_id, {})
+        return {
+            "_id": combat_pve_id(self.channel_id),
+            "kind": "wild",
+            "channel_id": self.channel_id,
+            "message_id": getattr(msg, "id", None),
+            "animal": self.animal,
+            "hp": self.hp,
+            "max_hp": self.max_hp,
+            "attackers": combat_attackers_to_rows(self.attackers),
+            "area_multiplier": self.area_multiplier,
+            "start_time": event.get("start_time", time.time()),
+        }
 
     def _hp_bar(self) -> str:
         filled = max(0, round((self.hp / self.max_hp) * 20))
@@ -8952,10 +9315,11 @@ class WildAnimalView(discord.ui.View):
         if not target:
             return
         try:
-            await target.edit(embed=embed, view=self)
+            await target.edit(embed=embed)
         except Exception:
             # If this fails, we just drop the visual update; HP state is already correct.
             pass
+        await _maybe_persist_combat(self, self._combat_snapshot())
 
     def _get_damage(self, user_id: int) -> int:
         """Get cached damage for a user (avoids repeated DB calls mid-fight)."""
@@ -8965,8 +9329,7 @@ class WildAnimalView(discord.ui.View):
 
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await safe_defer(interaction, ephemeral=False):
-            return
+        await safe_defer(interaction, ephemeral=False)
         if getattr(interaction, "message", None):
             self.message = interaction.message
         if self.channel_id not in active_pve_events:
@@ -9021,6 +9384,7 @@ class WildAnimalView(discord.ui.View):
 
                 # Unlock the channel IMMEDIATELY so commands aren't stuck
                 active_pve_events.pop(self.channel_id, None)
+                asyncio.create_task(_delete_combat_now(combat_pve_id(self.channel_id)))
 
                 asyncio.create_task(
                     _pve_distribute_rewards(interaction, self.animal, dict(self.attackers), self.channel_id, self.area_multiplier, max_hp=self.max_hp))
@@ -9047,18 +9411,21 @@ BULLET_ANT_SWARM_REWARD_ANIMAL = {
 class BulletAntView(discord.ui.View):
     """Single ant in a Bullet Ant Swarm. On defeat, decrements swarm ants_remaining; when 0, edits intro to defeat and distributes rewards. Progress embed updates are debounced; no message to user."""
 
-    def __init__(self, ant_hp: int, channel_id: int, swarm_state: dict):
+    def __init__(self, ant_hp: int, channel_id: int, swarm_state: dict, unit_id: int = 0):
         super().__init__(timeout=None)
         self.max_hp = ant_hp
         self.hp = ant_hp
         self.channel_id = channel_id
         self.swarm_state = swarm_state
+        self.unit_id = unit_id
         self.defeated = False
         self._lock = asyncio.Lock()
         self._dirty = False
         self._last_hit_name: str | None = None
         self._update_task: asyncio.Task | None = None
         self._damage_cache: dict[int, int] = {}
+        self._last_persist = 0.0
+        _pve_suffix_custom_ids(self, f"{channel_id}:{unit_id}")
 
     def _hp_bar(self) -> str:
         filled = max(0, round((self.hp / self.max_hp) * 20))
@@ -9087,9 +9454,10 @@ class BulletAntView(discord.ui.View):
         if not target:
             return
         try:
-            await target.edit(embed=embed, view=self)
+            await target.edit(embed=embed)
         except Exception:
             pass
+        await _maybe_persist_combat(self, _swarm_combat_snapshot(self.channel_id, self.swarm_state, "bullet_ant"))
 
     def _get_damage(self, user_id: int) -> int:
         if user_id not in self._damage_cache:
@@ -9098,8 +9466,7 @@ class BulletAntView(discord.ui.View):
 
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_ant_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await safe_defer(interaction, ephemeral=False):
-            return
+        await safe_defer(interaction, ephemeral=False)
         if getattr(interaction, "message", None):
             self.message = interaction.message
         if self.channel_id not in active_pve_events:
@@ -9112,6 +9479,11 @@ class BulletAntView(discord.ui.View):
 
             self.hp -= damage
             self.swarm_state["attackers"][interaction.user.id] = self.swarm_state["attackers"].get(interaction.user.id, 0) + damage
+            msg = getattr(self, "message", None) or getattr(interaction, "message", None)
+            _update_swarm_unit(
+                self.swarm_state, self.unit_id,
+                hp=max(0, self.hp), defeated=self.hp <= 0,
+                message_id=getattr(msg, "id", None))
 
             if self.hp <= 0:
                 self.defeated = True
@@ -9140,6 +9512,7 @@ class BulletAntView(discord.ui.View):
                     channel = interaction.guild.get_channel(self.channel_id)
                     intro_id = self.swarm_state.get("intro_message_id")
                     active_pve_events.pop(self.channel_id, None)
+                    asyncio.create_task(_delete_combat_now(combat_pve_id(self.channel_id)))
                     if channel and intro_id:
                         try:
                             intro_msg = await channel.fetch_message(intro_id)
@@ -9248,18 +9621,21 @@ class LarvaView(discord.ui.View):
 class BeeView(discord.ui.View):
     """Single bee in a Bee Swarm. On defeat, decrements bees_remaining; when 0, edits intro, distributes rewards, then 40%% chance to spawn Larva (Break/Ignore → Queen Bee or ignore). Progress embed updates are debounced."""
 
-    def __init__(self, bee_hp: int, channel_id: int, swarm_state: dict):
+    def __init__(self, bee_hp: int, channel_id: int, swarm_state: dict, unit_id: int = 0):
         super().__init__(timeout=None)
         self.max_hp = bee_hp
         self.hp = bee_hp
         self.channel_id = channel_id
         self.swarm_state = swarm_state
+        self.unit_id = unit_id
         self.defeated = False
         self._lock = asyncio.Lock()
         self._dirty = False
         self._last_hit_name: str | None = None
         self._update_task: asyncio.Task | None = None
         self._damage_cache: dict[int, int] = {}
+        self._last_persist = 0.0
+        _pve_suffix_custom_ids(self, f"{channel_id}:{unit_id}")
 
     def _hp_bar(self) -> str:
         filled = max(0, round((self.hp / self.max_hp) * 20))
@@ -9287,9 +9663,10 @@ class BeeView(discord.ui.View):
         if not target:
             return
         try:
-            await target.edit(embed=embed, view=self)
+            await target.edit(embed=embed)
         except Exception:
             pass
+        await _maybe_persist_combat(self, _swarm_combat_snapshot(self.channel_id, self.swarm_state, "bee"))
 
     def _get_damage(self, user_id: int) -> int:
         if user_id not in self._damage_cache:
@@ -9298,8 +9675,7 @@ class BeeView(discord.ui.View):
 
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_bee_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await safe_defer(interaction, ephemeral=False):
-            return
+        await safe_defer(interaction, ephemeral=False)
         if getattr(interaction, "message", None):
             self.message = interaction.message
         if self.channel_id not in active_pve_events:
@@ -9312,6 +9688,11 @@ class BeeView(discord.ui.View):
 
             self.hp -= damage
             self.swarm_state["attackers"][interaction.user.id] = self.swarm_state["attackers"].get(interaction.user.id, 0) + damage
+            msg = getattr(self, "message", None) or getattr(interaction, "message", None)
+            _update_swarm_unit(
+                self.swarm_state, self.unit_id,
+                hp=max(0, self.hp), defeated=self.hp <= 0,
+                message_id=getattr(msg, "id", None))
 
             if self.hp <= 0:
                 self.defeated = True
@@ -9338,6 +9719,7 @@ class BeeView(discord.ui.View):
                     channel = interaction.guild.get_channel(self.channel_id)
                     intro_id = self.swarm_state.get("intro_message_id")
                     active_pve_events.pop(self.channel_id, None)
+                    asyncio.create_task(_delete_combat_now(combat_pve_id(self.channel_id)))
                     guild_id = interaction.guild.id if interaction.guild else 0
                     area_mult = self.swarm_state.get("area_multiplier", 1.0)
                     if channel and intro_id:
@@ -9508,6 +9890,12 @@ class BossView(discord.ui.View):
         self._last_hit_name: str | None = None
         self._update_task: asyncio.Task | None = None
         self._damage_cache: dict[int, int] = {}
+        self._last_persist = 0.0
+        boss_state_ref["view"] = self
+        _pve_suffix_custom_ids(self, f"{guild_id}:{self.boss.get('id', 'boss')}")
+
+    def _combat_snapshot(self) -> dict:
+        return _boss_combat_snapshot_from_views(self.guild_id)
 
     def _hp_bar(self) -> str:
         filled = max(0, round((self.hp / self.max_hp) * 20))
@@ -9542,14 +9930,14 @@ class BossView(discord.ui.View):
         if not target:
             return
         try:
-            await target.edit(embed=embed, view=self)
+            await target.edit(embed=embed)
         except Exception:
             pass
+        await _maybe_persist_combat(self, self._combat_snapshot())
 
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_boss_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await safe_defer(interaction, ephemeral=False):
-            return
+        await safe_defer(interaction, ephemeral=False)
         if getattr(interaction, "message", None):
             self.message = interaction.message
         if self.guild_id not in active_boss_events:
@@ -9618,6 +10006,7 @@ class BossView(discord.ui.View):
 
                 # When all bosses in this event are defeated: broadcast to all channels and distribute rewards
                 if self.guild_id not in active_boss_events:
+                    asyncio.create_task(_delete_combat_now(combat_boss_id(self.guild_id)))
                     pending = _pve_boss_defeated_pending.pop(self.guild_id, [])
                     guild = interaction.guild
                     channels = _get_guild_gather_channels(guild)
@@ -9694,6 +10083,9 @@ class SansView(discord.ui.View):
         self._damage_cache: dict[int, int] = {}
         self._last_action_name: str | None = None
         self._update_task: asyncio.Task | None = None
+        self._last_persist = 0.0
+        boss_state_ref["view"] = self
+        _pve_suffix_custom_ids(self, str(guild_id))
         # Sans is defeated after 50 total attack attempts
         self.DEFEAT_THRESHOLD = 50
 
@@ -9727,9 +10119,10 @@ class SansView(discord.ui.View):
         if not target:
             return
         try:
-            await target.edit(embed=embed, view=self)
+            await target.edit(embed=embed)
         except Exception:
             pass
+        await _maybe_persist_combat(self, _boss_combat_snapshot_from_views(self.guild_id))
 
     def _get_damage(self, user_id: int) -> int:
         if user_id not in self._damage_cache:
@@ -9739,8 +10132,7 @@ class SansView(discord.ui.View):
     @discord.ui.button(label="FIGHT", emoji=SOUL_EMOJI_PARTIAL, style=discord.ButtonStyle.danger, custom_id="sans_fight", row=0)
     async def fight(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            if not await safe_defer(interaction, ephemeral=False):
-                return
+            await safe_defer(interaction, ephemeral=False)
             if getattr(interaction, "message", None):
                 self.message = interaction.message
             damage = await asyncio.to_thread(self._get_damage, interaction.user.id)
@@ -9803,6 +10195,7 @@ class SansView(discord.ui.View):
 
                     # Broadcast defeat to all channels
                     if self.guild_id not in active_boss_events:
+                        asyncio.create_task(_delete_combat_now(combat_boss_id(self.guild_id)))
                         pending = _pve_boss_defeated_pending.pop(self.guild_id, [])
                         guild = interaction.guild
                         channels = _get_guild_gather_channels(guild)
@@ -9957,7 +10350,10 @@ async def trigger_boss_event(channel: discord.TextChannel, boss: dict, area_mult
         view = BossView(boss=boss, hp=hp, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_multiplier, boss_state_ref=entry)
     
     embed.set_footer(text="All gathering channels are BLOCKED until this boss is defeated!")
-    await channel.send(embed=embed, view=view)
+    msg = await channel.send(embed=embed, view=view)
+    view.message = msg
+    entry["message_id"] = msg.id
+    await _persist_combat_now(_boss_combat_snapshot_from_views(guild_id))
 
 
 async def trigger_twins_boss_event(channel: discord.TextChannel, area_multiplier: float):
@@ -9982,7 +10378,10 @@ async def trigger_twins_boss_event(channel: discord.TextChannel, area_multiplier
         embed.add_field(name="⚔️ How to Fight", value="Press **Attack**! Both Twins must fall to free the channels!", inline=False)
         embed.set_footer(text="All gathering channels are BLOCKED until BOTH Twins are defeated!")
         view = BossView(boss=boss, hp=hp, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_multiplier, boss_state_ref=entry)
-        await channel.send(embed=embed, view=view)
+        msg = await channel.send(embed=embed, view=view)
+        view.message = msg
+        entry["message_id"] = msg.id
+    await _persist_combat_now(_boss_combat_snapshot_from_views(guild_id))
 
 
 # --- Ender Dragon: dragon in trigger channel, Obsidian Towers (End Crystals) in other gather channels ---
@@ -10007,6 +10406,9 @@ class ObsidianTowerView(discord.ui.View):
         self._last_hit_name: str | None = None
         self._update_task: asyncio.Task | None = None
         self._damage_cache: dict[int, int] = {}
+        self._last_persist = 0.0
+        ender_dragon_tower_views.setdefault(guild_id, {})[channel_id] = self
+        _pve_suffix_custom_ids(self, str(channel_id))
 
     def _get_damage(self, user_id: int) -> int:
         if user_id not in self._damage_cache:
@@ -10044,14 +10446,14 @@ class ObsidianTowerView(discord.ui.View):
         if not target:
             return
         try:
-            await target.edit(embed=self._embed(last_hit), view=self)
+            await target.edit(embed=self._embed(last_hit))
         except Exception:
             pass
+        await _maybe_persist_combat(self, _boss_combat_snapshot_from_views(self.guild_id))
 
     @discord.ui.button(label="⚔️ Attack", style=discord.ButtonStyle.danger, custom_id="obsidian_tower_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await safe_defer(interaction, ephemeral=False):
-            return
+        await safe_defer(interaction, ephemeral=False)
         if getattr(interaction, "message", None):
             self.message = interaction.message
         damage = await asyncio.to_thread(self._get_damage, interaction.user.id)
@@ -10114,6 +10516,9 @@ class EnderDragonView(discord.ui.View):
         self._last_hit_name: str | None = None
         self._update_task: asyncio.Task | None = None
         self._damage_cache: dict[int, int] = {}
+        self._last_persist = 0.0
+        entry["view"] = self
+        _pve_suffix_custom_ids(self, str(guild_id))
 
     def _get_damage(self, user_id: int) -> int:
         if user_id not in self._damage_cache:
@@ -10152,14 +10557,14 @@ class EnderDragonView(discord.ui.View):
         if not target:
             return
         try:
-            await target.edit(embed=self._embed(last_hit), view=self)
+            await target.edit(embed=self._embed(last_hit))
         except Exception:
             pass
+        await _maybe_persist_combat(self, _boss_combat_snapshot_from_views(self.guild_id))
 
     @discord.ui.button(label="⚔️", style=discord.ButtonStyle.danger, custom_id="pve_ender_dragon_attack")
     async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await safe_defer(interaction, ephemeral=False):
-            return
+        await safe_defer(interaction, ephemeral=False)
         if getattr(interaction, "message", None):
             self.message = interaction.message
         if self.guild_id not in active_boss_events:
@@ -10206,10 +10611,12 @@ class EnderDragonView(discord.ui.View):
                     else:
                         active_boss_events[self.guild_id] = boss_list
                 ender_dragon_towers.pop(self.guild_id, None)
+                ender_dragon_tower_views.pop(self.guild_id, None)
                 task = ender_dragon_regen_tasks.pop(self.guild_id, None)
                 if task and not task.done():
                     task.cancel()
                 plantera_bulb_eligible_guilds[self.guild_id] = time.time()
+                asyncio.create_task(_delete_combat_now(combat_boss_id(self.guild_id)))
 
                 if self.guild_id not in active_boss_events:
                     pending = _pve_boss_defeated_pending.pop(self.guild_id, [])
@@ -10332,6 +10739,7 @@ async def trigger_ender_dragon_event(channel: discord.TextChannel, area_multipli
     embed.set_footer(text="All gathering channels are BLOCKED until the Ender Dragon is defeated!")
     view = EnderDragonView(boss=boss, entry=entry, channel_id=channel.id, guild_id=guild_id, area_multiplier=area_multiplier)
     msg = await channel.send(embed=embed, view=view)
+    view.message = msg
     entry["message_id"] = msg.id
 
     for ch in other_channels:
@@ -10339,11 +10747,14 @@ async def trigger_ender_dragon_event(channel: discord.TextChannel, area_multipli
             if ch.permissions_for(guild.me).send_messages:
                 tower_view = ObsidianTowerView(channel_id=ch.id, guild_id=guild_id)
                 tower_embed = tower_view._embed()
-                await ch.send(embed=tower_embed, view=tower_view)
+                tower_msg = await ch.send(embed=tower_embed, view=tower_view)
+                tower_view.message = tower_msg
         except Exception as e:
             print(f"Obsidian Tower spawn failed in {ch.name}: {e}")
             ender_dragon_towers[guild_id].discard(ch.id)
+            (ender_dragon_tower_views.get(guild_id) or {}).pop(ch.id, None)
 
+    await _persist_combat_now(_boss_combat_snapshot_from_views(guild_id))
     task = asyncio.create_task(_ender_dragon_regen_loop(guild_id))
     ender_dragon_regen_tasks[guild_id] = task
 
@@ -10817,17 +11228,22 @@ async def trigger_bullet_ant_swarm_event(channel: discord.TextChannel, area_mult
         intro_msg = await channel.send(embed=intro_embed)
         swarm_state["intro_message_id"] = intro_msg.id
 
-        for ant_hp in ant_hps:
+        for unit_id, ant_hp in enumerate(ant_hps):
             ant_embed = discord.Embed(
                 title=f"🚨 {BULLET_ANT_ANIMAL['emoji']} Bullet Ant 🚨",
                 description=BULLET_ANT_ANIMAL["description"],
                 color=BULLET_ANT_ANIMAL["color"])
             filled = max(0, round((ant_hp / ant_hp) * 20))
             ant_embed.add_field(name="HP", value=f"**{ant_hp}** / **{ant_hp}**\n{'🟥' * 20}", inline=False)
-            view = BulletAntView(ant_hp=ant_hp, channel_id=channel.id, swarm_state=swarm_state)
-            await channel.send(embed=ant_embed, view=view)
+            view = BulletAntView(ant_hp=ant_hp, channel_id=channel.id, swarm_state=swarm_state, unit_id=unit_id)
+            msg = await channel.send(embed=ant_embed, view=view)
+            view.message = msg
+            _update_swarm_unit(swarm_state, unit_id, hp=ant_hp, message_id=msg.id)
+            swarm_state["units"][-1]["max_hp"] = ant_hp
+        await _persist_combat_now(_swarm_combat_snapshot(channel.id, swarm_state, "bullet_ant"))
     except Exception:
         active_pve_events.pop(channel.id, None)
+        await _delete_combat_now(combat_pve_id(channel.id))
         raise
 
 
@@ -10857,16 +11273,21 @@ async def trigger_bee_swarm_event(channel: discord.TextChannel, area_multiplier:
         intro_msg = await channel.send(embed=intro_embed)
         swarm_state["intro_message_id"] = intro_msg.id
 
-        for bee_hp in bee_hps:
+        for unit_id, bee_hp in enumerate(bee_hps):
             bee_embed = discord.Embed(
                 title=f"🚨 {BEE_ANIMAL['emoji']} Bee 🚨",
                 description=BEE_ANIMAL["description"],
                 color=BEE_ANIMAL["color"])
             bee_embed.add_field(name="HP", value=f"**{bee_hp}** / **{bee_hp}**\n{'🟥' * 20}", inline=False)
-            view = BeeView(bee_hp=bee_hp, channel_id=channel.id, swarm_state=swarm_state)
-            await channel.send(embed=bee_embed, view=view)
+            view = BeeView(bee_hp=bee_hp, channel_id=channel.id, swarm_state=swarm_state, unit_id=unit_id)
+            msg = await channel.send(embed=bee_embed, view=view)
+            view.message = msg
+            _update_swarm_unit(swarm_state, unit_id, hp=bee_hp, message_id=msg.id)
+            swarm_state["units"][-1]["max_hp"] = bee_hp
+        await _persist_combat_now(_swarm_combat_snapshot(channel.id, swarm_state, "bee"))
     except Exception:
         active_pve_events.pop(channel.id, None)
+        await _delete_combat_now(combat_pve_id(channel.id))
         raise
 
 
@@ -10918,9 +11339,13 @@ async def trigger_pve_event(channel: discord.TextChannel, area_multiplier: float
         embed.set_footer(text="All gathering commands are BLOCKED until the wild animal is defeated")
 
         view = WildAnimalView(animal=animal, hp=hp, channel_id=channel.id, area_multiplier=area_multiplier)
-        await channel.send(embed=embed, view=view)
+        msg = await channel.send(embed=embed, view=view)
+        view.message = msg
+        active_pve_events[channel.id]["message_id"] = msg.id
+        await _persist_combat_now(view._combat_snapshot())
     except Exception:
         active_pve_events.pop(channel.id, None)
+        await _delete_combat_now(combat_pve_id(channel.id))
         raise
 
 
@@ -17102,6 +17527,14 @@ async def _clear_stuck_pve_state(*, reason: str, announce: bool = True, guild: d
     if dry_run:
         return counts
 
+    await asyncio.to_thread(delete_active_combats_for_channels, pve_channels)
+    await asyncio.to_thread(delete_active_combats_for_guilds, boss_guild_ids)
+    if guild_id is None:
+        await asyncio.to_thread(clear_all_active_combats)
+        ender_dragon_tower_views.clear()
+    else:
+        ender_dragon_tower_views.pop(guild_id, None)
+
     for cid in pve_channels:
         active_pve_events.pop(cid, None)
     for gid in boss_guild_ids:
@@ -17321,7 +17754,10 @@ async def spawn_animal(interaction: discord.Interaction, password: str, animal: 
                 embed.add_field(name="⚔️ How to Fight", value="Press **Attack**! Each hit deals **1 damage** and earns **1 plant**!", inline=False)
                 embed.set_footer(text="All gathering commands are BLOCKED until the wild animal is defeated")
                 view = WildAnimalView(animal=chosen, hp=hp, channel_id=target.id, area_multiplier=area_mult)
-                await target.send(embed=embed, view=view)
+                msg = await target.send(embed=embed, view=view)
+                view.message = msg
+                active_pve_events[target.id]["message_id"] = msg.id
+                await _persist_combat_now(view._combat_snapshot())
                 await safe_interaction_response(interaction, interaction.followup.send,
                     f"✅ Spawned **{chosen['name']}** in {target.mention}!", ephemeral=True)
                 return
@@ -17351,7 +17787,10 @@ async def spawn_animal(interaction: discord.Interaction, password: str, animal: 
         embed.add_field(name="⚔️ How to Fight", value="Press **Attack**! Each hit deals **1 damage** and earns **1 plant**!", inline=False)
         embed.set_footer(text="All gathering commands are BLOCKED until the wild animal is defeated")
         view = WildAnimalView(animal=chosen, hp=hp, channel_id=target.id, area_multiplier=area_mult)
-        await target.send(embed=embed, view=view)
+        msg = await target.send(embed=embed, view=view)
+        view.message = msg
+        active_pve_events[target.id]["message_id"] = msg.id
+        await _persist_combat_now(view._combat_snapshot())
         await safe_interaction_response(interaction, interaction.followup.send,
             f"✅ Spawned **{chosen['name']}** in {target.mention}!", ephemeral=True)
     except Exception as e:

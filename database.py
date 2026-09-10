@@ -2501,6 +2501,84 @@ def save_event_manager_state(
     )
 
 
+def combat_pve_id(channel_id: int) -> str:
+    """Document id for a channel-scoped wild animal or swarm fight."""
+    return f"combat:pve:{int(channel_id)}"
+
+
+def combat_boss_id(guild_id: int) -> str:
+    """Document id for a guild-scoped boss fight."""
+    return f"combat:boss:{int(guild_id)}"
+
+
+def combat_attackers_to_rows(attackers: Optional[Dict] = None) -> list:
+    """Store attackers as a list so MongoDB cannot stringify user-id keys."""
+    rows = []
+    for user_id, damage in (attackers or {}).items():
+        rows.append({"user_id": int(user_id), "damage": int(damage)})
+    return rows
+
+
+def combat_attackers_from_rows(rows) -> Dict[int, int]:
+    """Restore attackers dict from persisted rows (ids may be stored as strings)."""
+    out: Dict[int, int] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            out[int(row["user_id"])] = int(row.get("damage") or 0)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def save_active_combat(doc: Dict) -> None:
+    """Upsert a live PvE/boss fight snapshot so attack buttons can be restored after restart."""
+    events = _get_events_collection()
+    payload = dict(doc)
+    if not payload.get("_id"):
+        raise ValueError("combat snapshot requires _id")
+    payload["combat"] = True
+    events.replace_one({"_id": payload["_id"]}, payload, upsert=True)
+
+
+def get_active_combat(doc_id: str) -> Optional[Dict]:
+    """Return one persisted combat snapshot, or None."""
+    events = _get_events_collection()
+    doc = events.find_one({"_id": doc_id})
+    return dict(doc) if doc else None
+
+
+def list_active_combats() -> list:
+    """Return every persisted combat snapshot."""
+    events = _get_events_collection()
+    return [dict(doc) for doc in events.find({"combat": True})]
+
+
+def delete_active_combat(doc_id: str) -> None:
+    """Remove one persisted combat snapshot."""
+    _get_events_collection().delete_one({"_id": doc_id})
+
+
+def delete_active_combats_for_channels(channel_ids) -> None:
+    """Remove wild-animal/swarm snapshots for the given channel ids."""
+    events = _get_events_collection()
+    for channel_id in channel_ids or []:
+        events.delete_one({"_id": combat_pve_id(channel_id)})
+
+
+def delete_active_combats_for_guilds(guild_ids) -> None:
+    """Remove boss snapshots for the given guild ids."""
+    events = _get_events_collection()
+    for guild_id in guild_ids or []:
+        events.delete_one({"_id": combat_boss_id(guild_id)})
+
+
+def clear_all_active_combats() -> None:
+    """Remove every persisted combat snapshot."""
+    _get_events_collection().delete_many({"combat": True})
+
+
 def compute_event_manager_schedule(
     now: float,
     hourly_interval: float,
