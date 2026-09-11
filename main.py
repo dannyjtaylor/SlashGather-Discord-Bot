@@ -20634,13 +20634,14 @@ async def update_leaderboard_message(guild: discord.Guild, leaderboard_type: str
     # Get all guild member IDs
     guild_member_ids = {member.id for member in guild.members}
     
-    # Get leaderboard data (plants uses Planters Gathered Total = gather_stats.total_items, same as /stats)
+    # Get leaderboard data off the event loop (full collection scans).
+    # plants uses Planters Gathered Total = gather_stats.total_items, same as /stats
     if leaderboard_type == "plants":
-        all_data = get_all_users_total_items()
+        all_data = await asyncio.to_thread(get_all_users_total_items)
     elif leaderboard_type == "money":
-        all_data = get_all_users_balance()
+        all_data = await asyncio.to_thread(get_all_users_balance)
     else:  # ranks
-        all_data = get_all_users_ranks()
+        all_data = await asyncio.to_thread(get_all_users_ranks)
     
     # Filter to only include users in the guild
     leaderboard_data = [(user_id, value) for user_id, value in all_data if user_id in guild_member_ids]
@@ -21126,8 +21127,8 @@ async def update_marketboard_message(guild: discord.Guild, tick_prices: bool = T
         # Get shares outstanding from API data or fallback to max_shares
         shares_outstanding = stock_info.get("shares_outstanding") or ticker.get("max_shares", 0)
         
-        # Calculate available shares from database
-        available_shares = calculate_available_shares(guild.id, symbol)
+        # Calculate available shares from database (full collection scan; keep off the event loop)
+        available_shares = await asyncio.to_thread(calculate_available_shares, guild.id, symbol)
         # Update stock_data with calculated available_shares
         stock_info["available_shares"] = available_shares
         
@@ -21737,6 +21738,7 @@ async def gardener_background_task():
             all_user_ids = set(uid for uid, _ in users_with_gardeners) | premium_user_ids_set
             
             for user_id in all_user_ids:
+                await asyncio.sleep(0)
                 # Sync premium tier from Discord roles when member is available (so benefits use role, not stale DB)
                 if user_id in premium_user_ids_set:
                     for guild in bot.guilds:
@@ -22012,6 +22014,7 @@ async def gpu_background_task():
             users_with_gpus = await asyncio.to_thread(get_all_users_with_gpus)
             
             for user_id, gpus in users_with_gpus:
+                await asyncio.sleep(0)
                 # Process each GPU
                 for gpu_name in gpus:
                     gpu_info = gpu_stats_for(gpu_name)
@@ -23770,7 +23773,7 @@ async def stocks(interaction: discord.Interaction, action: str, ticker: str, amo
         
         if action == "buy":
             # Check if enough shares are available in the market
-            available_shares = calculate_available_shares(guild_id, ticker)
+            available_shares = await asyncio.to_thread(calculate_available_shares, guild_id, ticker)
             if available_shares == 0:
                 await safe_interaction_response(interaction, interaction.followup.send,
                     f"❌ No shares available! All shares of {ticker_info['emoji']} **{ticker_info['name']}** ({ticker}) have been purchased.",

@@ -1422,7 +1422,7 @@ def get_all_users_ranks() -> list[tuple[int, str]]:
         if not isinstance(user_id, int):
             continue
         bloom_count = int(doc.get("bloom_count", 0))
-        rank = get_bloom_rank(user_id)
+        rank = bloom_rank_from_count(bloom_count)
         results.append((user_id, rank))
     # Sort by rank descending (highest rank first)
     results.sort(key=_get_rank_sort_value, reverse=True)
@@ -2150,6 +2150,48 @@ def get_user_ids_with_shop_item(item_id: str) -> list:
     return [doc["_id"] for doc in cursor]
 
 
+def bloom_rank_from_count(bloom_count: int) -> str:
+    """Bloom Rank from a bloom_count already loaded (no extra DB read)."""
+    bloom_count = int(bloom_count)
+    if bloom_count >= 18:
+        return "REDWOOD"
+    if bloom_count == 17:
+        return "FIR III"
+    if bloom_count == 16:
+        return "FIR II"
+    if bloom_count == 15:
+        return "FIR I"
+    if bloom_count == 14:
+        return "OAK III"
+    if bloom_count == 13:
+        return "OAK II"
+    if bloom_count == 12:
+        return "OAK I"
+    if bloom_count == 11:
+        return "MAPLE III"
+    if bloom_count == 10:
+        return "MAPLE II"
+    if bloom_count == 9:
+        return "MAPLE I"
+    if bloom_count == 8:
+        return "BIRCH III"
+    if bloom_count == 7:
+        return "BIRCH II"
+    if bloom_count == 6:
+        return "BIRCH I"
+    if bloom_count == 5:
+        return "CEDAR III"
+    if bloom_count == 4:
+        return "CEDAR II"
+    if bloom_count == 3:
+        return "CEDAR I"
+    if bloom_count == 2:
+        return "PINE III"
+    if bloom_count == 1:
+        return "PINE II"
+    return "PINE I"
+
+
 def get_bloom_rank(user_id: int) -> str:
     """Get user's current Bloom Rank based on bloom_count."""
     users = _get_users_collection()
@@ -2157,48 +2199,7 @@ def get_bloom_rank(user_id: int) -> str:
     doc = users.find_one({"_id": int(user_id)}, {"bloom_count": 1})
     if not doc:
         return "PINE I"
-    
-    bloom_count = int(doc.get("bloom_count", 0))
-    
-    # Bloom Rank progression
-    if bloom_count >= 18:
-        return "REDWOOD"
-    elif bloom_count == 17:
-        return "FIR III"
-    elif bloom_count == 16:
-        return "FIR II"
-    elif bloom_count == 15:
-        return "FIR I"
-    elif bloom_count == 14:
-        return "OAK III"
-    elif bloom_count == 13:
-        return "OAK II"
-    elif bloom_count == 12:
-        return "OAK I"
-    elif bloom_count == 11:
-        return "MAPLE III"
-    elif bloom_count == 10:
-        return "MAPLE II"
-    elif bloom_count == 9:
-        return "MAPLE I"
-    elif bloom_count == 8:
-        return "BIRCH III"
-    elif bloom_count == 7:
-        return "BIRCH II"
-    elif bloom_count == 6:
-        return "BIRCH I"
-    elif bloom_count == 5:
-        return "CEDAR III"
-    elif bloom_count == 4:
-        return "CEDAR II"
-    elif bloom_count == 3:
-        return "CEDAR I"
-    elif bloom_count == 2:
-        return "PINE III"
-    elif bloom_count == 1:
-        return "PINE II"
-    else:  # bloom_count == 0
-        return "PINE I"
+    return bloom_rank_from_count(int(doc.get("bloom_count", 0)))
 
 
 def get_user_bloom_count(user_id: int) -> int:
